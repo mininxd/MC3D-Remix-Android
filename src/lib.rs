@@ -1,0 +1,91 @@
+pub mod config;
+pub mod iso;
+pub mod ui;
+
+use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
+use config::AppConfig;
+use iso::IsoManager;
+use log::{error, info};
+use std::path::PathBuf;
+use std::time::Duration;
+use ui::LauncherUi;
+
+#[no_mangle]
+fn android_main(app: AndroidApp) {
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Info)
+            .with_tag("MC3DR_Rust"),
+    );
+
+    info!("============================================================");
+    info!(" Midnight Club 3: DUB Edition Remix - Pure Rust Launcher");
+    info!(" Built with android-activity, 100% Rust, zero Java / C");
+    info!("============================================================");
+
+    let internal_dir = app
+        .internal_data_path()
+        .unwrap_or_else(|| PathBuf::from("/data/data/com.mininxd.mc3dr/files"));
+    let config_path = internal_dir.join("mc3dr_config.json");
+
+    let config = AppConfig::load(&config_path);
+    info!(
+        "Loaded config: render_scale={:?}, widescreen={}, fps_limit={}",
+        config.render_scale, config.widescreen_16_9, config.fps_limit
+    );
+
+    let iso_mgr = IsoManager::new();
+    info!("Discovered {} Xbox game ISO(s)", iso_mgr.items.len());
+    for (i, item) in iso_mgr.items.iter().enumerate() {
+        info!("  [{}] {} (valid_xdvdfs={})", i, item.filename, item.is_valid_xdvdfs);
+    }
+
+    let mut ui = LauncherUi::new();
+
+    let mut running = true;
+    while running {
+        app.poll_events(Some(Duration::from_millis(16)), |event| {
+            if let PollEvent::Main(main_event) = event {
+                match main_event {
+                    MainEvent::InitWindow { .. } => {
+                        info!("Native Window initialized. Setting up display viewport.");
+                    }
+                    MainEvent::WindowResized { .. } => {
+                        info!("Native Window resized.");
+                    }
+                    MainEvent::RedrawNeeded { .. } => {
+                        // Render frame
+                    }
+                    MainEvent::TerminateWindow { .. } => {
+                        info!("Native Window terminated.");
+                    }
+                    MainEvent::Pause => {
+                        info!("App paused. Saving config.");
+                        if let Err(e) = config.save(&config_path) {
+                            error!("Failed to save config: {}", e);
+                        }
+                    }
+                    MainEvent::Resume { .. } => {
+                        info!("App resumed.");
+                    }
+                    MainEvent::Destroy => {
+                        info!("App exiting.");
+                        let _ = config.save(&config_path);
+                        running = false;
+                    }
+                    MainEvent::InputAvailable => {
+                        if let Ok(mut iter) = app.input_events_iter() {
+                            while iter.next(|_event| {
+                                ui.handle_launch(&iso_mgr, &config);
+                                InputStatus::Handled
+                            }) {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+
+    info!("Clean shutdown complete.");
+}

@@ -1,35 +1,33 @@
-# Gradle files
-.gradle/
-build/
-.kotlin/
+# Rust build artifacts
+target/
+Cargo.lock
 
-# Local configuration file (sdk path, etc)
-local.properties
-
-# Log/OS Files
-*.log
-
-# Android Studio generated files and folders
-captures/
-.externalNativeBuild/
-.cxx/
-*.aab
-*.apk
-output-metadata.json
-
-# IntelliJ
-*.iml
+# IDE & Editor files
 .idea/
-misc.xml
-deploymentTargetDropDown.xml
-render.experimental.xml
+*.iml
+.vscode/
 
-# Keystore files
-*.jks
-*.keystore
+# Logs & temp files
+*.log
+*.tmp
 
-# Google Services (e.g. APIs or Firebase)
-google-services.json
-
-# Android Profiling
-*.hprof
+# ==============================================================================
+# Game files & Copyrighted Assets (STRICT: NEVER commit game data to repository)
+# ==============================================================================
+*.iso
+*.xbe
+*.bin
+*.xiso
+*.dat
+*.dat_*
+*.xbck
+*.xsb
+*.xwb
+*.swf
+*.pss
+*.xmv
+game_files/
+extracted/
+discs/
+assets_game/
+roms/
