@@ -28,8 +28,8 @@ name = "android.permission.MANAGE_EXTERNAL_STORAGE"
 
 [package.metadata.android.signing.release]
 path = "release.keystore"
-keystore_pass = "android"
-key_pass = "android"
+keystore_password = "android"
+key_password = "android"
 
 [dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
