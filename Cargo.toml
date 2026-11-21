@@ -9,15 +9,19 @@ authors = ["mininxd"]
 crate-type = ["cdylib"]
 
 [package.metadata.android]
-package = "com.mininxd.mc3dr"
+package = "io.github.mininxd.midnightclub3remixrecomp"
 apk_name = "MC3D-Remix"
-label = "MC3: DUB Edition Remix"
+label = "MC3D Remix"
+resources = "res"
+icon = "@mipmap/ic_launcher"
 build_targets = ["aarch64-linux-android"]
 min_sdk_version = 24
 target_sdk_version = 30
 
 [package.metadata.android.application]
 has_code = false
+label = "MC3D Remix"
+icon = "@mipmap/ic_launcher"
 theme = "@android:style/Theme.NoTitleBar.Fullscreen"
 
 [[package.metadata.android.uses_permission]]
@@ -36,3 +40,4 @@ log = "0.4"
 android_logger = "0.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+libc = "0.2"

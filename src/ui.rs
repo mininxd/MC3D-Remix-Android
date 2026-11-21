@@ -1,4 +1,5 @@
 use crate::config::{AppConfig, RenderScale, TextureFilter};
+use crate::executor::GameExecutor;
 use crate::gles::GlesRenderer;
 use crate::iso::IsoManager;
 
@@ -42,6 +43,7 @@ impl LauncherUi {
         gles: &mut GlesRenderer,
         config: &mut AppConfig,
         iso_mgr: &mut IsoManager,
+        executor: &mut GameExecutor,
         touch: Option<(f32, f32)>,
         touch_pressed: bool,
     ) {
@@ -51,10 +53,10 @@ impl LauncherUi {
 
         match self.current_screen {
             Screen::MainLauncher | Screen::GraphicsSettings => {
-                self.render_main_and_settings(gles, config, iso_mgr, sw, sh, touch, touch_pressed);
+                self.render_main_and_settings(gles, config, iso_mgr, executor, sw, sh, touch, touch_pressed);
             }
             Screen::GameRunning => {
-                self.render_game_running(gles, config, sw, sh, touch, touch_pressed);
+                self.render_game_running(gles, config, executor, sw, sh, touch, touch_pressed);
             }
         }
     }
@@ -64,6 +66,7 @@ impl LauncherUi {
         gles: &mut GlesRenderer,
         config: &mut AppConfig,
         iso_mgr: &mut IsoManager,
+        executor: &mut GameExecutor,
         sw: f32,
         sh: f32,
         touch: Option<(f32, f32)>,
@@ -207,7 +210,7 @@ impl LauncherUi {
         };
         let launch_pressed = touch.map(|(tx, ty)| launch_btn.contains(tx, ty) && touch_pressed).unwrap_or(false);
         if launch_pressed {
-            self.handle_launch(iso_mgr, config);
+            self.handle_launch(iso_mgr, config, executor);
         }
 
         draw_ui_button(
@@ -227,13 +230,15 @@ impl LauncherUi {
         &mut self,
         gles: &mut GlesRenderer,
         config: &AppConfig,
+        executor: &mut GameExecutor,
         sw: f32,
         sh: f32,
         touch: Option<(f32, f32)>,
         touch_pressed: bool,
     ) {
-        // Game active viewport: Background simulation
-        gles.draw_rect(0.0, 0.0, sw, sh, [0.05, 0.05, 0.07, 1.0]);
+        // Step execution and render game 3D viewport
+        executor.tick_frame(config);
+        executor.render_viewport(gles, config, sw, sh);
 
         // Draw In-Game Info Header
         gles.draw_rect(0.0, 0.0, sw, 40.0, [0.1, 0.1, 0.1, 0.8]);
@@ -279,15 +284,36 @@ impl LauncherUi {
         draw_gamepad_btn(gles, right_x, right_y - 35.0, "Y (NOS)", [0.9, 0.9, 0.2, opacity]);
     }
 
-    pub fn handle_launch(&mut self, iso_mgr: &IsoManager, config: &AppConfig) -> bool {
-        if let Some(iso) = iso_mgr.selected() {
-            self.status_message = format!("Running {}...", iso.filename);
-            self.current_screen = Screen::GameRunning;
-            true
+    pub fn handle_launch(
+        &mut self,
+        iso_mgr: &IsoManager,
+        config: &AppConfig,
+        executor: &mut GameExecutor,
+    ) -> bool {
+        let target_path = if let Some(iso) = iso_mgr.selected() {
+            Some(iso.path.clone())
         } else if !config.iso_path.is_empty() {
-            self.status_message = format!("Running {}...", config.iso_path);
-            self.current_screen = Screen::GameRunning;
-            true
+            Some(std::path::PathBuf::from(&config.iso_path))
+        } else {
+            None
+        };
+
+        if let Some(path) = target_path {
+            self.status_message = format!("Initializing {}...", path.display());
+            match executor.start_game(&path, config) {
+                Ok(()) => {
+                    self.status_message = format!(
+                        "Running {}!",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    );
+                    self.current_screen = Screen::GameRunning;
+                    true
+                }
+                Err(e) => {
+                    self.status_message = format!("Launch Error: {}", e);
+                    false
+                }
+            }
         } else {
             self.status_message = "Error: Please place ISO in /sdcard/xbox/".to_string();
             false

@@ -1,11 +1,17 @@
 pub mod config;
+pub mod executor;
 pub mod gles;
 pub mod iso;
+pub mod kernel;
+pub mod memory;
+pub mod nv2a;
 pub mod ui;
+pub mod xbe;
 
 use android_activity::input::{InputEvent, MotionAction};
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
 use config::AppConfig;
+use executor::GameExecutor;
 use gles::GlesRenderer;
 use iso::IsoManager;
 use log::{error, info};
@@ -29,7 +35,7 @@ fn android_main(app: AndroidApp) {
 
     let internal_dir = app
         .internal_data_path()
-        .unwrap_or_else(|| PathBuf::from("/data/data/com.mininxd.mc3dr/files"));
+        .unwrap_or_else(|| PathBuf::from("/data/data/io.github.mininxd.midnightclub3remixrecomp/files"));
     let config_path = internal_dir.join("mc3dr_config.json");
 
     let mut config = AppConfig::load(&config_path);
@@ -45,6 +51,7 @@ fn android_main(app: AndroidApp) {
     }
 
     let mut ui = LauncherUi::new();
+    let mut executor = GameExecutor::new();
     let mut renderer: Option<GlesRenderer> = None;
 
     let mut touch_pos: Option<(f32, f32)> = None;
@@ -129,7 +136,7 @@ fn android_main(app: AndroidApp) {
         // Render UI frame if renderer is active
         if let Some(ref mut r) = renderer {
             r.begin_frame(0.08, 0.09, 0.12);
-            ui.render(r, &mut config, &mut iso_mgr, touch_pos, touch_pressed);
+            ui.render(r, &mut config, &mut iso_mgr, &mut executor, touch_pos, touch_pressed);
             r.end_frame();
             // Reset touch pressed after consumption
             if touch_pressed {
