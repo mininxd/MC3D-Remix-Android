@@ -14,7 +14,7 @@ apk_name = "MC3D-Remix"
 label = "MC3: DUB Edition Remix"
 build_targets = ["aarch64-linux-android"]
 min_sdk_version = 24
-target_sdk_version = 34
+target_sdk_version = 30
 
 [package.metadata.android.application]
 has_code = false
