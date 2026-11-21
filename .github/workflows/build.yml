@@ -26,10 +26,6 @@ jobs:
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-30" "build-tools;30.0.3"
 
-      - name: Generate Signing Keystore
-        run: |
-          keytool -genkeypair -v -keystore release.keystore -alias android -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Android,O=Android,C=US"
-
       - name: Cache cargo-apk
         uses: actions/cache@v4
         with:

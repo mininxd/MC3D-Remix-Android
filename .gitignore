@@ -11,6 +11,11 @@ Cargo.lock
 *.log
 *.tmp
 
+# Keystores (allow release.jks)
+*.keystore
+*.jks
+!release.jks
+
 # ==============================================================================
 # Game files & Copyrighted Assets (STRICT: NEVER commit game data to repository)
 # ==============================================================================
