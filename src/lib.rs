@@ -1,3 +1,4 @@
+pub mod android_permissions;
 pub mod config;
 pub mod executor;
 pub mod gles;
@@ -18,7 +19,7 @@ use log::{error, info};
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::time::Duration;
-use ui::LauncherUi;
+use ui::{LauncherUi, Screen};
 
 #[no_mangle]
 fn android_main(app: AndroidApp) {
@@ -32,6 +33,9 @@ fn android_main(app: AndroidApp) {
     info!(" Midnight Club 3: DUB Edition Remix - Pure Rust Launcher");
     info!(" Built with android-activity, 100% Rust, zero Java / C");
     info!("============================================================");
+
+    // Prompt user for Storage Permissions via JNI
+    android_permissions::request_storage_permissions(&app);
 
     let internal_dir = app
         .internal_data_path()
@@ -54,6 +58,26 @@ fn android_main(app: AndroidApp) {
     let mut executor = GameExecutor::new();
     let mut renderer: Option<GlesRenderer> = None;
 
+    // AUTO-DETECT ISO in /sdcard/mc3dr: If found, automatically launch it!
+    if let Some(auto_iso) = iso_mgr.find_mc3dr_iso() {
+        info!("Auto-detected Midnight Club 3 ISO in /sdcard/mc3dr: {}", auto_iso.path.display());
+        config.iso_path = auto_iso.path.to_string_lossy().to_string();
+        match executor.start_game(&auto_iso.path, &config) {
+            Ok(()) => {
+                info!("Auto-launch initiated successfully!");
+                ui.current_screen = Screen::GameRunning;
+                ui.status_message = format!("Running {} from /sdcard/mc3dr", auto_iso.filename);
+            }
+            Err(e) => {
+                error!("Auto-launch error: {}", e);
+                ui.status_message = format!("Auto-launch failed: {}", e);
+            }
+        }
+    } else {
+        info!("No ISO found in /sdcard/mc3dr on boot. Showing ISO selector UI.");
+        ui.status_message = "No ISO in /sdcard/mc3dr/ - Tap PICK .ISO or place ISO in /sdcard/mc3dr/".to_string();
+    }
+
     let mut touch_pos: Option<(f32, f32)> = None;
     let mut touch_pressed = false;
 
@@ -68,12 +92,12 @@ fn android_main(app: AndroidApp) {
                             let width = win.width();
                             let height = win.height();
                             let ptr = win.ptr().as_ptr() as *mut c_void;
-                            info!("Creating GLES3 renderer for window: {}x{}", width, height);
+                            info!("Creating GLES renderer for window: {}x{}", width, height);
                             renderer = GlesRenderer::new(ptr, width, height);
                             if renderer.is_some() {
-                                info!("GLES3 renderer initialized successfully!");
+                                info!("GLES renderer initialized successfully!");
                             } else {
-                                error!("Failed to initialize GLES3 renderer");
+                                error!("Failed to initialize GLES renderer");
                             }
                         }
                     }
@@ -97,7 +121,18 @@ fn android_main(app: AndroidApp) {
                         }
                     }
                     MainEvent::Resume { .. } => {
-                        info!("App resumed.");
+                        info!("App resumed. Rescanning storage for ISOs.");
+                        iso_mgr.scan();
+                        if ui.current_screen != Screen::GameRunning {
+                            if let Some(auto_iso) = iso_mgr.find_mc3dr_iso() {
+                                info!("Found ISO after resume: {}", auto_iso.filename);
+                                config.iso_path = auto_iso.path.to_string_lossy().to_string();
+                                if executor.start_game(&auto_iso.path, &config).is_ok() {
+                                    ui.current_screen = Screen::GameRunning;
+                                    ui.status_message = format!("Running {} from /sdcard/mc3dr", auto_iso.filename);
+                                }
+                            }
+                        }
                     }
                     MainEvent::Destroy => {
                         info!("App exiting.");
@@ -133,12 +168,31 @@ fn android_main(app: AndroidApp) {
             }
         });
 
+        // Ensure renderer exists if native window is attached
+        if renderer.is_none() {
+            if let Some(win) = app.native_window() {
+                let width = win.width();
+                let height = win.height();
+                let ptr = win.ptr().as_ptr() as *mut c_void;
+                renderer = GlesRenderer::new(ptr, width, height);
+            }
+        }
+
+        // Handle user requests from UI (File picker, permissions)
+        if ui.request_file_picker {
+            ui.request_file_picker = false;
+            android_permissions::open_system_file_picker(&app);
+        }
+        if ui.request_permission {
+            ui.request_permission = false;
+            android_permissions::request_storage_permissions(&app);
+        }
+
         // Render UI frame if renderer is active
         if let Some(ref mut r) = renderer {
             r.begin_frame(0.08, 0.09, 0.12);
             ui.render(r, &mut config, &mut iso_mgr, &mut executor, touch_pos, touch_pressed);
             r.end_frame();
-            // Reset touch pressed after consumption
             if touch_pressed {
                 touch_pressed = false;
             }

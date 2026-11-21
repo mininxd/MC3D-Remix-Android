@@ -14,6 +14,8 @@ pub struct LauncherUi {
     pub current_screen: Screen,
     pub status_message: String,
     pub frame_count: u64,
+    pub request_file_picker: bool,
+    pub request_permission: bool,
 }
 
 struct Button {
@@ -33,8 +35,10 @@ impl LauncherUi {
     pub fn new() -> Self {
         Self {
             current_screen: Screen::MainLauncher,
-            status_message: "Select ISO and adjust graphics settings".to_string(),
+            status_message: "Checking /sdcard/mc3dr for game ISO...".to_string(),
             frame_count: 0,
+            request_file_picker: false,
+            request_permission: false,
         }
     }
 
@@ -83,30 +87,34 @@ impl LauncherUi {
         let card1_x = 30.0;
         let card1_y = 100.0;
         let card1_w = sw - 60.0;
-        let card1_h = 130.0;
+        let card1_h = 135.0;
 
         gles.draw_rect(card1_x, card1_y, card1_w, card1_h, [0.15, 0.17, 0.22, 1.0]);
         gles.draw_rect_outline(card1_x, card1_y, card1_w, card1_h, [0.25, 0.30, 0.38, 1.0], 1.5);
 
-        gles.draw_text(card1_x + 20.0, card1_y + 15.0, "GAME ISO FILE:", 1.5, [0.2, 0.8, 1.0, 1.0]);
+        gles.draw_text(card1_x + 20.0, card1_y + 15.0, "GAME ISO FILE (Auto-checks /sdcard/mc3dr/):", 1.4, [0.2, 0.8, 1.0, 1.0]);
 
         let iso_display = if let Some(selected) = iso_mgr.selected() {
             format!("[XBOX ISO] {}", selected.filename)
         } else if !config.iso_path.is_empty() {
             format!("[PATH] {}", config.iso_path)
         } else {
-            "NO ISO FOUND - Place in /sdcard/xbox/".to_string()
+            "NO ISO FOUND - Place in /sdcard/mc3dr/ or tap PICK .ISO".to_string()
         };
-        gles.draw_text(card1_x + 20.0, card1_y + 45.0, &iso_display, 1.6, [1.0, 1.0, 0.9, 1.0]);
+        gles.draw_text(card1_x + 20.0, card1_y + 45.0, &iso_display, 1.5, [1.0, 1.0, 0.9, 1.0]);
 
-        // Prev & Next ISO Buttons
-        let prev_btn = Button { x: card1_x + 20.0, y: card1_y + 80.0, w: 140.0, h: 36.0 };
-        let next_btn = Button { x: card1_x + 180.0, y: card1_y + 80.0, w: 140.0, h: 36.0 };
-        let scan_btn = Button { x: card1_x + 340.0, y: card1_y + 80.0, w: 140.0, h: 36.0 };
+        // ISO Navigation & Action Buttons
+        let prev_btn = Button { x: card1_x + 20.0, y: card1_y + 80.0, w: 120.0, h: 38.0 };
+        let next_btn = Button { x: card1_x + 150.0, y: card1_y + 80.0, w: 120.0, h: 38.0 };
+        let scan_btn = Button { x: card1_x + 280.0, y: card1_y + 80.0, w: 130.0, h: 38.0 };
+        let pick_btn = Button { x: card1_x + 420.0, y: card1_y + 80.0, w: 150.0, h: 38.0 };
+        let perm_btn = Button { x: card1_x + 580.0, y: card1_y + 80.0, w: 140.0, h: 38.0 };
 
         let prev_pressed = touch.map(|(tx, ty)| prev_btn.contains(tx, ty) && touch_pressed).unwrap_or(false);
         let next_pressed = touch.map(|(tx, ty)| next_btn.contains(tx, ty) && touch_pressed).unwrap_or(false);
         let scan_pressed = touch.map(|(tx, ty)| scan_btn.contains(tx, ty) && touch_pressed).unwrap_or(false);
+        let pick_pressed = touch.map(|(tx, ty)| pick_btn.contains(tx, ty) && touch_pressed).unwrap_or(false);
+        let perm_pressed = touch.map(|(tx, ty)| perm_btn.contains(tx, ty) && touch_pressed).unwrap_or(false);
 
         if prev_pressed {
             iso_mgr.select_prev();
@@ -122,11 +130,27 @@ impl LauncherUi {
         }
         if scan_pressed {
             iso_mgr.scan();
+            if let Some(s) = iso_mgr.selected() {
+                config.iso_path = s.path.to_string_lossy().to_string();
+                self.status_message = format!("Found: {}", s.filename);
+            } else {
+                self.status_message = "No ISO found in /sdcard/mc3dr or /sdcard/xbox".to_string();
+            }
+        }
+        if pick_pressed {
+            self.request_file_picker = true;
+            self.status_message = "Opening system file picker...".to_string();
+        }
+        if perm_pressed {
+            self.request_permission = true;
+            self.status_message = "Requesting storage permissions...".to_string();
         }
 
-        draw_ui_button(gles, &prev_btn, "< PREV ISO", prev_pressed, [0.2, 0.4, 0.6, 1.0]);
-        draw_ui_button(gles, &next_btn, "NEXT ISO >", next_pressed, [0.2, 0.4, 0.6, 1.0]);
+        draw_ui_button(gles, &prev_btn, "< PREV", prev_pressed, [0.2, 0.4, 0.6, 1.0]);
+        draw_ui_button(gles, &next_btn, "NEXT >", next_pressed, [0.2, 0.4, 0.6, 1.0]);
         draw_ui_button(gles, &scan_btn, "RESCAN", scan_pressed, [0.3, 0.3, 0.4, 1.0]);
+        draw_ui_button(gles, &pick_btn, "PICK .ISO", pick_pressed, [0.2, 0.6, 0.3, 1.0]);
+        draw_ui_button(gles, &perm_btn, "STORAGE PERM", perm_pressed, [0.5, 0.4, 0.2, 1.0]);
 
         // Panel 2: Graphics & Display Settings Card
         let card2_x = 30.0;

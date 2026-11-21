@@ -1,4 +1,5 @@
-use std::ffi::{c_char, c_void, CString};
+use log::{error, info, warn};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
 
 // EGL constants
@@ -13,9 +14,15 @@ const EGL_BLUE_SIZE: i32 = 0x3022;
 const EGL_ALPHA_SIZE: i32 = 0x3021;
 const EGL_DEPTH_SIZE: i32 = 0x3025;
 const EGL_RENDERABLE_TYPE: i32 = 0x3040;
+const EGL_SURFACE_TYPE: i32 = 0x3033;
+const EGL_WINDOW_BIT: i32 = 0x0004;
+const EGL_OPENGL_ES2_BIT: i32 = 0x00000004;
 const EGL_OPENGL_ES3_BIT: i32 = 0x00000040;
 const EGL_NONE: i32 = 0x3038;
 const EGL_CONTEXT_CLIENT_VERSION: i32 = 0x3098;
+const EGL_NATIVE_VISUAL_ID: i32 = 0x302E;
+const EGL_WIDTH: i32 = 0x3057;
+const EGL_HEIGHT: i32 = 0x3056;
 
 // GL constants
 const GL_COLOR_BUFFER_BIT: u32 = 0x00004000;
@@ -29,6 +36,20 @@ const GL_SRC_ALPHA: u32 = 0x0302;
 const GL_ONE_MINUS_SRC_ALPHA: u32 = 0x0303;
 const GL_VERTEX_SHADER: u32 = 0x8B31;
 const GL_FRAGMENT_SHADER: u32 = 0x8B30;
+const GL_COMPILE_STATUS: u32 = 0x8B81;
+const GL_LINK_STATUS: u32 = 0x8B82;
+
+#[link(name = "android")]
+extern "C" {
+    fn ANativeWindow_setBuffersGeometry(
+        window: *mut c_void,
+        width: i32,
+        height: i32,
+        format: i32,
+    ) -> i32;
+    fn ANativeWindow_getWidth(window: *mut c_void) -> i32;
+    fn ANativeWindow_getHeight(window: *mut c_void) -> i32;
+}
 
 #[link(name = "EGL")]
 extern "C" {
@@ -40,6 +61,12 @@ extern "C" {
         configs: *mut *mut c_void,
         config_size: i32,
         num_config: *mut i32,
+    ) -> u32;
+    fn eglGetConfigAttrib(
+        dpy: *mut c_void,
+        config: *mut c_void,
+        attribute: i32,
+        value: *mut i32,
     ) -> u32;
     fn eglCreateWindowSurface(
         dpy: *mut c_void,
@@ -59,10 +86,17 @@ extern "C" {
         read: *mut c_void,
         ctx: *mut c_void,
     ) -> u32;
+    fn eglQuerySurface(
+        dpy: *mut c_void,
+        surface: *mut c_void,
+        attribute: i32,
+        value: *mut i32,
+    ) -> u32;
     fn eglSwapBuffers(dpy: *mut c_void, surface: *mut c_void) -> u32;
     fn eglDestroySurface(dpy: *mut c_void, surface: *mut c_void) -> u32;
     fn eglDestroyContext(dpy: *mut c_void, ctx: *mut c_void) -> u32;
     fn eglTerminate(dpy: *mut c_void) -> u32;
+    fn eglGetError() -> i32;
 }
 
 #[link(name = "GLESv3")]
@@ -75,11 +109,18 @@ extern "C" {
     fn glCreateShader(type_: u32) -> u32;
     fn glShaderSource(shader: u32, count: i32, string: *const *const c_char, length: *const i32);
     fn glCompileShader(shader: u32);
+    fn glGetShaderiv(shader: u32, pname: u32, params: *mut i32);
+    fn glGetShaderInfoLog(shader: u32, max_length: i32, length: *mut i32, info_log: *mut c_char);
     fn glCreateProgram() -> u32;
     fn glAttachShader(program: u32, shader: u32);
+    fn glBindAttribLocation(program: u32, index: u32, name: *const c_char);
     fn glLinkProgram(program: u32);
+    fn glGetProgramiv(program: u32, pname: u32, params: *mut i32);
+    fn glGetProgramInfoLog(program: u32, max_length: i32, length: *mut i32, info_log: *mut c_char);
     fn glUseProgram(program: u32);
     fn glDeleteShader(shader: u32);
+    fn glGenVertexArrays(n: i32, arrays: *mut u32);
+    fn glBindVertexArray(array: u32);
     fn glGenBuffers(n: i32, buffers: *mut u32);
     fn glBindBuffer(target: u32, buffer: u32);
     fn glBufferData(target: u32, size: isize, data: *const c_void, usage: u32);
@@ -96,6 +137,7 @@ extern "C" {
     fn glDrawArrays(mode: u32, first: i32, count: i32);
     fn glGetUniformLocation(program: u32, name: *const c_char) -> i32;
     fn glUniform2f(location: i32, v0: f32, v1: f32);
+    fn glGetError() -> u32;
 }
 
 #[repr(C)]
@@ -118,95 +160,219 @@ pub struct GlesRenderer {
     pub width: i32,
     pub height: i32,
     program: u32,
+    _vao: u32,
     vbo: u32,
     u_screen_size: i32,
     vertices: Vec<Vertex>,
 }
 
 impl GlesRenderer {
-    pub fn new(native_window: *mut c_void, width: i32, height: i32) -> Option<Self> {
+    pub fn new(native_window: *mut c_void, hint_width: i32, hint_height: i32) -> Option<Self> {
         unsafe {
+            info!("GlesRenderer::new: Initializing EGL display...");
             let display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
             if display == EGL_NO_DISPLAY {
+                error!("eglGetDisplay failed: EGL_NO_DISPLAY");
                 return None;
             }
 
             let mut major = 0;
             let mut minor = 0;
             if eglInitialize(display, &mut major, &mut minor) == 0 {
+                error!("eglInitialize failed (error {:#X})", eglGetError());
                 return None;
             }
+            info!("EGL initialized: version {}.{}", major, minor);
 
+            // Configure flexible EGL attributes compatible with GLES2 and GLES3
             let attribs = [
-                EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
-                EGL_RED_SIZE, 8,
-                EGL_GREEN_SIZE, 8,
-                EGL_BLUE_SIZE, 8,
-                EGL_ALPHA_SIZE, 8,
-                EGL_DEPTH_SIZE, 16,
+                EGL_RENDERABLE_TYPE,
+                EGL_OPENGL_ES2_BIT | EGL_OPENGL_ES3_BIT,
+                EGL_SURFACE_TYPE,
+                EGL_WINDOW_BIT,
+                EGL_RED_SIZE,
+                8,
+                EGL_GREEN_SIZE,
+                8,
+                EGL_BLUE_SIZE,
+                8,
+                EGL_ALPHA_SIZE,
+                8,
+                EGL_DEPTH_SIZE,
+                16,
                 EGL_NONE,
             ];
 
             let mut config: *mut c_void = ptr::null_mut();
             let mut num_configs = 0;
-            if eglChooseConfig(display, attribs.as_ptr(), &mut config, 1, &mut num_configs) == 0 || num_configs < 1 {
-                return None;
+            if eglChooseConfig(display, attribs.as_ptr(), &mut config, 1, &mut num_configs) == 0
+                || num_configs < 1
+            {
+                // Fallback config without strict alpha/depth
+                warn!("Strict eglChooseConfig failed, trying fallback config...");
+                let fallback_attribs = [
+                    EGL_RENDERABLE_TYPE,
+                    EGL_OPENGL_ES2_BIT,
+                    EGL_SURFACE_TYPE,
+                    EGL_WINDOW_BIT,
+                    EGL_NONE,
+                ];
+                if eglChooseConfig(
+                    display,
+                    fallback_attribs.as_ptr(),
+                    &mut config,
+                    1,
+                    &mut num_configs,
+                ) == 0
+                    || num_configs < 1
+                {
+                    error!("All eglChooseConfig attempts failed");
+                    return None;
+                }
+            }
+            info!("Found {} compatible EGL config(s)", num_configs);
+
+            // CRITICAL FOR ANDROID: Set native window buffer geometry matching EGL visual ID
+            let mut format = 0;
+            if eglGetConfigAttrib(display, config, EGL_NATIVE_VISUAL_ID, &mut format) != 0 {
+                info!("Aligning ANativeWindow buffers geometry to format {:#X}", format);
+                ANativeWindow_setBuffersGeometry(native_window, 0, 0, format);
             }
 
+            // Create window surface
             let surface = eglCreateWindowSurface(display, config, native_window, ptr::null());
             if surface == EGL_NO_SURFACE {
+                error!("eglCreateWindowSurface failed (error {:#X})", eglGetError());
                 return None;
             }
 
-            let ctx_attribs = [EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE];
-            let context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctx_attribs.as_ptr());
+            // Try creating OpenGL ES 3.0 context first, fallback to 2.0
+            let ctx_es3 = [EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE];
+            let mut context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctx_es3.as_ptr());
+            let mut is_gles3 = true;
             if context == EGL_NO_CONTEXT {
+                warn!("GLES 3 context creation failed, falling back to GLES 2.0");
+                let ctx_es2 = [EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE];
+                context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctx_es2.as_ptr());
+                is_gles3 = false;
+            }
+
+            if context == EGL_NO_CONTEXT {
+                error!("eglCreateContext failed for both GLES3 and GLES2 (error {:#X})", eglGetError());
+                eglDestroySurface(display, surface);
                 return None;
             }
 
             if eglMakeCurrent(display, surface, surface, context) == 0 {
+                error!("eglMakeCurrent failed (error {:#X})", eglGetError());
+                eglDestroyContext(display, context);
+                eglDestroySurface(display, surface);
                 return None;
             }
 
-            // Setup shaders
-            let vs_source = CString::new(r#"#version 300 es
-                layout(location = 0) in vec2 a_pos;
-                layout(location = 1) in vec4 a_color;
-                uniform vec2 u_screen_size;
-                out vec4 v_color;
-                void main() {
-                    vec2 norm = (a_pos / u_screen_size) * 2.0 - 1.0;
-                    gl_Position = vec4(norm.x, -norm.y, 0.0, 1.0);
-                    v_color = a_color;
-                }
-            "#).unwrap();
+            // Query actual surface dimensions
+            let mut surf_w = 0;
+            let mut surf_h = 0;
+            eglQuerySurface(display, surface, EGL_WIDTH, &mut surf_w);
+            eglQuerySurface(display, surface, EGL_HEIGHT, &mut surf_h);
 
-            let fs_source = CString::new(r#"#version 300 es
-                precision mediump float;
-                in vec4 v_color;
-                out vec4 fragColor;
-                void main() {
-                    fragColor = v_color;
-                }
-            "#).unwrap();
+            let real_w = if surf_w > 0 {
+                surf_w
+            } else if hint_width > 0 {
+                hint_width
+            } else {
+                ANativeWindow_getWidth(native_window).max(1280)
+            };
+
+            let real_h = if surf_h > 0 {
+                surf_h
+            } else if hint_height > 0 {
+                hint_height
+            } else {
+                ANativeWindow_getHeight(native_window).max(720)
+            };
+
+            info!("EGL Window Surface established: {}x{}", real_w, real_h);
+
+            // Setup robust shaders compatible across all Android GPUs
+            let vs_src = CString::new(
+                "attribute vec2 a_pos;\n\
+                 attribute vec4 a_color;\n\
+                 uniform vec2 u_screen_size;\n\
+                 varying vec4 v_color;\n\
+                 void main() {\n\
+                     vec2 norm = (a_pos / u_screen_size) * 2.0 - 1.0;\n\
+                     gl_Position = vec4(norm.x, -norm.y, 0.0, 1.0);\n\
+                     v_color = a_color;\n\
+                 }\n",
+            )
+            .unwrap();
+
+            let fs_src = CString::new(
+                "precision mediump float;\n\
+                 varying vec4 v_color;\n\
+                 void main() {\n\
+                     gl_FragColor = v_color;\n\
+                 }\n",
+            )
+            .unwrap();
 
             let vs = glCreateShader(GL_VERTEX_SHADER);
-            glShaderSource(vs, 1, [vs_source.as_ptr()].as_ptr(), ptr::null());
+            glShaderSource(vs, 1, [vs_src.as_ptr()].as_ptr(), ptr::null());
             glCompileShader(vs);
 
+            let mut vs_ok = 0;
+            glGetShaderiv(vs, GL_COMPILE_STATUS, &mut vs_ok);
+            if vs_ok == 0 {
+                let mut log_buf = [0 as c_char; 512];
+                glGetShaderInfoLog(vs, 512, ptr::null_mut(), log_buf.as_mut_ptr());
+                error!("Vertex shader compile error: {:?}", CStr::from_ptr(log_buf.as_ptr()));
+            }
+
             let fs = glCreateShader(GL_FRAGMENT_SHADER);
-            glShaderSource(fs, 1, [fs_source.as_ptr()].as_ptr(), ptr::null());
+            glShaderSource(fs, 1, [fs_src.as_ptr()].as_ptr(), ptr::null());
             glCompileShader(fs);
+
+            let mut fs_ok = 0;
+            glGetShaderiv(fs, GL_COMPILE_STATUS, &mut fs_ok);
+            if fs_ok == 0 {
+                let mut log_buf = [0 as c_char; 512];
+                glGetShaderInfoLog(fs, 512, ptr::null_mut(), log_buf.as_mut_ptr());
+                error!("Fragment shader compile error: {:?}", CStr::from_ptr(log_buf.as_ptr()));
+            }
 
             let program = glCreateProgram();
             glAttachShader(program, vs);
             glAttachShader(program, fs);
+
+            // Bind attributes explicitly to locations 0 and 1
+            let a_pos_name = CString::new("a_pos").unwrap();
+            let a_color_name = CString::new("a_color").unwrap();
+            glBindAttribLocation(program, 0, a_pos_name.as_ptr());
+            glBindAttribLocation(program, 1, a_color_name.as_ptr());
+
             glLinkProgram(program);
+
+            let mut link_ok = 0;
+            glGetProgramiv(program, GL_LINK_STATUS, &mut link_ok);
+            if link_ok == 0 {
+                let mut log_buf = [0 as c_char; 512];
+                glGetProgramInfoLog(program, 512, ptr::null_mut(), log_buf.as_mut_ptr());
+                error!("Shader program link error: {:?}", CStr::from_ptr(log_buf.as_ptr()));
+            }
+
             glDeleteShader(vs);
             glDeleteShader(fs);
 
             let u_name = CString::new("u_screen_size").unwrap();
             let u_screen_size = glGetUniformLocation(program, u_name.as_ptr());
+
+            // Vertex Array Object (VAO required in GLES3 core)
+            let mut vao = 0;
+            if is_gles3 {
+                glGenVertexArrays(1, &mut vao);
+                glBindVertexArray(vao);
+            }
 
             let mut vbo = 0;
             glGenBuffers(1, &mut vbo);
@@ -218,16 +384,33 @@ impl GlesRenderer {
                 GL_DYNAMIC_DRAW,
             );
 
+            let stride = std::mem::size_of::<Vertex>() as i32;
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, ptr::null());
+
+            glEnableVertexAttribArray(1);
+            glVertexAttribPointer(
+                1,
+                4,
+                GL_FLOAT,
+                GL_FALSE,
+                stride,
+                (2 * std::mem::size_of::<f32>()) as *const c_void,
+            );
+
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+            info!("GlesRenderer successfully created with dimensions {}x{}", real_w, real_h);
 
             Some(Self {
                 display,
                 surface,
                 context,
-                width,
-                height,
+                width: real_w,
+                height: real_h,
                 program,
+                _vao: vao,
                 vbo,
                 u_screen_size,
                 vertices: Vec::with_capacity(4096),
@@ -236,8 +419,11 @@ impl GlesRenderer {
     }
 
     pub fn resize(&mut self, w: i32, h: i32) {
-        self.width = w;
-        self.height = h;
+        if w > 0 && h > 0 {
+            self.width = w;
+            self.height = h;
+            info!("Viewport resized to {}x{}", w, h);
+        }
     }
 
     pub fn begin_frame(&mut self, r: f32, g: f32, b: f32) {
@@ -267,7 +453,15 @@ impl GlesRenderer {
         self.vertices.push(v3);
     }
 
-    pub fn draw_rect_outline(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4], thick: f32) {
+    pub fn draw_rect_outline(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: [f32; 4],
+        thick: f32,
+    ) {
         self.draw_rect(x, y, w, thick, color); // top
         self.draw_rect(x, y + h - thick, w, thick, color); // bottom
         self.draw_rect(x, y, thick, h, color); // left
@@ -328,6 +522,10 @@ impl GlesRenderer {
 
         unsafe {
             eglSwapBuffers(self.display, self.surface);
+            let err = glGetError();
+            if err != 0 {
+                warn!("OpenGL error after eglSwapBuffers: {:#X}", err);
+            }
         }
     }
 }
@@ -401,6 +599,6 @@ fn get_char_bitmap(c: char) -> Option<[u8; 8]> {
         'X' | 'x' => Some([0x66, 0x66, 0x3C, 0x18, 0x3C, 0x66, 0x66, 0x00]),
         'Y' | 'y' => Some([0x66, 0x66, 0x66, 0x3C, 0x18, 0x18, 0x18, 0x00]),
         'Z' | 'z' => Some([0x7E, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x7E, 0x00]),
-        _ => Some([0x7E, 0x81, 0x81, 0x81, 0x81, 0x81, 0x7E, 0x00]), // square placeholder
+        _ => Some([0x7E, 0x81, 0x81, 0x81, 0x81, 0x81, 0x7E, 0x00]),
     }
 }

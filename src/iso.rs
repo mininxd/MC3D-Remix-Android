@@ -4,11 +4,15 @@ use std::path::{Path, PathBuf};
 
 const XDVDFS_MAGIC: &[u8] = b"MICROSOFT*XBOX*MEDIA";
 const SEARCH_DIRECTORIES: &[&str] = &[
+    "/sdcard/mc3dr",
+    "/storage/emulated/0/mc3dr",
     "/sdcard/xbox",
+    "/storage/emulated/0/xbox",
     "/sdcard/Download",
     "/sdcard/ROMs",
     "/sdcard/games",
     "/sdcard",
+    "/storage/emulated/0",
 ];
 
 #[derive(Debug, Clone)]
@@ -73,6 +77,13 @@ impl IsoManager {
 
     pub fn selected(&self) -> Option<&DiscoveredIso> {
         self.items.get(self.selected_idx)
+    }
+
+    pub fn find_mc3dr_iso(&self) -> Option<&DiscoveredIso> {
+        self.items.iter().find(|item| {
+            let p_str = item.path.to_string_lossy();
+            p_str.contains("/mc3dr/") || p_str.contains("/mc3dr")
+        })
     }
 
     pub fn select_next(&mut self) {
