@@ -236,9 +236,21 @@ float RenderScale(uint32_t guest_height) {
     return guest_height ? std::max(h / guest_height, 0.1f) : 1.0f;
 }
 
-// app-specific external storage: the player can reach the logs, saves and settings over USB
+// User-accessible shared storage (e.g. /storage/emulated/0/mc3dr) or app-specific external storage:
+// stores saves (hdd/), settings, layout, shadercache and logs
 std::filesystem::path ExeDir() {
     static const std::filesystem::path dir = [] {
+        std::error_code ec;
+        for (const char* candidate : {"/storage/emulated/0/mc3dr", "/sdcard/mc3dr"}) {
+            if (std::filesystem::exists(candidate, ec)) {
+                std::filesystem::path hdd = std::filesystem::path(candidate) / "hdd";
+                std::filesystem::create_directories(hdd, ec);
+                if (!ec) {
+                    LOGI("app: ExeDir using user-accessible storage: %s (hdd at %s)", candidate, hdd.c_str());
+                    return std::filesystem::path(candidate);
+                }
+            }
+        }
         const char* p = nullptr;
         if (SDL_GetAndroidExternalStorageState() & SDL_ANDROID_EXTERNAL_STORAGE_WRITE) p = SDL_GetAndroidExternalStoragePath();
         if (!p) p = SDL_GetAndroidInternalStoragePath();
