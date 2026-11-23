@@ -17,21 +17,26 @@ const EGL_RENDERABLE_TYPE: i32 = 0x3040;
 const EGL_SURFACE_TYPE: i32 = 0x3033;
 const EGL_WINDOW_BIT: i32 = 0x0004;
 const EGL_OPENGL_ES2_BIT: i32 = 0x00000004;
-const EGL_OPENGL_ES3_BIT: i32 = 0x00000040;
+const _EGL_OPENGL_ES3_BIT: i32 = 0x00000040;
 const EGL_NONE: i32 = 0x3038;
 const EGL_CONTEXT_CLIENT_VERSION: i32 = 0x3098;
 const EGL_NATIVE_VISUAL_ID: i32 = 0x302E;
 const EGL_WIDTH: i32 = 0x3057;
 const EGL_HEIGHT: i32 = 0x3056;
+const EGL_OPENGL_ES_API: u32 = 0x30A0;
 
 // GL constants
 const GL_COLOR_BUFFER_BIT: u32 = 0x00004000;
+const _GL_DEPTH_BUFFER_BIT: u32 = 0x00000100;
 const GL_TRIANGLES: u32 = 0x0004;
 const GL_ARRAY_BUFFER: u32 = 0x8892;
 const GL_DYNAMIC_DRAW: u32 = 0x88E8;
 const GL_FLOAT: u32 = 0x1406;
 const GL_FALSE: u8 = 0;
 const GL_BLEND: u32 = 0x0BE2;
+const GL_DEPTH_TEST: u32 = 0x0B71;
+const GL_CULL_FACE: u32 = 0x0B44;
+const GL_SCISSOR_TEST: u32 = 0x0C11;
 const GL_SRC_ALPHA: u32 = 0x0302;
 const GL_ONE_MINUS_SRC_ALPHA: u32 = 0x0303;
 const GL_VERTEX_SHADER: u32 = 0x8B31;
@@ -55,6 +60,7 @@ extern "C" {
 extern "C" {
     fn eglGetDisplay(display_id: *mut c_void) -> *mut c_void;
     fn eglInitialize(dpy: *mut c_void, major: *mut i32, minor: *mut i32) -> u32;
+    fn eglBindAPI(api: u32) -> u32;
     fn eglChooseConfig(
         dpy: *mut c_void,
         attrib_list: *const i32,
@@ -105,6 +111,7 @@ extern "C" {
     fn glClearColor(red: f32, green: f32, blue: f32, alpha: f32);
     fn glClear(mask: u32);
     fn glEnable(cap: u32);
+    fn glDisable(cap: u32);
     fn glBlendFunc(sfactor: u32, dfactor: u32);
     fn glCreateShader(type_: u32) -> u32;
     fn glShaderSource(shader: u32, count: i32, string: *const *const c_char, length: *const i32);
@@ -184,10 +191,13 @@ impl GlesRenderer {
             }
             info!("EGL initialized: version {}.{}", major, minor);
 
-            // Configure flexible EGL attributes compatible with GLES2 and GLES3
+            // Bind OpenGL ES API
+            eglBindAPI(EGL_OPENGL_ES_API);
+
+            // Configure flexible EGL attributes compatible with all Android devices
             let attribs = [
                 EGL_RENDERABLE_TYPE,
-                EGL_OPENGL_ES2_BIT | EGL_OPENGL_ES3_BIT,
+                EGL_OPENGL_ES2_BIT,
                 EGL_SURFACE_TYPE,
                 EGL_WINDOW_BIT,
                 EGL_RED_SIZE,
@@ -429,6 +439,11 @@ impl GlesRenderer {
     pub fn begin_frame(&mut self, r: f32, g: f32, b: f32) {
         unsafe {
             glViewport(0, 0, self.width, self.height);
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_CULL_FACE);
+            glDisable(GL_SCISSOR_TEST);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glClearColor(r, g, b, 1.0);
             glClear(GL_COLOR_BUFFER_BIT);
             glUseProgram(self.program);
@@ -494,6 +509,9 @@ impl GlesRenderer {
     pub fn end_frame(&mut self) {
         if !self.vertices.is_empty() {
             unsafe {
+                if self._vao != 0 {
+                    glBindVertexArray(self._vao);
+                }
                 glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
                 glBufferSubData(
                     GL_ARRAY_BUFFER,

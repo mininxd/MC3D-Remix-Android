@@ -54,14 +54,14 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            iso_path: "/sdcard/xbox/Midnight Club 3 - DUB Edition Remix (Europe) (En,Fr,De,Es,It).iso".to_string(),
-            save_dir: "/sdcard/xbox/mc3/saves".to_string(),
+            iso_path: "/sdcard/mc3dr/Midnight Club 3 - DUB Edition Remix (Europe) (En,Fr,De,Es,It).iso".to_string(),
+            save_dir: "/sdcard/mc3dr/saves".to_string(),
             render_scale: RenderScale::Scale2x1080p,
             widescreen_16_9: true,
             fps_limit: 60,
             vsync: true,
             texture_filter: TextureFilter::Anisotropic8x,
-            touch_controls: true,
+            touch_controls: false,
             touch_opacity: 0.75,
         }
     }

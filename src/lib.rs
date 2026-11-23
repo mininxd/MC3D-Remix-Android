@@ -9,7 +9,7 @@ pub mod nv2a;
 pub mod ui;
 pub mod xbe;
 
-use android_activity::input::{InputEvent, MotionAction};
+use android_activity::input::{InputEvent, KeyAction, Keycode, MotionAction};
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
 use config::AppConfig;
 use executor::GameExecutor;
@@ -155,6 +155,56 @@ fn android_main(app: AndroidApp) {
                                                 touch_pressed = false;
                                             }
                                             _ => {}
+                                        }
+                                        InputStatus::Handled
+                                    }
+                                    InputEvent::KeyEvent(key) => {
+                                        let action = key.action();
+                                        let code = key.key_code();
+                                        if action == KeyAction::Down {
+                                            match code {
+                                                Keycode::ButtonA | Keycode::ButtonStart => {
+                                                    if ui.current_screen != Screen::GameRunning {
+                                                        if ui.handle_launch(&iso_mgr, &config, &mut executor) {
+                                                            ui.current_screen = Screen::GameRunning;
+                                                            ui.status_message = "Running Midnight Club 3 Remix".to_string();
+                                                        }
+                                                    }
+                                                }
+                                                Keycode::ButtonB => {
+                                                    if ui.current_screen == Screen::GameRunning {
+                                                        ui.current_screen = Screen::MainLauncher;
+                                                        ui.status_message = "Paused - Options".to_string();
+                                                    }
+                                                }
+                                                Keycode::DpadLeft | Keycode::ButtonL1 => {
+                                                    if ui.current_screen != Screen::GameRunning {
+                                                        iso_mgr.select_prev();
+                                                        if let Some(s) = iso_mgr.selected() {
+                                                            config.iso_path = s.path.to_string_lossy().to_string();
+                                                        }
+                                                    }
+                                                }
+                                                Keycode::DpadRight | Keycode::ButtonR1 => {
+                                                    if ui.current_screen != Screen::GameRunning {
+                                                        iso_mgr.select_next();
+                                                        if let Some(s) = iso_mgr.selected() {
+                                                            config.iso_path = s.path.to_string_lossy().to_string();
+                                                        }
+                                                    }
+                                                }
+                                                Keycode::ButtonY => {
+                                                    if ui.current_screen != Screen::GameRunning {
+                                                        ui.cycle_resolution(&mut config);
+                                                    }
+                                                }
+                                                Keycode::ButtonX => {
+                                                    if ui.current_screen != Screen::GameRunning {
+                                                        config.widescreen_16_9 = !config.widescreen_16_9;
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
                                         }
                                         InputStatus::Handled
                                     }

@@ -177,10 +177,11 @@ impl XbeImage {
         let mut file = File::open(p)
             .map_err(|e| format!("Failed to open ISO file {}: {}", p.display(), e))?;
 
-        // Possible ISO volume descriptor offsets (0x10000 retail, 0x0 redump raw, 0xFD90000 dual layer)
-        let offsets = [0x00010000u64, 0x00000000u64, 0x0FD90000u64];
-        for &off in &offsets {
-            if file.seek(SeekFrom::Start(off)).is_ok() {
+        // Partitions: 0 (standard/XISO/redump game partition) and 0x18300000 (raw video partition dump)
+        let partitions = [0u64, 0x18300000u64, 0x0FD90000u64];
+        for &base in &partitions {
+            let volume_offset = base + 32 * 2048;
+            if file.seek(SeekFrom::Start(volume_offset)).is_ok() {
                 let mut header = [0u8; 2048];
                 if file.read_exact(&mut header).is_ok() {
                     if &header[0..20] == b"MICROSOFT*XBOX*MEDIA" {
@@ -197,14 +198,14 @@ impl XbeImage {
                             header[0x1B],
                         ]) as usize;
 
-                        let root_offset = off + root_sector * 2048;
+                        let root_offset = base + root_sector * 2048;
                         if file.seek(SeekFrom::Start(root_offset)).is_ok() {
-                            let mut dir_buf = vec![0u8; root_size.max(2048)];
+                            let mut dir_buf = vec![0u8; root_size];
                             if file.read_exact(&mut dir_buf).is_ok() {
                                 if let Some((file_sector, file_size)) =
                                     find_in_xdvdfs_dir(&dir_buf, "default.xbe")
                                 {
-                                    let xbe_offset = off + (file_sector as u64) * 2048;
+                                    let xbe_offset = base + (file_sector as u64) * 2048;
                                     if file.seek(SeekFrom::Start(xbe_offset)).is_ok() {
                                         let mut xbe_data = vec![0u8; file_size as usize];
                                         if file.read_exact(&mut xbe_data).is_ok() {
@@ -221,8 +222,10 @@ impl XbeImage {
 
         // Fallback: Check if there's an extracted mc3/default.xbe nearby
         let fallback_candidates = [
+            Path::new("/sdcard/mc3dr/default.xbe"),
             Path::new("/sdcard/xbox/mc3/default.xbe"),
             Path::new("/sdcard/xbox/default.xbe"),
+            Path::new("/storage/emulated/0/mc3dr/default.xbe"),
         ];
         for candidate in &fallback_candidates {
             if candidate.exists() {
@@ -247,40 +250,55 @@ fn read_u32(data: &[u8], offset: usize) -> Result<u32, String> {
     }
 }
 
-fn find_in_xdvdfs_dir(data: &[u8], target: &str) -> Option<(u32, u32)> {
-    let mut offset = 0;
-    while offset + 14 < data.len() {
-        let left = u16::from_le_bytes([data[offset], data[offset + 1]]);
-        let right = u16::from_le_bytes([data[offset + 2], data[offset + 3]]);
-        let sector = u32::from_le_bytes([
-            data[offset + 4],
-            data[offset + 5],
-            data[offset + 6],
-            data[offset + 7],
-        ]);
-        let size = u32::from_le_bytes([
-            data[offset + 8],
-            data[offset + 9],
-            data[offset + 10],
-            data[offset + 11],
-        ]);
-        let flags = data[offset + 12];
-        let name_len = data[offset + 13] as usize;
+fn find_in_xdvdfs_dir(table: &[u8], target: &str) -> Option<(u32, u32)> {
+    if table.is_empty() {
+        return None;
+    }
+    let mut todo = vec![0usize];
+    let mut seen = std::collections::HashSet::new();
 
-        if sector == 0 && size == 0 && left == 0 && right == 0 {
-            break;
+    while let Some(at) = todo.pop() {
+        if seen.contains(&at) || at + 14 > table.len() {
+            continue;
+        }
+        seen.insert(at);
+
+        let left = u16::from_le_bytes([table[at], table[at + 1]]);
+        let right = u16::from_le_bytes([table[at + 2], table[at + 3]]);
+        if left == 0xFFFF {
+            continue;
         }
 
-        if offset + 14 + name_len <= data.len() {
-            let name_bytes = &data[offset + 14..offset + 14 + name_len];
+        let sector = u32::from_le_bytes([
+            table[at + 4],
+            table[at + 5],
+            table[at + 6],
+            table[at + 7],
+        ]);
+        let size = u32::from_le_bytes([
+            table[at + 8],
+            table[at + 9],
+            table[at + 10],
+            table[at + 11],
+        ]);
+        let attr = table[at + 12];
+        let length = table[at + 13] as usize;
+
+        if at + 14 + length <= table.len() {
+            let name_bytes = &table[at + 14..at + 14 + length];
             if let Ok(name_str) = std::str::from_utf8(name_bytes) {
-                if name_str.eq_ignore_ascii_case(target) && (flags & 0x10) == 0 {
+                if name_str.eq_ignore_ascii_case(target) && (attr & 0x10) == 0 {
                     return Some((sector, size));
                 }
             }
         }
 
-        offset += (14 + name_len + 3) & !3;
+        if left != 0 {
+            todo.push((left as usize) * 4);
+        }
+        if right != 0 {
+            todo.push((right as usize) * 4);
+        }
     }
     None
 }
