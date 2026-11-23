@@ -91,15 +91,14 @@ impl log::Log for AppLogger {
 }
 
 pub fn init(app: &android_activity::AndroidApp) {
-    // Add primary log targets
-    let candidate_paths = [
-        PathBuf::from("/sdcard/mc3dr/app_logs.txt"),
-        PathBuf::from("/storage/emulated/0/mc3dr/app_logs.txt"),
-        PathBuf::from("/sdcard/app_logs.txt"),
-    ];
+    // Primary log target in game folder
+    let primary_log = PathBuf::from("/sdcard/mc3dr/app_logs.txt");
+    let fallback_log = PathBuf::from("/storage/emulated/0/mc3dr/app_logs.txt");
 
-    for cp in &candidate_paths {
-        LOGGER.add_path(cp);
+    if primary_log.exists() || Path::new("/sdcard").exists() {
+        LOGGER.add_path(primary_log);
+    } else {
+        LOGGER.add_path(fallback_log);
     }
 
     if let Some(internal) = app.internal_data_path() {

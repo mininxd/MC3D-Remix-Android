@@ -3,8 +3,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 const XBE_MAGIC: &[u8] = b"XBEH";
-const RETAIL_ENTRY_KEY: u32 = 0x5B6D40B6;
-const DEBUG_ENTRY_KEY: u32 = 0x9485D8CD;
+const RETAIL_ENTRY_KEY: u32 = 0xA8FC57AB;
+const DEBUG_ENTRY_KEY: u32 = 0x94859D4B;
+const RETAIL_THUNK_KEY: u32 = 0x5B6D40B6;
+const DEBUG_THUNK_KEY: u32 = 0xEFB1F152;
 
 #[derive(Debug, Clone)]
 pub struct XbeSection {

@@ -158,7 +158,7 @@ pub struct Vertex {
     pub a: f32,
 }
 
-const MAX_VERTICES: usize = 16384;
+const MAX_VERTICES: usize = 65536;
 
 pub struct GlesRenderer {
     display: *mut c_void,
@@ -169,6 +169,7 @@ pub struct GlesRenderer {
     program: u32,
     _vao: u32,
     vbo: u32,
+    vbo_capacity: usize,
     u_screen_size: i32,
     vertices: Vec<Vertex>,
 }
@@ -422,8 +423,9 @@ impl GlesRenderer {
                 program,
                 _vao: vao,
                 vbo,
+                vbo_capacity: MAX_VERTICES,
                 u_screen_size,
-                vertices: Vec::with_capacity(4096),
+                vertices: Vec::with_capacity(8192),
             })
         }
     }
@@ -493,11 +495,19 @@ impl GlesRenderer {
             if let Some(bitmap) = get_char_bitmap(ch) {
                 for row in 0..8 {
                     let byte = bitmap[row];
-                    for col in 0..8 {
+                    let py = y + (row as f32) * scale;
+                    let mut col = 0;
+                    while col < 8 {
                         if (byte & (1 << (7 - col))) != 0 {
-                            let px = x + (col as f32) * scale;
-                            let py = y + (row as f32) * scale;
-                            self.draw_rect(px, py, scale, scale, color);
+                            let start_col = col;
+                            while col < 8 && (byte & (1 << (7 - col))) != 0 {
+                                col += 1;
+                            }
+                            let span_len = (col - start_col) as f32;
+                            let px = x + (start_col as f32) * scale;
+                            self.draw_rect(px, py, span_len * scale, scale, color);
+                        } else {
+                            col += 1;
                         }
                     }
                 }
@@ -513,6 +523,17 @@ impl GlesRenderer {
                     glBindVertexArray(self._vao);
                 }
                 glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
+
+                if self.vertices.len() > self.vbo_capacity {
+                    self.vbo_capacity = (self.vertices.len() * 2).max(65536);
+                    glBufferData(
+                        GL_ARRAY_BUFFER,
+                        (self.vbo_capacity * std::mem::size_of::<Vertex>()) as isize,
+                        ptr::null(),
+                        GL_DYNAMIC_DRAW,
+                    );
+                }
+
                 glBufferSubData(
                     GL_ARRAY_BUFFER,
                     0,
