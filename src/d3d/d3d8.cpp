@@ -1032,6 +1032,7 @@ HLE_STDCALL(D3DDevice_DrawVertices, 3) {
 
 HLE_STDCALL(D3DDevice_DrawIndexedVertices, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));
     SyncDeferred();
     const uint8_t* indices = a[2] ? static_cast<const uint8_t*>(HostPtr(a[2])) : nullptr;
     if (g_backend) g_backend->Draw(g_state, a[0], 0, a[1], indices);
@@ -1081,6 +1082,14 @@ void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride
     g_state.streams[0] = stream;
 }
 
+// bytes per vertex of the bound format: stream 0 of the FVF or of the shader's declaration
+uint32_t VertexBytes() {
+    if (g_state.vs_handle & 1) return g_state.vs ? g_state.vs->stream_stride[0] : 0;
+    gpu::VertexShader fvf;
+    gpu::FvfInputs(g_state.vs_handle, fvf);
+    return fvf.stream_stride[0];
+}
+
 // DrawIndexedUp(prim, count, indices, vertices, stride): vertex data copied to ring buffer, indexed draw dispatched
 void DrawIndexedUp(uint32_t prim, uint32_t count, const void* indices, const void* vertices, uint32_t stride) {
     if (!g_backend || !count || !indices || !vertices) return;
@@ -1103,14 +1112,6 @@ void DrawIndexedUp(uint32_t prim, uint32_t count, const void* indices, const voi
     g_backend->Draw(g_state, prim, 0, count, reinterpret_cast<const uint8_t*>(indices));
     g_state.streams[0] = stream;
     g_state.base_vertex = saved_base;
-}
-
-// bytes per vertex of the bound format: stream 0 of the FVF or of the shader's declaration
-uint32_t VertexBytes() {
-    if (g_state.vs_handle & 1) return g_state.vs ? g_state.vs->stream_stride[0] : 0;
-    gpu::VertexShader fvf;
-    gpu::FvfInputs(g_state.vs_handle, fvf);
-    return fvf.stream_stride[0];
 }
 
 uint32_t g_push_begin = 0;
@@ -1350,9 +1351,9 @@ void EndImmediate(X86Context&, uint8_t*) {
 // Inlined push buffer advance and commit
 X86_EXTERN_FUNC(sub_004163B0);
 X86_FUNC(sub_004163B0) {
-    uint32_t end = mem::Read<uint32_t>(ctx.esp + 4);
-    uint32_t pDev = mem::Read<uint32_t>(kDevicePtr);
-    if (pDev) mem::Write<uint32_t>(pDev, end);
+    uint32_t end = X86_MEM32(ctx.esp + 4);
+    uint32_t pDev = R32(kDevicePtr);
+    if (pDev) W32(pDev, end);
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(end);
     ctx.esp += 8;
@@ -1361,11 +1362,11 @@ X86_FUNC(sub_004163B0) {
 // Inlined D3DDevice_DrawIndexedVerticesUP(prim, count, pIndices, pVertices, stride)
 X86_EXTERN_FUNC(sub_004176E0);
 X86_FUNC(sub_004176E0) {
-    uint32_t prim = mem::Read<uint32_t>(ctx.esp + 4);
-    uint32_t count = mem::Read<uint32_t>(ctx.esp + 8);
-    uint32_t pIndices = mem::Read<uint32_t>(ctx.esp + 12);
-    uint32_t pVertices = mem::Read<uint32_t>(ctx.esp + 16);
-    uint32_t stride = mem::Read<uint32_t>(ctx.esp + 20);
+    uint32_t prim = X86_MEM32(ctx.esp + 4);
+    uint32_t count = X86_MEM32(ctx.esp + 8);
+    uint32_t pIndices = X86_MEM32(ctx.esp + 12);
+    uint32_t pVertices = X86_MEM32(ctx.esp + 16);
+    uint32_t stride = X86_MEM32(ctx.esp + 20);
 
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));
@@ -1375,22 +1376,6 @@ X86_FUNC(sub_004176E0) {
     }
     ctx.eax = 0;
     ctx.esp += 24;
-}
-
-// Inlined D3DDevice_DrawIndexedVertices(prim, count, pIndices)
-X86_EXTERN_FUNC(sub_00417820);
-X86_FUNC(sub_00417820) {
-    uint32_t prim = mem::Read<uint32_t>(ctx.esp + 4);
-    uint32_t count = mem::Read<uint32_t>(ctx.esp + 8);
-    uint32_t pIndices = mem::Read<uint32_t>(ctx.esp + 12);
-
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
-    Walk(Dev(kDevPush));
-    SyncDeferred();
-    const uint8_t* indices = pIndices ? static_cast<const uint8_t*>(HostPtr(pIndices)) : nullptr;
-    if (g_backend) g_backend->Draw(g_state, prim, 0, count, indices);
-    ctx.eax = 0;
-    ctx.esp += 16;
 }
 
 // Inlined D3DDevice_End
