@@ -28,6 +28,7 @@
 #include "common/options.h"
 #include "core/input.h"
 #include "core/log.h"
+#include "crash_log.h"
 #include "host.h"
 #include "image_symbols.h"
 #include "kernel/kernel.h"
@@ -48,19 +49,7 @@ std::string Utf8(const wchar_t* w) {
 
 // the log's lines to logcat as well: stderr is read on a thread of its own
 void LogToLogcat() {
-    int fds[2];
-    if (pipe(fds)) return;
-    dup2(fds[1], STDERR_FILENO);
-    close(fds[1]);
-    std::thread([fd = fds[0]] {
-        char buf[1024];
-        std::string line;
-        for (ssize_t n; (n = read(fd, buf, sizeof(buf))) > 0;) {
-            line.append(buf, size_t(n));
-            for (size_t nl; (nl = line.find('\n')) != std::string::npos; line.erase(0, nl + 1))
-                __android_log_write(ANDROID_LOG_INFO, "BLACK", line.substr(0, nl).c_str());
-        }
-    }).detach();
+    // handled directly by logx::Write using __android_log_print with tag MC3DR
 }
 
 std::string Property(const char* name) {
@@ -340,13 +329,16 @@ void Dispatch(const SDL_Event& e) {
 }  // namespace
 
 int main(int, char**) {
-    LogToLogcat();
+    logx::InstallCrashHandlers();
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
     SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO | SDL_INIT_SENSOR)) {
-        __android_log_print(ANDROID_LOG_ERROR, "BLACK", "SDL_Init: %s", SDL_GetError());
+        char err[512];
+        std::snprintf(err, sizeof(err), "SDL_Init failed: %s", SDL_GetError());
+        __android_log_print(ANDROID_LOG_FATAL, "MC3DR", "%s", err);
+        logx::SaveCrashReport("Fatal Startup Error", err);
         return 1;
     }
     logx::Init((app::ExeDir() / "logs").string(), app::kGame.log);
@@ -357,13 +349,16 @@ int main(int, char**) {
     std::string title = Utf8(app::kGame.title);
     g_window = SDL_CreateWindow(title.c_str(), 0, 0, SDL_WINDOW_FULLSCREEN | SDL_WINDOW_VULKAN | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!g_window) {
+        char err[512];
+        std::snprintf(err, sizeof(err), "SDL_CreateWindow failed: %s", SDL_GetError());
         LOGE("app: no window: %s", SDL_GetError());
+        logx::SaveCrashReport("Fatal Startup Error", err);
         return 1;
     }
 
     app::GameFiles game;
     if (!app::FindGame(game)) {
-        logx::Flush();
+        logx::SaveCrashReport("Fatal Startup Error", "FindGame could not find default.xbe or ISO in storage folders");
         return 1;
     }
 
@@ -371,8 +366,9 @@ int main(int, char**) {
     input::Init();
     if (app::kGame.window) app::kGame.window(g_window);
     if (!kernel::Boot(std::move(game.xbe), IMAGE_XBE, game.dir.string(), (app::ExeDir() / "hdd").string())) {
+        logx::SaveCrashReport("Fatal Startup Error", "kernel::Boot failed to initialize game / memory / sections");
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, Utf8(app::kGame.short_title).c_str(),
-                                 "The game failed to start, see the log in the logs folder.", g_window);
+                                 "The game failed to start, see crash_log.txt in the mc3dr folder.", g_window);
         return 1;
     }
 

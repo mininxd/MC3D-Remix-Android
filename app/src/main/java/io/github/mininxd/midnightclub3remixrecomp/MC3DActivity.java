@@ -22,8 +22,13 @@ import android.view.WindowInsetsController;
 import android.widget.Toast;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import android.util.Log;
 
 import org.libsdl.app.SDLActivity;
 import org.libsdl.app.SDLControllerManager;
@@ -49,11 +54,71 @@ public class MC3DActivity extends SDLActivity {
         return new String[] {"SDL3", "main"};
     }
 
+    public static native void nativeRecordCrash(String category, String details);
+
+    private static void recordJavaCrash(Thread thread, Throwable throwable) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Uncaught Java Exception on thread: ").append(thread.getName())
+          .append(" (id=").append(thread.getId()).append(")\n\n");
+        sb.append("Exception: ").append(throwable.toString()).append("\n\n");
+        sb.append("Stack Trace:\n");
+        StringWriter sw = new StringWriter();
+        PrintWriter pw = new PrintWriter(sw);
+        throwable.printStackTrace(pw);
+        sb.append(sw.toString());
+
+        String details = sb.toString();
+        Log.e("MC3DR_Crash", details);
+
+        // 1. Pass to native crash reporter so it captures with in-memory execution logs
+        try {
+            nativeRecordCrash("Java Uncaught Exception", details);
+        } catch (Throwable t) {
+            Log.e("MC3DR_Crash", "Failed to forward crash to native logger: " + t);
+        }
+
+        // 2. Persist directly to external storage in case native code cannot be reached
+        String[] paths = new String[] {
+            "/storage/emulated/0/mc3dr/crash_log.txt",
+            "/sdcard/mc3dr/crash_log.txt",
+            "/sdcard/mc3dr/app_logs.txt",
+            "/storage/emulated/0/mc3dr/app_logs.txt"
+        };
+        for (String p : paths) {
+            try {
+                File f = new File(p);
+                File dir = f.getParentFile();
+                if (dir != null && !dir.exists()) dir.mkdirs();
+                try (FileOutputStream fos = new FileOutputStream(f)) {
+                    fos.write(details.getBytes(StandardCharsets.UTF_8));
+                    fos.flush();
+                    fos.getFD().sync();
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        for (View v : new View[] {mSurface, mLayout})
-            if (v != null) v.setOnCapturedPointerListener(MC3DActivity::onCapturedPointer);
+
+        final Thread.UncaughtExceptionHandler defaultHandler = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
+            try {
+                recordJavaCrash(thread, throwable);
+            } catch (Throwable ignored) {
+            }
+            if (defaultHandler != null) {
+                defaultHandler.uncaughtException(thread, throwable);
+            }
+        });
+
+        try {
+            for (View v : new View[] {mSurface, mLayout})
+                if (v != null) v.setOnCapturedPointerListener(MC3DActivity::onCapturedPointer);
+        } catch (Throwable ignored) {
+        }
         File own = getExternalFilesDir(null);
         if (own != null) new File(own, "assets").mkdirs();
         // every launch unless turned off: a newer release is shown once nothing else is asked
