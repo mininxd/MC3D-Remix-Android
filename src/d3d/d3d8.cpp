@@ -1216,6 +1216,13 @@ void ApplyImmediateMethod(uint32_t m, uint32_t v) {
         a += (m - kMVertexData4F) / 16 * 4;
         last = component == 3;
         a[component] = f;
+    } else if (m >= 0x1500 && m < 0x150C) {  // position, 3 floats and w = 1
+        last = m == 0x1508;
+        a[(m - 0x1500) / 4] = f;
+        a[3] = 1;
+    } else if (m >= 0x1518 && m < 0x1528) {  // position, 4 floats
+        last = m == 0x1524;
+        a[(m - 0x1518) / 4] = f;
     } else {
         return;
     }
@@ -1256,17 +1263,26 @@ void Walk(uint32_t end) {
                 if (v) {
                     inline_prim = v;
                     inline_vertices.clear();
-                } else if (inline_prim) {
-                    if (!inline_vertices.empty()) {
+                    ApplyImmediateMethod(m, v);
+                } else {
+                    if (inline_prim && !inline_vertices.empty()) {
                         DrawPushedPrimitive(inline_prim, inline_vertices);
                         inline_vertices.clear();
+                        g_im_prim = 0;
+                        g_im_vertices.clear();
+                    } else {
+                        ApplyImmediateMethod(m, 0);
                     }
                     inline_prim = 0;
                 }
+            } else if ((m >= kMVertexData2F && m < kMVertexData2FEnd) ||
+                       (m >= kMVertexData4UB && m < kMVertexData4UBEnd) ||
+                       (m >= kMVertexData4F && m < kMVertexData4FEnd) ||
+                       (m >= 0x1500 && m < 0x150C) ||
+                       (m >= 0x1518 && m < 0x1528)) {
                 ApplyImmediateMethod(m, v);
             } else {
                 if (m >> 2 < g_state.simple.size()) g_state.simple[m >> 2] = v;
-                ApplyImmediateMethod(m, v);
             }
         }
     }

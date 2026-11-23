@@ -142,6 +142,141 @@ X86_FUNC(sub_003C0DC5) {
     ctx.esp += 12;
 }
 
+// DirectSound voice / stream null guards to prevent crashes at 0x100000018 and siblings
+X86_EXTERN_FUNC(sub_003C772E);
+X86_FUNC(sub_003C0BC2) {
+    uint32_t eax = X86_MEM32(ctx.esp + 4);
+    uint32_t edx = X86_MEM32(ctx.esp + 8);
+    if (eax != 0) {
+        uint32_t ecx = X86_MEM32(eax + 0x10);
+        if (ecx != 0) {
+            X86_MEM32(ecx + 0x18) = edx;
+        }
+        uint32_t ctrl = X86_MEM32(eax + 0x0C);
+        if (ctrl != 0) {
+            ctx.ecx = ctrl;
+            X86_PUSH32(0x3C0BD8u);
+            sub_003C772E(ctx, base);
+        }
+    }
+    ctx.esp += 12;
+}
+
+X86_EXTERN_FUNC(sub_003C7696);
+X86_FUNC(sub_003C0BDB) {
+    uint32_t ecx = X86_MEM32(ctx.esp + 4);
+    uint32_t edx = X86_MEM32(ctx.esp + 8);
+    if (ecx != 0) {
+        uint32_t eax = X86_MEM32(ecx + 0x10);
+        if (eax != 0) {
+            edx -= X86_MEM32(eax + 0x20);
+            X86_MEM32(eax + 0x1C) = edx;
+        }
+        uint32_t ctrl = X86_MEM32(ecx + 0x0C);
+        if (ctrl != 0) {
+            ctx.ecx = ctrl;
+            X86_PUSH32(0x3C0BF4u);
+            sub_003C7696(ctx, base);
+        }
+    }
+    ctx.esp += 12;
+}
+
+X86_EXTERN_FUNC(__imp__sub_003C0BF7);
+X86_FUNC(sub_003C0BF7) {
+    uint32_t eax = X86_MEM32(ctx.esp + 4);
+    if (!eax) { ctx.esp += 12; return; }
+    __imp__sub_003C0BF7(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_003C0C0A);
+X86_FUNC(sub_003C0C0A) {
+    uint32_t eax = X86_MEM32(ctx.esp + 4);
+    if (!eax) { ctx.esp += 12; return; }
+    __imp__sub_003C0C0A(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_003C0C1D);
+X86_FUNC(sub_003C0C1D) {
+    uint32_t eax = X86_MEM32(ctx.esp + 4);
+    if (!eax) { ctx.esp += 12; return; }
+    __imp__sub_003C0C1D(ctx, base);
+}
+
+X86_FUNC(sub_003C0C30) {
+    uint32_t edx = X86_MEM32(ctx.esp + 4);
+    uint32_t esi = X86_MEM32(ctx.esp + 8);
+    if (edx != 0) {
+        uint32_t eax = X86_MEM32(edx + 0x10);
+        if (eax != 0) {
+            uint32_t ecx = X86_MEM32(eax + 0x20);
+            ecx -= esi;
+            X86_MEM32(eax + 0x1C) += ecx;
+            X86_MEM32(eax + 0x20) = esi;
+        }
+        uint32_t ctrl = X86_MEM32(edx + 0x0C);
+        if (ctrl != 0) {
+            ctx.ecx = ctrl;
+            X86_PUSH32(0x3C0C4Fu);
+            sub_003C7696(ctx, base);
+        }
+    }
+    ctx.esp += 12;
+}
+
+X86_EXTERN_FUNC(sub_003C0AE2);
+X86_FUNC(sub_003C0C53) {
+    uint32_t esi = X86_MEM32(ctx.esp + 4);
+    uint32_t arg2 = X86_MEM32(ctx.esp + 8);
+    if (esi != 0) {
+        uint32_t ecx = X86_MEM32(esi + 0x10);
+        if (ecx != 0 && arg2 != 0) {
+            ctx.ecx = ecx;
+            X86_PUSH32(arg2);
+            X86_PUSH32(0x3C0C64u);
+            sub_003C0AE2(ctx, base);
+        }
+        uint32_t ctrl = X86_MEM32(esi + 0x0C);
+        if (ctrl != 0) {
+            ctx.ecx = ctrl;
+            X86_PUSH32(0x3C0C6Cu);
+            sub_003C7696(ctx, base);
+        }
+    }
+    ctx.esp += 12;
+}
+
+X86_EXTERN_FUNC(__imp__sub_003C0C70);
+X86_FUNC(sub_003C0C70) {
+    uint32_t eax = X86_MEM32(ctx.esp + 4);
+    if (!eax) { ctx.eax = 0; ctx.esp += 8; return; }
+    __imp__sub_003C0C70(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_003C0C81);
+X86_FUNC(sub_003C0C81) {
+    uint32_t eax = X86_MEM32(ctx.esp + 4);
+    if (!eax) { ctx.esp += 12; return; }
+    __imp__sub_003C0C81(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_003C0C94);
+X86_FUNC(sub_003C0C94) {
+    uint32_t ecx = X86_MEM32(ctx.esp + 4);
+    if (ecx == 0 || X86_MEM32(ecx + 0x10) == 0) {
+        ctx.eax = 0;
+        ctx.esp += 12;
+        return;
+    }
+    uint32_t eax = X86_MEM32(ecx + 0x10);
+    if (X86_MEM32(eax + 0xB8) == 0) {
+        ctx.eax = 0;
+        ctx.esp += 12;
+        return;
+    }
+    __imp__sub_003C0C94(ctx, base);
+}
+
 // Fatal error interceptor: logs original guest error message to logcat & crash log
 X86_FUNC(sub_00019070) {
     uint32_t fmt_ptr = X86_MEM32(ctx.esp + 4);
