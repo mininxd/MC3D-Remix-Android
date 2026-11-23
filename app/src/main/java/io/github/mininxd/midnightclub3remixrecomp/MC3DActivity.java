@@ -425,9 +425,8 @@ public class MC3DActivity extends SDLActivity {
 
     private void promptPickIso() {
         dialog = new AlertDialog.Builder(this)
-                .setTitle("Game Files Missing")
-                .setMessage("Midnight Club 3 game files were not found in /storage/emulated/0/" + SHARED + ".\n\n"
-                        + "Please select your Midnight Club 3: DUB Edition Remix (.iso) disc image to extract and install the game.")
+                .setTitle("Select Game ISO")
+                .setMessage("Please select your Midnight Club 3: DUB Edition Remix (.iso) disc image to extract and install the game.")
                 .setCancelable(false)
                 .setPositiveButton("Select ISO", (d, w) -> startImport())
                 .setNegativeButton("Later", null)

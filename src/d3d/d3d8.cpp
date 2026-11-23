@@ -318,6 +318,13 @@ void ApplyDeviceTargets() {
     std::memcpy(HostPtr(kDevice + kDevSuperX), &one, 4);
     std::memcpy(HostPtr(kDevice + kDevSuperY), &one, 4);
     std::memcpy(HostPtr(kDevice + kDevZScale), &zs, 4);
+    if (XDK_CDevice_AutoDepth != xdk::kUnknown) SetDev(XDK_CDevice_AutoDepth, g_depth);
+    if (XDK_CDevice_BackBufferScale != xdk::kUnknown) {
+        std::memcpy(HostPtr(kDevice + XDK_CDevice_BackBufferScale), &one, 4);
+        std::memcpy(HostPtr(kDevice + XDK_CDevice_BackBufferScale + 4), &one, 4);
+    }
+    if (XDK_CDevice_DisplayFlags != xdk::kUnknown) SetDev(XDK_CDevice_DisplayFlags, 0x400000 | (app::Widescreen() ? 0x10000 : 0));
+    SetDev(XDK_CDevice_VertexShader, 0x00425400u);
 }
 }  // namespace
 
@@ -892,6 +899,9 @@ HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
         } else {
             LOG_FIRST(8, "d3d: SetVertexShader with unknown handle %08X", h);
         }
+        SetDev(XDK_CDevice_VertexShader, (h & ~1u) ? (h & ~1u) : 0x00425400u);
+    } else {
+        SetDev(XDK_CDevice_VertexShader, 0x00425400u);
     }
     return 0;
 }
