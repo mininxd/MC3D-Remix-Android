@@ -80,10 +80,19 @@ impl IsoManager {
     }
 
     pub fn find_mc3dr_iso(&self) -> Option<&DiscoveredIso> {
-        self.items.iter().find(|item| {
-            let p_str = item.path.to_string_lossy();
-            p_str.contains("/mc3dr/") || p_str.contains("/mc3dr")
-        })
+        // Prioritize default.xbe in /sdcard/mc3dr, then any ISO in /sdcard/mc3dr
+        self.items
+            .iter()
+            .find(|item| {
+                let p = item.path.to_string_lossy();
+                (p.contains("/mc3dr/") || p.contains("/mc3dr")) && p.ends_with("default.xbe")
+            })
+            .or_else(|| {
+                self.items.iter().find(|item| {
+                    let p = item.path.to_string_lossy();
+                    p.contains("/mc3dr/") || p.contains("/mc3dr")
+                })
+            })
     }
 
     pub fn select_next(&mut self) {
@@ -108,11 +117,19 @@ impl IsoManager {
             Err(_) => return false,
         };
 
-        let offsets = [0x00010000u64, 0x00000000u64, 0x0FD90000u64];
+        // Check if XBE executable
+        let mut xbe_magic = [0u8; 4];
+        if file.read_exact(&mut xbe_magic).is_ok() && &xbe_magic == b"XBEH" {
+            return true;
+        }
+
+        // Check XDVDFS partition candidates: 0 (bare/redump game partition), 0x18300000 (redump video offset), 0x0FD90000
+        let partitions = [0u64, 0x18300000u64, 0x0FD90000u64];
         let mut buf = [0u8; 20];
 
-        for &offset in &offsets {
-            if file.seek(SeekFrom::Start(offset)).is_ok() {
+        for &base in &partitions {
+            let volume_offset = base + 32 * 2048;
+            if file.seek(SeekFrom::Start(volume_offset)).is_ok() {
                 if let Ok(n) = file.read(&mut buf) {
                     if n >= XDVDFS_MAGIC.len() && &buf[..XDVDFS_MAGIC.len()] == XDVDFS_MAGIC {
                         return true;

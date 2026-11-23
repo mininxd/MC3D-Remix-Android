@@ -1,5 +1,5 @@
 use crate::config::{AppConfig, RenderScale, TextureFilter};
-use crate::executor::GameExecutor;
+use crate::executor::{ExecutionState, GameExecutor};
 use crate::gles::GlesRenderer;
 use crate::iso::IsoManager;
 
@@ -260,6 +260,24 @@ impl LauncherUi {
         touch: Option<(f32, f32)>,
         touch_pressed: bool,
     ) {
+        if executor.state != ExecutionState::Running {
+            // Draw visible status/loading overlay so the screen is never blank
+            gles.draw_rect(0.0, 0.0, sw, sh, [0.08, 0.10, 0.14, 1.0]);
+            gles.draw_text(40.0, sh * 0.35, "MIDNIGHT CLUB 3: DUB EDITION REMIX", 2.2, [1.0, 1.0, 1.0, 1.0]);
+            let status_color = if executor.state == ExecutionState::Failed {
+                [1.0, 0.3, 0.3, 1.0]
+            } else {
+                [0.2, 0.8, 1.0, 1.0]
+            };
+            gles.draw_text(40.0, sh * 0.35 + 50.0, &format!("Status: {}", executor.status), 1.5, status_color);
+            gles.draw_text(40.0, sh * 0.35 + 90.0, "Press B on Gamepad or Tap screen to return to menu", 1.2, [0.6, 0.7, 0.8, 1.0]);
+
+            if touch_pressed {
+                self.current_screen = Screen::MainLauncher;
+            }
+            return;
+        }
+
         // Step execution and render game 3D viewport
         executor.tick_frame(config);
         executor.render_viewport(gles, config, sw, sh);

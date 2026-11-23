@@ -95,8 +95,12 @@ pub fn request_storage_permissions(app: &AndroidApp) {
                                                         "(Landroid/content/Intent;)V",
                                                         &[JValue::Object(&intent_obj)],
                                                     );
-                                                    launched = true;
-                                                    info!("Launched MANAGE_APP_ALL_FILES_ACCESS_PERMISSION intent");
+                                                    if env.exception_check().unwrap_or(false) {
+                                                        let _ = env.exception_clear();
+                                                    } else {
+                                                        launched = true;
+                                                        info!("Launched MANAGE_APP_ALL_FILES_ACCESS_PERMISSION intent");
+                                                    }
                                                 }
                                             }
                                         }
@@ -121,7 +125,11 @@ pub fn request_storage_permissions(app: &AndroidApp) {
                                             "(Landroid/content/Intent;)V",
                                             &[JValue::Object(&intent_obj)],
                                         );
-                                        info!("Launched general MANAGE_ALL_FILES_ACCESS_PERMISSION intent");
+                                        if env.exception_check().unwrap_or(false) {
+                                            let _ = env.exception_clear();
+                                        } else {
+                                            info!("Launched general MANAGE_ALL_FILES_ACCESS_PERMISSION intent");
+                                        }
                                     }
                                 }
                             }
@@ -129,6 +137,10 @@ pub fn request_storage_permissions(app: &AndroidApp) {
                     }
                 }
             }
+        }
+
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_clear();
         }
 
         // 3. Request standard READ_EXTERNAL_STORAGE & WRITE_EXTERNAL_STORAGE
@@ -146,13 +158,18 @@ pub fn request_storage_permissions(app: &AndroidApp) {
                         "([Ljava/lang/String;I)V",
                         &[JValue::Object(&perm_array), JValue::Int(1001)],
                     );
-                    if res.is_ok() {
+                    if env.exception_check().unwrap_or(false) {
+                        let _ = env.exception_clear();
+                    } else if res.is_ok() {
                         info!("Successfully prompted requestPermissions for external storage");
                     } else {
                         error!("requestPermissions call returned error: {:?}", res);
                     }
                 }
             }
+        }
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_clear();
         }
     }
 }
@@ -216,7 +233,11 @@ pub fn open_system_file_picker(app: &AndroidApp) {
                         "(Landroid/content/Intent;I)V",
                         &[JValue::Object(&intent_obj), JValue::Int(2001)],
                     );
-                    info!("System file picker intent started!");
+                    if env.exception_check().unwrap_or(false) {
+                        let _ = env.exception_clear();
+                    } else {
+                        info!("System file picker intent started!");
+                    }
                 }
             }
         }
