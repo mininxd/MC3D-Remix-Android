@@ -4,6 +4,7 @@
 #include "cpu/x86_ops.h"
 #include "kernel/kernel.h"
 #include "kernel/memory.h"
+#include "sound/sound.h"
 
 #include <atomic>
 #include <chrono>
@@ -123,9 +124,9 @@ void Loaded() {
 X86_FUNC(sub_003C0DC5) {
     uint32_t arg1 = X86_MEM32(ctx.esp + 4);
     uint32_t arg2 = X86_MEM32(ctx.esp + 8);
-    if (arg1 != 0) {
+    if (arg1 >= 0x10000u) {
         uint32_t obj = X86_MEM32(arg1 + 0x10);
-        if (obj != 0) {
+        if (obj >= 0x10000u) {
             if (arg2 != 0) {
                 X86_MEM8(obj + 0x0B) |= 0x01;
             } else {
@@ -142,18 +143,44 @@ X86_FUNC(sub_003C0DC5) {
     ctx.esp += 12;
 }
 
+// Voice unlinking null guard
+X86_EXTERN_FUNC(__imp__sub_003C0400);
+X86_FUNC(sub_003C0400) {
+    uint32_t eax = X86_MEM32(ctx.esp + 4);
+    if (eax < 0x10000u) { ctx.esp += 8; return; }
+    uint32_t ecx = X86_MEM32(eax);
+    uint32_t edx = X86_MEM32(eax + 4);
+    if (ecx < 0x10000u || edx < 0x10000u) { ctx.esp += 8; return; }
+    __imp__sub_003C0400(ctx, base);
+}
+
+// Voice mixbins setup null guard
+X86_EXTERN_FUNC(__imp__sub_003C0AE2);
+X86_FUNC(sub_003C0AE2) {
+    uint32_t esi = X86_MEM32(ctx.esp + 4);
+    if (esi < 0x10000u || ctx.ecx < 0x10000u) { ctx.esp += 8; return; }
+    __imp__sub_003C0AE2(ctx, base);
+}
+
+// Voice destructor null guard
+X86_EXTERN_FUNC(__imp__sub_003C0B75);
+X86_FUNC(sub_003C0B75) {
+    if (ctx.ecx < 0x10000u) { ctx.esp += 4; return; }
+    __imp__sub_003C0B75(ctx, base);
+}
+
 // DirectSound voice / stream null guards to prevent crashes at 0x100000018 and siblings
 X86_EXTERN_FUNC(sub_003C772E);
 X86_FUNC(sub_003C0BC2) {
     uint32_t eax = X86_MEM32(ctx.esp + 4);
     uint32_t edx = X86_MEM32(ctx.esp + 8);
-    if (eax != 0) {
+    if (eax >= 0x10000u) {
         uint32_t ecx = X86_MEM32(eax + 0x10);
-        if (ecx != 0) {
+        if (ecx >= 0x10000u) {
             X86_MEM32(ecx + 0x18) = edx;
         }
         uint32_t ctrl = X86_MEM32(eax + 0x0C);
-        if (ctrl != 0) {
+        if (ctrl >= 0x10000u) {
             ctx.ecx = ctrl;
             X86_PUSH32(0x3C0BD8u);
             sub_003C772E(ctx, base);
@@ -166,14 +193,14 @@ X86_EXTERN_FUNC(sub_003C7696);
 X86_FUNC(sub_003C0BDB) {
     uint32_t ecx = X86_MEM32(ctx.esp + 4);
     uint32_t edx = X86_MEM32(ctx.esp + 8);
-    if (ecx != 0) {
+    if (ecx >= 0x10000u) {
         uint32_t eax = X86_MEM32(ecx + 0x10);
-        if (eax != 0) {
+        if (eax >= 0x10000u) {
             edx -= X86_MEM32(eax + 0x20);
             X86_MEM32(eax + 0x1C) = edx;
         }
         uint32_t ctrl = X86_MEM32(ecx + 0x0C);
-        if (ctrl != 0) {
+        if (ctrl >= 0x10000u) {
             ctx.ecx = ctrl;
             X86_PUSH32(0x3C0BF4u);
             sub_003C7696(ctx, base);
@@ -185,37 +212,37 @@ X86_FUNC(sub_003C0BDB) {
 X86_EXTERN_FUNC(__imp__sub_003C0BF7);
 X86_FUNC(sub_003C0BF7) {
     uint32_t eax = X86_MEM32(ctx.esp + 4);
-    if (!eax) { ctx.esp += 12; return; }
+    if (eax < 0x10000u) { ctx.esp += 12; return; }
     __imp__sub_003C0BF7(ctx, base);
 }
 
 X86_EXTERN_FUNC(__imp__sub_003C0C0A);
 X86_FUNC(sub_003C0C0A) {
     uint32_t eax = X86_MEM32(ctx.esp + 4);
-    if (!eax) { ctx.esp += 12; return; }
+    if (eax < 0x10000u) { ctx.esp += 12; return; }
     __imp__sub_003C0C0A(ctx, base);
 }
 
 X86_EXTERN_FUNC(__imp__sub_003C0C1D);
 X86_FUNC(sub_003C0C1D) {
     uint32_t eax = X86_MEM32(ctx.esp + 4);
-    if (!eax) { ctx.esp += 12; return; }
+    if (eax < 0x10000u) { ctx.esp += 12; return; }
     __imp__sub_003C0C1D(ctx, base);
 }
 
 X86_FUNC(sub_003C0C30) {
     uint32_t edx = X86_MEM32(ctx.esp + 4);
     uint32_t esi = X86_MEM32(ctx.esp + 8);
-    if (edx != 0) {
+    if (edx >= 0x10000u) {
         uint32_t eax = X86_MEM32(edx + 0x10);
-        if (eax != 0) {
+        if (eax >= 0x10000u) {
             uint32_t ecx = X86_MEM32(eax + 0x20);
             ecx -= esi;
             X86_MEM32(eax + 0x1C) += ecx;
             X86_MEM32(eax + 0x20) = esi;
         }
         uint32_t ctrl = X86_MEM32(edx + 0x0C);
-        if (ctrl != 0) {
+        if (ctrl >= 0x10000u) {
             ctx.ecx = ctrl;
             X86_PUSH32(0x3C0C4Fu);
             sub_003C7696(ctx, base);
@@ -224,20 +251,19 @@ X86_FUNC(sub_003C0C30) {
     ctx.esp += 12;
 }
 
-X86_EXTERN_FUNC(sub_003C0AE2);
 X86_FUNC(sub_003C0C53) {
     uint32_t esi = X86_MEM32(ctx.esp + 4);
     uint32_t arg2 = X86_MEM32(ctx.esp + 8);
-    if (esi != 0) {
+    if (esi >= 0x10000u) {
         uint32_t ecx = X86_MEM32(esi + 0x10);
-        if (ecx != 0 && arg2 != 0) {
+        if (ecx >= 0x10000u && arg2 != 0) {
             ctx.ecx = ecx;
             X86_PUSH32(arg2);
             X86_PUSH32(0x3C0C64u);
             sub_003C0AE2(ctx, base);
         }
         uint32_t ctrl = X86_MEM32(esi + 0x0C);
-        if (ctrl != 0) {
+        if (ctrl >= 0x10000u) {
             ctx.ecx = ctrl;
             X86_PUSH32(0x3C0C6Cu);
             sub_003C7696(ctx, base);
@@ -249,32 +275,178 @@ X86_FUNC(sub_003C0C53) {
 X86_EXTERN_FUNC(__imp__sub_003C0C70);
 X86_FUNC(sub_003C0C70) {
     uint32_t eax = X86_MEM32(ctx.esp + 4);
-    if (!eax) { ctx.eax = 0; ctx.esp += 8; return; }
+    if (eax < 0x10000u) { ctx.eax = 0; ctx.esp += 8; return; }
     __imp__sub_003C0C70(ctx, base);
 }
 
 X86_EXTERN_FUNC(__imp__sub_003C0C81);
 X86_FUNC(sub_003C0C81) {
     uint32_t eax = X86_MEM32(ctx.esp + 4);
-    if (!eax) { ctx.esp += 12; return; }
+    if (eax < 0x10000u) { ctx.esp += 12; return; }
     __imp__sub_003C0C81(ctx, base);
 }
 
 X86_EXTERN_FUNC(__imp__sub_003C0C94);
 X86_FUNC(sub_003C0C94) {
     uint32_t ecx = X86_MEM32(ctx.esp + 4);
-    if (ecx == 0 || X86_MEM32(ecx + 0x10) == 0) {
+    if (ecx < 0x10000u) {
         ctx.eax = 0;
         ctx.esp += 12;
         return;
     }
     uint32_t eax = X86_MEM32(ecx + 0x10);
-    if (X86_MEM32(eax + 0xB8) == 0) {
+    if (eax < 0x10000u || X86_MEM32(eax + 0xB8) == 0) {
         ctx.eax = 0;
         ctx.esp += 12;
         return;
     }
     __imp__sub_003C0C94(ctx, base);
+}
+
+// Hardware voice routine null guards (0x100000071 / 0x100000012)
+X86_EXTERN_FUNC(__imp__sub_003C772E);
+X86_FUNC(sub_003C772E) {
+    if (ctx.ecx < 0x10000u) {
+        ctx.eax = 0;
+        ctx.esp += 4;
+        return;
+    }
+    uint32_t p = X86_MEM32(ctx.ecx + 0x70u);
+    if (p < 0x10000u) {
+        ctx.eax = 0;
+        ctx.esp += 4;
+        return;
+    }
+    __imp__sub_003C772E(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_003C7696);
+X86_FUNC(sub_003C7696) {
+    if (ctx.ecx < 0x10000u) {
+        ctx.eax = 0;
+        ctx.esp += 4;
+        return;
+    }
+    __imp__sub_003C7696(ctx, base);
+}
+
+// DirectSound Buffer & Stream host implementations for methods that receive host-allocated Voice* objects
+
+// IDirectSoundBuffer::SetPitch(this, lPitch)
+X86_FUNC(sub_003C2090) {
+    uint32_t obj = X86_MEM32(ctx.esp + 4);
+    int32_t pitch = static_cast<int32_t>(X86_MEM32(ctx.esp + 8));
+    std::lock_guard<std::recursive_mutex> lock(sound::g_lock);
+    sound::Voice* v = sound::Find(obj);
+    if (v) {
+        v->freq = static_cast<uint32_t>(std::clamp<double>(
+            double(v->rate) * std::pow(2.0, double(pitch) / 1200.0), 100.0, 192000.0));
+    }
+    ctx.eax = 0;
+    ctx.esp += 12;
+}
+
+// IDirectSoundBuffer::SetPan(this, lPan)
+X86_FUNC(sub_003C20AC) {
+    ctx.eax = 0;
+    ctx.esp += 12;
+}
+
+// IDirectSoundBuffer::SetEG(this, pEG)
+X86_FUNC(sub_003C20C8) {
+    ctx.eax = 0;
+    ctx.esp += 12;
+}
+
+X86_FUNC(sub_003C21B8) {
+    ctx.eax = 0;
+    ctx.esp += 12;
+}
+
+X86_FUNC(sub_003C21D4) {
+    ctx.eax = 0;
+    ctx.esp += 16;
+}
+
+// IDirectSoundBuffer::SetFilter(this, pFilter)
+X86_FUNC(sub_003C2240) {
+    ctx.eax = 0;
+    ctx.esp += 12;
+}
+
+X86_FUNC(sub_003C225C) {
+    ctx.eax = 0;
+    ctx.esp += 12;
+}
+
+X86_FUNC(sub_003C2278) {
+    ctx.eax = 0;
+    ctx.esp += 12;
+}
+
+// CDirectSoundStream::SetPitch(this, lPitch)
+X86_FUNC(sub_003C2299) {
+    uint32_t obj = X86_MEM32(ctx.esp + 4);
+    int32_t pitch = static_cast<int32_t>(X86_MEM32(ctx.esp + 8));
+    std::lock_guard<std::recursive_mutex> lock(sound::g_lock);
+    sound::Voice* v = sound::Find(obj);
+    if (v) {
+        v->freq = static_cast<uint32_t>(std::clamp<double>(
+            double(v->rate) * std::pow(2.0, double(pitch) / 1200.0), 100.0, 192000.0));
+    }
+    ctx.eax = 0;
+    ctx.esp += 12;
+}
+
+// CDirectSoundStream::SetPan(this, lPan)
+X86_FUNC(sub_003C229E) {
+    ctx.eax = 0;
+    ctx.esp += 12;
+}
+
+// CDirectSoundStream::SetEG(this, pEG)
+X86_FUNC(sub_003C22A3) {
+    ctx.eax = 0;
+    ctx.esp += 12;
+}
+
+// CDirectSoundStream::SetFilter(this, pFilter)
+X86_FUNC(sub_003C22D4) {
+    ctx.eax = 0;
+    ctx.esp += 12;
+}
+
+X86_FUNC(sub_003C22D9) {
+    ctx.eax = 0;
+    ctx.esp += 12;
+}
+
+X86_FUNC(sub_003C22DE) {
+    ctx.eax = 0;
+    ctx.esp += 12;
+}
+
+// CDirectSoundStream::SetVolume(this, lVolume)
+X86_FUNC(sub_003C1FAB) {
+    uint32_t obj = X86_MEM32(ctx.esp + 4);
+    int32_t vol = static_cast<int32_t>(X86_MEM32(ctx.esp + 8));
+    std::lock_guard<std::recursive_mutex> lock(sound::g_lock);
+    sound::Voice* v = sound::Find(obj);
+    if (v) {
+        v->volume = sound::Db(vol);
+    }
+    ctx.eax = 0;
+    ctx.esp += 12;
+}
+
+X86_FUNC(sub_003C2933) {
+    ctx.eax = 0;
+    ctx.esp += 12;
+}
+
+X86_FUNC(sub_003C36E9) {
+    ctx.eax = 0;
+    ctx.esp += 20;
 }
 
 // Fatal error interceptor: logs original guest error message to logcat & crash log
