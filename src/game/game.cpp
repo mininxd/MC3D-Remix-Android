@@ -2,11 +2,14 @@
 #include "common/options.h"
 #include "core/log.h"
 #include "cpu/x86_ops.h"
+#include "kernel/kernel.h"
 #include "kernel/memory.h"
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <thread>
 
 namespace game {
@@ -102,6 +105,16 @@ void Loaded() {
 
     StartHardwareTicker();
     LOGI("hardware: MMIO apertures committed and APU/NV2A ticker running");
+
+    // Ensure network link status export (PhyGetLinkState, ordinal 252) returns active link
+    kernel::RegisterExport(252, "PhyGetLinkState", [](X86Context& ctx, uint8_t*) {
+        LOGI("kernel: PhyGetLinkState -> returning link up (0x0B)");
+        // 0x0B = ETHERNET_LINK_ACTIVE (1) | ETHERNET_LINK_100MBPS (2) | ETHERNET_LINK_FULL_DUPLEX (8)
+        kernel::Return(ctx, 0x0Bu, 1);
+    });
+    kernel::RegisterExport(253, "PhyInitialize", [](X86Context& ctx, uint8_t*) {
+        kernel::Return(ctx, 0u, 2);
+    });
 }
 
 }  // namespace game
@@ -127,5 +140,59 @@ X86_FUNC(sub_003C0DC5) {
     ctx.of = 0;
     ctx.pf = 1;
     ctx.esp += 12;
+}
+
+// Strong override for sub_001A2870 (Midnight Club 3 WinSock initialization)
+// Protects against version check failure and logs network initialization progress
+X86_EXTERN_FUNC(sub_003CC350);
+X86_EXTERN_FUNC(sub_003CC367);
+
+X86_FUNC(sub_001A2870) {
+    uint32_t ref = X86_MEM32(0x510E08u) + 1;
+    X86_MEM32(0x510E08u) = ref;
+    if (ref == 1) {
+        LOGI("network: initializing WinSock for Midnight Club 3...");
+        uint32_t saved_esp = ctx.esp;
+        ctx.esp -= 0x1A0;
+        uint32_t wsa_ptr = ctx.esp + 0x0C;
+        uint32_t xnet_cfg = ctx.esp;
+
+        X86_MEM32(xnet_cfg) = 0;
+        X86_MEM32(xnet_cfg + 4) = 0x010C;
+
+        X86_PUSH32(xnet_cfg);
+        sub_003CC350(ctx, base);
+
+        X86_PUSH32(wsa_ptr);
+        X86_PUSH32(0x02);
+        sub_003CC367(ctx, base);
+
+        // Ensure wVersion is 0x0002 as required by MC3 (al=2, ah=0)
+        X86_MEM16(wsa_ptr) = 0x0002;
+        X86_MEM16(wsa_ptr + 2) = 0x0202;
+
+        ctx.esp = saved_esp;
+        LOGI("network: WinSock initialized successfully (ref count = %u)", ref);
+    } else {
+        LOGI("network: WinSock already initialized (ref count = %u)", ref);
+    }
+    ctx.esp += 4;
+}
+
+// Fatal error interceptor: logs original guest error message to logcat & crash log
+X86_FUNC(sub_00019070) {
+    uint32_t fmt_ptr = X86_MEM32(ctx.esp + 4);
+    const char* fmt = (fmt_ptr && base) ? reinterpret_cast<const char*>(base + fmt_ptr) : nullptr;
+    if (fmt) {
+        char buf[512];
+        uint32_t a1 = X86_MEM32(ctx.esp + 8);
+        uint32_t a2 = X86_MEM32(ctx.esp + 12);
+        uint32_t a3 = X86_MEM32(ctx.esp + 16);
+        std::snprintf(buf, sizeof(buf), fmt, a1, a2, a3);
+        LOGE("FATAL ERROR from guest: %s", buf);
+    } else {
+        LOGE("FATAL ERROR from guest (no format string, fmt_ptr=0x%08X)", fmt_ptr);
+    }
+    std::abort();
 }
 
