@@ -1081,6 +1081,30 @@ void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride
     g_state.streams[0] = stream;
 }
 
+// DrawIndexedUp(prim, count, indices, vertices, stride): vertex data copied to ring buffer, indexed draw dispatched
+void DrawIndexedUp(uint32_t prim, uint32_t count, const void* indices, const void* vertices, uint32_t stride) {
+    if (!g_backend || !count || !indices || !vertices) return;
+    if (!stride) stride = VertexBytes();
+    if (!stride) return;
+    SyncDeferred();
+
+    const uint16_t* idx16 = static_cast<const uint16_t*>(indices);
+    uint32_t max_idx = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (idx16[i] > max_idx) max_idx = idx16[i];
+    }
+    uint32_t vertex_count = max_idx + 1;
+    uint32_t bytes = vertex_count * stride;
+
+    auto stream = g_state.streams[0];
+    uint32_t saved_base = g_state.base_vertex;
+    g_state.base_vertex = 0;
+    g_state.streams[0] = {UpVertices(vertices, bytes), stride};
+    g_backend->Draw(g_state, prim, 0, count, reinterpret_cast<const uint8_t*>(indices));
+    g_state.streams[0] = stream;
+    g_state.base_vertex = saved_base;
+}
+
 // bytes per vertex of the bound format: stream 0 of the FVF or of the shader's declaration
 uint32_t VertexBytes() {
     if (g_state.vs_handle & 1) return g_state.vs ? g_state.vs->stream_stride[0] : 0;
@@ -1129,7 +1153,6 @@ void EndPrimitive() {
     g_im_prim = 0;
     if (!prim || !count) return;
     bool pretransformed = !(handle & 1) && (handle & 0xE) == 4;  // D3DFVF_XYZRHW
-    if (pretransformed) LOG_FIRST(1, "d3d: pretransformed immediate mode vertices are not supported");
     auto bound = g_state.vs;
     auto from = handle & 1 ? bound : nullptr;
     Made& m = made[{from.get(), g_im_mask}];
@@ -1139,6 +1162,8 @@ void EndPrimitive() {
         if (from) {
             m.vs->program = from->program;
             m.vs->program_type = from->program_type;
+        } else {
+            m.vs->program_type = pretransformed ? 0x4 : 0;
         }
         for (uint32_t s = 0; s < kImSlots; s++) {
             if (!(g_im_mask >> s & 1)) continue;
@@ -1199,9 +1224,21 @@ void ApplyImmediateMethod(uint32_t m, uint32_t v) {
     if (a == g_im_attr && last) g_im_vertices.insert(g_im_vertices.end(), g_im_attr, g_im_attr + kImFloats);
 }
 
+static void DrawPushedPrimitive(uint32_t prim, const std::vector<uint32_t>& vertices) {
+    uint32_t stride = VertexBytes();
+    uint32_t bytes = uint32_t(vertices.size()) * 4;
+    if (stride && bytes % stride == 0) {
+        DrawUp(prim, bytes / stride, vertices.data(), stride);
+    } else {
+        LOG_FIRST(8, "d3d: EndPush primitive %u dropped, %u bytes of vertices of %u", prim, bytes, stride);
+    }
+}
+
 // reads the commands pushed since the last call: vertex data between a begin and an end is drawn, the rest is skipped
 void Walk(uint32_t end) {
     if (!g_walk || end < g_walk || end > g_scratch_push + g_scratch_size) return;
+    static std::vector<uint32_t> inline_vertices;
+    static uint32_t inline_prim = 0;
     for (uint32_t p = g_walk; p + 4 <= end;) {
         // count in bits 18 to 28, bit 30 keeps the method for every value
         uint32_t head = R32(p);
@@ -1211,7 +1248,25 @@ void Walk(uint32_t end) {
         if ((head & 0xA0030003) || n * 4 > end - p) break;  // anything but a method header
         for (uint32_t i = 0; i < n; i++, p += 4) {
             uint32_t m = head & 0x40000000 ? method : method + i * 4;
-            ApplyImmediateMethod(m, R32(p));
+            uint32_t v = R32(p);
+            if (m == kMInlineArray) {
+                if (inline_prim) inline_vertices.push_back(v);
+            } else if (m == kMBeginEnd) {
+                if (v) {
+                    inline_prim = v;
+                    inline_vertices.clear();
+                } else if (inline_prim) {
+                    if (!inline_vertices.empty()) {
+                        DrawPushedPrimitive(inline_prim, inline_vertices);
+                        inline_vertices.clear();
+                    }
+                    inline_prim = 0;
+                }
+                ApplyImmediateMethod(m, v);
+            } else {
+                if (m >> 2 < g_state.simple.size()) g_state.simple[m >> 2] = v;
+                ApplyImmediateMethod(m, v);
+            }
         }
     }
     g_walk = end;
@@ -1223,16 +1278,6 @@ HLE_STDCALL(D3DDevice_DrawVerticesUP, 4) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     DrawUp(a[0], a[1], HostPtr(a[2]), a[3]);
     return 0;
-}
-
-static void DrawPushedPrimitive(uint32_t prim, const std::vector<uint32_t>& vertices) {
-    uint32_t stride = VertexBytes();
-    uint32_t bytes = uint32_t(vertices.size()) * 4;
-    if (stride && bytes % stride == 0) {
-        DrawUp(prim, bytes / stride, vertices.data(), stride);
-    } else {
-        LOG_FIRST(8, "d3d: EndPush primitive %u dropped, %u bytes of vertices of %u", prim, bytes, stride);
-    }
 }
 
 // BeginPush(dwords) hands out room for raw hardware commands, EndPush(end) runs what the title wrote there:
@@ -1300,4 +1345,60 @@ HLE_STDCALL(D3DDevice_End, 0) {
 void EndImmediate(X86Context&, uint8_t*) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));
+}
+
+// Inlined push buffer advance and commit
+X86_EXTERN_FUNC(sub_004163B0);
+X86_FUNC(sub_004163B0) {
+    uint32_t end = mem::Read<uint32_t>(ctx.esp + 4);
+    uint32_t pDev = mem::Read<uint32_t>(kDevicePtr);
+    if (pDev) mem::Write<uint32_t>(pDev, end);
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(end);
+    ctx.esp += 8;
+}
+
+// Inlined D3DDevice_DrawIndexedVerticesUP(prim, count, pIndices, pVertices, stride)
+X86_EXTERN_FUNC(sub_004176E0);
+X86_FUNC(sub_004176E0) {
+    uint32_t prim = mem::Read<uint32_t>(ctx.esp + 4);
+    uint32_t count = mem::Read<uint32_t>(ctx.esp + 8);
+    uint32_t pIndices = mem::Read<uint32_t>(ctx.esp + 12);
+    uint32_t pVertices = mem::Read<uint32_t>(ctx.esp + 16);
+    uint32_t stride = mem::Read<uint32_t>(ctx.esp + 20);
+
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));
+
+    if (count && pIndices && pVertices) {
+        DrawIndexedUp(prim, count, HostPtr(pIndices), HostPtr(pVertices), stride);
+    }
+    ctx.eax = 0;
+    ctx.esp += 24;
+}
+
+// Inlined D3DDevice_DrawIndexedVertices(prim, count, pIndices)
+X86_EXTERN_FUNC(sub_00417820);
+X86_FUNC(sub_00417820) {
+    uint32_t prim = mem::Read<uint32_t>(ctx.esp + 4);
+    uint32_t count = mem::Read<uint32_t>(ctx.esp + 8);
+    uint32_t pIndices = mem::Read<uint32_t>(ctx.esp + 12);
+
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));
+    SyncDeferred();
+    const uint8_t* indices = pIndices ? static_cast<const uint8_t*>(HostPtr(pIndices)) : nullptr;
+    if (g_backend) g_backend->Draw(g_state, prim, 0, count, indices);
+    ctx.eax = 0;
+    ctx.esp += 16;
+}
+
+// Inlined D3DDevice_End
+X86_EXTERN_FUNC(sub_00417B00);
+X86_FUNC(sub_00417B00) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));
+    EndPrimitive();
+    SetDev(XDK_CDevice_Flags, Dev(XDK_CDevice_Flags) & ~0x1800u);
+    ctx.esp += 4;
 }

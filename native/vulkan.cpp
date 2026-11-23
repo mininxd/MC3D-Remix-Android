@@ -2832,6 +2832,10 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
     if (DepthCopy(s)) return;
     Assembled& a = asm_;
     if (!Assemble(s, prim, start, count, indices, a)) return;
+    if ((s.vs && (s.vs->program_type & 0xE) == 0x4) ||
+        ((s.vs_handle & 0xE) == 0x4 && (!s.vs || s.vs->program.empty()))) {
+        a.pretransformed = true;
+    }
 
     // the targets, CPU writes to them first
     Target* rt = EnsureTarget(s.rt, false);
