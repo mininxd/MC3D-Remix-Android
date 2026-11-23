@@ -170,25 +170,12 @@ X86_FUNC(sub_00415440) {
     uint32_t eax = X86_MEM32(esi + 0x794);
     if (!eax) {
         X86_MEM32(esi + 0x794) = 0x00425400u;
-        ctx.esp += 4;
-        return;
+        eax = 0x00425400u;
     }
     if (!mem::IsCommitted(eax + 4)) {
         ctx.esp += 4;
         return;
     }
     __imp__sub_00415440(ctx, base);
-}
-
-X86_EXTERN_FUNC(__imp__sub_00415530);
-X86_FUNC(sub_00415530) {
-    uint32_t esi = X86_MEM32(0x00422D78u); // D3D_pDevice
-    if (esi && mem::IsCommitted(esi + 0x794)) {
-        uint32_t eax = X86_MEM32(esi + 0x794);
-        if (!eax || !mem::IsCommitted(eax + 0x10)) {
-            X86_MEM32(esi + 0x794) = 0x00425400u;
-        }
-    }
-    __imp__sub_00415530(ctx, base);
 }
 
