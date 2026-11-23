@@ -24,9 +24,15 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
+#if __has_include("build_info.h")
 #include "build_info.h"
+#endif
+#ifndef MC3D_COMMIT
+#define MC3D_COMMIT "unknown"
+#endif
 
 namespace logx {
 
@@ -131,9 +137,9 @@ static void CrashSignalHandler(int sig, siginfo_t* info, void* ucontext) {
 
     char details[512];
     std::snprintf(details, sizeof(details),
-                  "Signal: %d [%s]\nCode: %d\nFaulting Address: %p\nFaulting Thread: %zu",
+                  "Signal: %d [%s]\nCode: %d\nFaulting Address: %p\nFaulting Thread ID: %d",
                   sig, sig_name, info ? info->si_code : 0, info ? info->si_addr : nullptr,
-                  std::hash<std::thread::id>()(std::this_thread::get_id()) & 0xFFFF);
+                  static_cast<int>(gettid()));
 
     SaveCrashReport("Fatal Native Signal", details, ucontext);
 
@@ -165,7 +171,7 @@ void Write(Level lv, const char* fmt, ...) {
     va_end(ap);
 
     double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_start).count();
-    auto tid = static_cast<uint32_t>(std::hash<std::thread::id>()(std::this_thread::get_id()) & 0xFFFF);
+    auto tid = static_cast<uint32_t>(gettid());
 
     // 1. Always forward to Android logcat for real-time monitoring
     __android_log_print(AndroidPriority(lv), "MC3DR", "[%9.3f] [%s] [t%04x] %s",
