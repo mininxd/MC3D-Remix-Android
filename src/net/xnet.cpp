@@ -376,7 +376,7 @@ HLE_STDCALL(XNetStartup, 1) {
 }
 HLE_STDCALL(WSAStartup, 2) {
     Init();
-    if (a[1]) {
+    if (a[1] && mem::IsCommitted(a[1])) {
         std::memset(HostPtr(a[1]), 0, 400);
         uint16_t requested = static_cast<uint16_t>(a[0]);
         // Negotiate version:
