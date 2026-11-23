@@ -371,6 +371,7 @@ int main(int, char**) {
                                  "The game failed to start, see crash_log.txt in the mc3dr folder.", g_window);
         return 1;
     }
+    game::Loaded();
 
     for (;;) {
         SDL_Event e;

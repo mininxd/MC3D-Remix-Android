@@ -57,6 +57,7 @@ Options& Opt();
 const std::string& BootLanguage();
 bool HasLanguages();
 bool LanguageAvailable(const std::string& code);
+void Loaded();
 inline std::atomic<float> g_fps{0};
 inline std::atomic<bool> g_hide_hud{false};
 inline std::atomic<float> g_zoom{1.0f};
