@@ -1,6 +1,11 @@
-# Rust build artifacts
-target/
-Cargo.lock
+# Gradle & Android build
+.gradle/
+build/
+app/build/
+local.properties
+third_party/
+*.apk
+out/
 
 # IDE & Editor files
 .idea/
@@ -19,6 +24,8 @@ Cargo.lock
 # ==============================================================================
 # Game files & Copyrighted Assets (STRICT: NEVER commit game data to repository)
 # ==============================================================================
+/assets/
+/iso/
 *.iso
 *.xbe
 *.bin
