@@ -281,20 +281,55 @@ public class MC3DActivity extends SDLActivity {
                 && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
     }
 
+    public boolean isExtracting() {
+        return importing;
+    }
+
+    // checks whether Midnight Club 3 is extracted (default.xbe and assets_x.dat exist)
+    private static boolean isGameExtracted(File dir) {
+        if (dir == null || !dir.exists()) return false;
+        return new File(dir, "default.xbe").exists() && new File(dir, "assets_x.dat").exists();
+    }
+
     private void askForGame() {
         if (importing || (dialog != null && dialog.isShowing())) return;
-        File own = getExternalFilesDir(null);
-        if (own != null && hasGame(new File(own, "assets"))) return;
+
+        // 1. Detect whether storage permission is allowed
         if (!hasStorageAccess()) {
-            if (!notNow) askAllFilesAccess();
+            if (!notNow) askStoragePermission();
             return;
         }
+
+        // 2. Storage is allowed: check shared storage /storage/emulated/0/mc3dr
         File shared = new File(Environment.getExternalStorageDirectory(), SHARED);
-        shared.mkdirs();
-        if (hasGame(shared) || hasGame(new File(shared, "assets"))) return;
-        for (File card : cardFolders())
-            if (hasGame(card) || hasGame(new File(card, "assets"))) return;
-        tellWhereTheGameGoes();
+        if (!shared.exists()) {
+            shared.mkdirs();
+        }
+
+        // Check if game is already extracted
+        if (isGameExtracted(shared) || isGameExtracted(new File(shared, "assets"))) return;
+        for (File card : cardFolders()) {
+            if (isGameExtracted(card) || isGameExtracted(new File(card, "assets"))) return;
+        }
+        File own = getExternalFilesDir(null);
+        if (own != null && isGameExtracted(new File(own, "assets"))) return;
+
+        // 3. Game is not extracted: check if an .iso exists in mc3dr
+        File[] isos = shared.listFiles((d, name) -> name.toLowerCase().endsWith(".iso"));
+        if (isos != null && isos.length > 0) {
+            File isoToExtract = isos[0];
+            for (File f : isos) {
+                if (f.getName().toLowerCase().contains("midnight") || f.getName().toLowerCase().contains("mc3")) {
+                    isoToExtract = f;
+                    break;
+                }
+            }
+            startExtraction(isoToExtract, shared);
+            return;
+        }
+
+        // 4. mc3dr folder or game does not exist: prompt to pick the ISO file
+        promptPickIso();
     }
 
     // the mc3dr folder on each SD card or USB stick mounted, as native/game_files.cpp looks in them
@@ -362,51 +397,72 @@ public class MC3DActivity extends SDLActivity {
         }
     }
 
-    // default.xbe or a disc image in the folder
-    private static boolean hasGame(File dir) {
-        if (new File(dir, "default.xbe").exists()) return true;
-        File[] files = dir.listFiles();
-        if (files == null) return false;
-        for (File f : files)
-            if (f.getName().toLowerCase().endsWith(".iso")) return true;
-        return false;
-    }
-
-    private void askAllFilesAccess() {
+    private void askStoragePermission() {
+        if (!ALL_FILES_ACCESS) {
+            boolean ask = !storageAsked || shouldShowRequestPermissionRationale(Manifest.permission.READ_EXTERNAL_STORAGE);
+            if (ask) {
+                storageAsked = true;
+                requestPermissions(new String[] {
+                        Manifest.permission.READ_EXTERNAL_STORAGE,
+                        Manifest.permission.WRITE_EXTERNAL_STORAGE
+                }, STORAGE_REQUEST);
+            } else {
+                startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:" + getPackageName())));
+            }
+            return;
+        }
         dialog = new AlertDialog.Builder(this)
-                .setTitle("Storage access")
-                .setMessage("MC3D Remix reads the game from the mc3dr folder on your phone's storage:\n\n"
-                        + "/storage/emulated/0/" + SHARED + "\n\n"
-                        + (ALL_FILES_ACCESS
-                                ? "On the next screen turn on \"Allow access to manage all files\" for MC3D Remix, then come back."
-                                : "Allow MC3D Remix to access your storage on the next screen."))
+                .setTitle("Storage Permission Required")
+                .setMessage("MC3D Remix requires storage access to extract and run the game files in /storage/emulated/0/" + SHARED + ".\n\n"
+                        + "Please turn on \"Allow access to manage all files\" on the next screen.")
                 .setCancelable(false)
-                .setPositiveButton("Allow access", (d, w) -> openAccessSettings())
-                .setNegativeButton("Not now", (d, w) -> notNow = true)
-                .setNeutralButton("Import game", (d, w) -> startImport())
+                .setPositiveButton("Allow Access", (d, w) -> openAccessSettings())
+                .setNegativeButton("Not Now", (d, w) -> notNow = true)
                 .setOnDismissListener(d -> tellOfUpdate())
                 .show();
     }
 
-    private void tellWhereTheGameGoes() {
+    private void promptPickIso() {
         dialog = new AlertDialog.Builder(this)
-                .setTitle("Game files")
-                .setMessage("Copy the game into the mc3dr folder on your phone's storage:\n\n"
-                        + "/storage/emulated/0/" + SHARED + "\n\n"
-                        + "or into a mc3dr folder at the top of your SD card.\n\n"
-                        + "Its disc image (.iso), or default.xbe with its folders. The game starts as soon as they "
-                        + "are there.\n\n"
-                        + "Or import the disc image from your Downloads, a cloud drive or a USB stick.")
-                .setPositiveButton("OK", null)
-                .setNeutralButton("Import game", (d, w) -> startImport())
+                .setTitle("Game Files Missing")
+                .setMessage("Midnight Club 3 game files were not found in /storage/emulated/0/" + SHARED + ".\n\n"
+                        + "Please select your Midnight Club 3: DUB Edition Remix (.iso) disc image to extract and install the game.")
+                .setCancelable(false)
+                .setPositiveButton("Select ISO", (d, w) -> startImport())
+                .setNegativeButton("Later", null)
                 .setOnDismissListener(d -> tellOfUpdate())
                 .show();
     }
 
-    // the disc image the player picks, copied where the game looks: the mc3dr folder with all files access, else the
-    // app's own assets folder, which needs none
     private void startImport() {
         importing = importer.pick();
+    }
+
+    private void startExtraction(File isoFile, File targetDir) {
+        importing = true;
+        importer.extract(isoFile, targetDir, ok -> {
+            importing = false;
+            if (!ok) {
+                askForGame();
+            } else {
+                Toast.makeText(this, "Game extracted successfully! Starting...", Toast.LENGTH_SHORT).show();
+            }
+            tellOfUpdate();
+        });
+    }
+
+    private void startExtraction(Uri uri, File targetDir) {
+        importing = true;
+        importer.extract(uri, targetDir, ok -> {
+            importing = false;
+            if (!ok) {
+                askForGame();
+            } else {
+                Toast.makeText(this, "Game extracted successfully! Starting...", Toast.LENGTH_SHORT).show();
+            }
+            tellOfUpdate();
+        });
     }
 
     @Override
@@ -417,17 +473,24 @@ public class MC3DActivity extends SDLActivity {
         }
         Uri uri = resultCode == RESULT_OK && data != null ? data.getData() : null;
         if (uri == null) {
-            importing = false;  // the picker was closed: onResume asks again
+            importing = false;
             return;
         }
-        File dir = hasStorageAccess()
+        File target = hasStorageAccess()
                 ? new File(Environment.getExternalStorageDirectory(), SHARED)
                 : new File(getExternalFilesDir(null), "assets");
-        importer.copy(uri, dir, ok -> {
-            importing = false;
-            if (!ok) askForGame();
-            tellOfUpdate();
-        });
+        startExtraction(uri, target);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == STORAGE_REQUEST) {
+            if (hasStorageAccess()) {
+                notNow = false;
+                askForGame();
+            }
+        }
     }
 
     // the app's own page of the access, or the list of every app's where a phone has no such page. Android 10 asks

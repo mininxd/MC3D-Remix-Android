@@ -64,18 +64,35 @@ std::vector<fs::path> RemovableFolders() {
     std::vector<fs::path> out = ActivityCardFolders();
     std::error_code ec, dir_ec;
     for (auto& e : fs::directory_iterator(kVolumes, ec)) {
+        if (ec) break;
         std::string name = e.path().filename().string();
         if (name == "emulated" || name == "self" || !e.is_directory(dir_ec)) continue;
         out.push_back(e.path() / "mc3dr");
     }
     static bool logged = false;
-    if (ec && !logged) {
+    if (ec && !logged && ec != std::errc::permission_denied && ec.value() != EACCES) {
         LOGW("game: %s cannot be listed: %s", kVolumes, ec.message().c_str());
         logged = true;
     }
     std::sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end()), out.end());
     return out;
+}
+
+bool IsActivityExtracting() {
+    auto* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+    auto activity = static_cast<jobject>(SDL_GetAndroidActivity());
+    if (!env || !activity) return false;
+    jclass cls = env->GetObjectClass(activity);
+    jmethodID m = env->GetMethodID(cls, "isExtracting", "()Z");
+    jboolean res = m ? env->CallBooleanMethod(activity, m) : JNI_FALSE;
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        res = JNI_FALSE;
+    }
+    env->DeleteLocalRef(cls);
+    env->DeleteLocalRef(activity);
+    return res == JNI_TRUE;
 }
 
 std::vector<fs::path> AssetFolders() {
@@ -219,6 +236,9 @@ bool AskOtherRelease(const fs::path& name, const std::string& sha) {
 
 // 1 found, 0 none there, -1 the player turned down another release
 int Search(GameFiles& game) {
+    if (IsActivityExtracting()) {
+        return 0;
+    }
     // the first copy with this xbe wins, the extracted files before any image; another release is kept to offer
     GameFiles other;
     std::unique_ptr<kernel::Disc> other_disc;

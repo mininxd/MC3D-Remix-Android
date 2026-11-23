@@ -1,6 +1,7 @@
 #include "app/app.h"
 #include "common/options.h"
 #include "core/log.h"
+#include "cpu/x86_ops.h"
 #include "kernel/memory.h"
 
 #include <atomic>
@@ -104,3 +105,27 @@ void Loaded() {
 }
 
 }  // namespace game
+
+// DirectSound stream/voice parameter setter null guard to prevent crash at 0x10000000b
+X86_FUNC(sub_003C0DC5) {
+    uint32_t arg1 = X86_MEM32(ctx.esp + 4);
+    uint32_t arg2 = X86_MEM32(ctx.esp + 8);
+    if (arg1 != 0) {
+        uint32_t obj = X86_MEM32(arg1 + 0x10);
+        if (obj != 0) {
+            if (arg2 != 0) {
+                X86_MEM8(obj + 0x0B) |= 0x01;
+            } else {
+                X86_MEM8(obj + 0x0B) &= 0xFE;
+            }
+        }
+    }
+    ctx.eax = 0;
+    ctx.zf = 1;
+    ctx.cf = 0;
+    ctx.sf = 0;
+    ctx.of = 0;
+    ctx.pf = 1;
+    ctx.esp += 12;
+}
+
