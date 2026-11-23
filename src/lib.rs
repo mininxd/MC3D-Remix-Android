@@ -4,6 +4,7 @@ pub mod executor;
 pub mod gles;
 pub mod iso;
 pub mod kernel;
+pub mod logger;
 pub mod memory;
 pub mod nv2a;
 pub mod ui;
@@ -23,33 +24,32 @@ use ui::{LauncherUi, Screen};
 
 #[no_mangle]
 fn android_main(app: AndroidApp) {
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_max_level(log::LevelFilter::Info)
-            .with_tag("MC3DR_Rust"),
-    );
+    // Initialize unified persistent file + logcat logger
+    logger::init(&app);
 
     info!("============================================================");
     info!(" Midnight Club 3: DUB Edition Remix - Pure Rust Launcher");
     info!(" Built with android-activity, 100% Rust, zero Java / C");
+    info!(" Persistent log target: /sdcard/mc3dr/app_logs.txt");
     info!("============================================================");
-
-    // Prompt user for Storage Permissions via JNI
-    android_permissions::request_storage_permissions(&app);
 
     let internal_dir = app
         .internal_data_path()
         .unwrap_or_else(|| PathBuf::from("/data/data/io.github.mininxd.midnightclub3remixrecomp/files"));
-    let config_path = internal_dir.join("mc3dr_config.json");
+    info!("App internal data path: {}", internal_dir.display());
+    if let Some(ext) = app.external_data_path() {
+        info!("App external data path: {}", ext.display());
+    }
 
+    let config_path = internal_dir.join("mc3dr_config.json");
     let mut config = AppConfig::load(&config_path);
     info!(
-        "Loaded config: render_scale={:?}, widescreen={}, fps_limit={}",
-        config.render_scale, config.widescreen_16_9, config.fps_limit
+        "Loaded config: render_scale={:?}, widescreen={}, fps_limit={}, touch_controls={}",
+        config.render_scale, config.widescreen_16_9, config.fps_limit, config.touch_controls
     );
 
     let mut iso_mgr = IsoManager::new();
-    info!("Discovered {} Xbox game ISO(s)", iso_mgr.items.len());
+    info!("Discovered {} Xbox game target(s)", iso_mgr.items.len());
     for (i, item) in iso_mgr.items.iter().enumerate() {
         info!("  [{}] {} (valid_xdvdfs={})", i, item.filename, item.is_valid_xdvdfs);
     }
@@ -58,15 +58,15 @@ fn android_main(app: AndroidApp) {
     let mut executor = GameExecutor::new();
     let mut renderer: Option<GlesRenderer> = None;
 
-    // AUTO-DETECT ISO in /sdcard/mc3dr: If found, automatically launch it!
-    if let Some(auto_iso) = iso_mgr.find_mc3dr_iso() {
-        info!("Auto-detected Midnight Club 3 ISO in /sdcard/mc3dr: {}", auto_iso.path.display());
-        config.iso_path = auto_iso.path.to_string_lossy().to_string();
-        match executor.start_game(&auto_iso.path, &config) {
+    // AUTO-DETECT in /sdcard/mc3dr (default.xbe or ISO): If found, automatically launch it!
+    if let Some(auto_target) = iso_mgr.find_mc3dr_iso() {
+        info!("Auto-detected Midnight Club 3 target in /sdcard/mc3dr: {}", auto_target.path.display());
+        config.iso_path = auto_target.path.to_string_lossy().to_string();
+        match executor.start_game(&auto_target.path, &config) {
             Ok(()) => {
-                info!("Auto-launch initiated successfully!");
+                info!("Auto-launch initiated successfully for: {}", auto_target.filename);
                 ui.current_screen = Screen::GameRunning;
-                ui.status_message = format!("Running {} from /sdcard/mc3dr", auto_iso.filename);
+                ui.status_message = format!("Running {} from /sdcard/mc3dr", auto_target.filename);
             }
             Err(e) => {
                 error!("Auto-launch error: {}", e);
@@ -74,8 +74,8 @@ fn android_main(app: AndroidApp) {
             }
         }
     } else {
-        info!("No ISO found in /sdcard/mc3dr on boot. Showing ISO selector UI.");
-        ui.status_message = "No ISO in /sdcard/mc3dr/ - Tap PICK .ISO or place ISO in /sdcard/mc3dr/".to_string();
+        info!("No game files found in /sdcard/mc3dr on initial boot scan. Showing launcher UI.");
+        ui.status_message = "Place game files in /sdcard/mc3dr/ or tap STORAGE PERM".to_string();
     }
 
     let mut touch_pos: Option<(f32, f32)> = None;

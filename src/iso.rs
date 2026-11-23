@@ -39,40 +39,101 @@ impl IsoManager {
 
     pub fn scan(&mut self) {
         self.items.clear();
+        log::info!("Starting scan for Xbox game files and ISOs...");
+
+        // Direct explicit check for Midnight Club 3 default.xbe
+        let direct_xbe_candidates = [
+            PathBuf::from("/sdcard/mc3dr/default.xbe"),
+            PathBuf::from("/storage/emulated/0/mc3dr/default.xbe"),
+            PathBuf::from("/sdcard/xbox/mc3/default.xbe"),
+        ];
+
+        for direct_path in &direct_xbe_candidates {
+            if direct_path.exists() {
+                let size = fs::metadata(direct_path).map(|m| m.len()).unwrap_or(0);
+                let is_valid = Self::verify_xdvdfs(direct_path);
+                log::info!(
+                    "FOUND extracted default.xbe: {} (size: {} bytes, valid: {})",
+                    direct_path.display(),
+                    size,
+                    is_valid
+                );
+                self.items.push(DiscoveredIso {
+                    path: direct_path.clone(),
+                    filename: "default.xbe".to_string(),
+                    is_valid_xdvdfs: is_valid,
+                });
+            }
+        }
+
         for dir_str in SEARCH_DIRECTORIES {
             let dir = Path::new(dir_str);
             if !dir.exists() || !dir.is_dir() {
                 continue;
             }
 
-            if let Ok(entries) = fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() {
-                        let is_iso = path
-                            .extension()
-                            .and_then(|ext| ext.to_str())
-                            .map(|ext| ext.eq_ignore_ascii_case("iso") || ext.eq_ignore_ascii_case("xbe"))
-                            .unwrap_or(false);
+            match fs::read_dir(dir) {
+                Ok(entries) => {
+                    let mut count = 0;
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_file() {
+                            let is_target = path
+                                .extension()
+                                .and_then(|ext| ext.to_str())
+                                .map(|ext| {
+                                    ext.eq_ignore_ascii_case("iso") || ext.eq_ignore_ascii_case("xbe")
+                                })
+                                .unwrap_or(false);
 
-                        if is_iso {
-                            let filename = path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("Unknown")
-                                .to_string();
+                            if is_target {
+                                let filename = path
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("Unknown")
+                                    .to_string();
 
-                            let is_valid = Self::verify_xdvdfs(&path);
-                            self.items.push(DiscoveredIso {
-                                path,
-                                filename,
-                                is_valid_xdvdfs: is_valid,
-                            });
+                                // Don't duplicate already added direct xbe
+                                if self.items.iter().any(|item| item.path == path) {
+                                    continue;
+                                }
+
+                                let is_valid = Self::verify_xdvdfs(&path);
+                                let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                                log::info!(
+                                    "Discovered candidate in {}: {} (size: {} MB, valid: {})",
+                                    dir_str,
+                                    filename,
+                                    size / (1024 * 1024),
+                                    is_valid
+                                );
+                                self.items.push(DiscoveredIso {
+                                    path,
+                                    filename,
+                                    is_valid_xdvdfs: is_valid,
+                                });
+                                count += 1;
+                            }
                         }
                     }
+                    if count > 0 {
+                        log::info!("Directory {} contained {} candidate file(s)", dir_str, count);
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Cannot read directory {} ({:?}) - Storage permission granted?",
+                        dir_str,
+                        e
+                    );
                 }
             }
         }
+
+        log::info!(
+            "Scan complete: total {} game candidate(s) discovered.",
+            self.items.len()
+        );
     }
 
     pub fn selected(&self) -> Option<&DiscoveredIso> {

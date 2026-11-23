@@ -23,9 +23,13 @@ has_code = false
 label = "MC3D Remix"
 icon = "@mipmap/ic_launcher"
 theme = "@android:style/Theme.NoTitleBar.Fullscreen"
+request_legacy_external_storage = true
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.READ_EXTERNAL_STORAGE"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.WRITE_EXTERNAL_STORAGE"
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.MANAGE_EXTERNAL_STORAGE"
