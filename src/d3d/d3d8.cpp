@@ -1377,13 +1377,3 @@ X86_FUNC(sub_004176E0) {
     ctx.eax = 0;
     ctx.esp += 24;
 }
-
-// Inlined D3DDevice_End
-X86_EXTERN_FUNC(sub_00417B00);
-X86_FUNC(sub_00417B00) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
-    Walk(Dev(kDevPush));
-    EndPrimitive();
-    SetDev(XDK_CDevice_Flags, Dev(XDK_CDevice_Flags) & ~0x1800u);
-    ctx.esp += 4;
-}
