@@ -989,6 +989,47 @@ X86_FUNC(sub_000142BD) {
 
 // Note: sub_0001461D (XMountUtilityDrive) is already implemented by xapi.cpp
 
+// sub_00013136 (CRT C pre-initializers: iterates table 0x4a8140 .. 0x4a814c):
+X86_EXTERN_FUNC(__imp__sub_00013136);
+X86_FUNC(sub_00013136) {
+    LOGI("guest: sub_00013136 (CRT pre-initializers __xp_a..__xp_z) starting...");
+    __imp__sub_00013136(ctx, base);
+    LOGI("guest: sub_00013136 (CRT pre-initializers) completed, __pioinfo[0]=0x%08X",
+         X86_MEM32(0x5696c0u));
+}
+
+// sub_002DFFB9 (CRT thread/buffer initialization table entry at 0x4a8144):
+X86_EXTERN_FUNC(__imp__sub_002DFFB9);
+X86_FUNC(sub_002DFFB9) {
+    LOGI("guest: sub_002DFFB9 (CRT buffer/thread init) starting...");
+    __imp__sub_002DFFB9(ctx, base);
+    LOGI("guest: sub_002DFFB9 completed, esp=0x%08X, esi=0x%08X", ctx.esp, ctx.esi);
+}
+
+// sub_002E0023 (CRT shutdown callback registration continuation):
+X86_EXTERN_FUNC(__imp__sub_002E0023);
+X86_FUNC(sub_002E0023) {
+    LOGI("guest: sub_002E0023 (CRT shutdown callback reg) starting...");
+    __imp__sub_002E0023(ctx, base);
+    LOGI("guest: sub_002E0023 completed, esp=0x%08X, esi=0x%08X", ctx.esp, ctx.esi);
+}
+
+// sub_002E21DB (CRT _ioinit table entry at 0x4a8148):
+X86_EXTERN_FUNC(__imp__sub_002E21DB);
+X86_FUNC(sub_002E21DB) {
+    LOGI("guest: sub_002E21DB (_ioinit) starting...");
+    __imp__sub_002E21DB(ctx, base);
+    LOGI("guest: sub_002E21DB (_ioinit) completed, __pioinfo[0]=0x%08X", X86_MEM32(0x5696c0u));
+}
+
+// sub_002E181E (CRT file handle table initialization at 0x4ad268):
+X86_EXTERN_FUNC(__imp__sub_002E181E);
+X86_FUNC(sub_002E181E) {
+    LOGI("guest: sub_002E181E (CRT file handle init) starting, __pioinfo[0]=0x%08X", X86_MEM32(0x5696c0u));
+    __imp__sub_002E181E(ctx, base);
+    LOGI("guest: sub_002E181E completed");
+}
+
 // sub_000130DE (CRT initialization):
 // In the original binary, 0x13114 falls through into 0x13116 (sub_00013116).
 // The recompiler split them into two functions, causing sub_000130DE to end abruptly without
@@ -996,10 +1037,21 @@ X86_FUNC(sub_000142BD) {
 X86_EXTERN_FUNC(__imp__sub_000130DE);
 X86_EXTERN_FUNC(sub_00013116);
 X86_FUNC(sub_000130DE) {
-    LOGI("guest: sub_000130DE (CRT init) -> executing loop 1");
+    LOGI("guest: sub_000130DE (CRT init) -> executing loop 1 (initializers)");
     __imp__sub_000130DE(ctx, base);
-    LOGI("guest: sub_000130DE (CRT init) -> executing loop 2 (sub_00013116)");
+    LOGI("guest: sub_000130DE (CRT init) -> executing loop 2 (static constructors / sub_00013116)");
     sub_00013116(ctx, base);
+    LOGI("guest: sub_000130DE (CRT init) completed successfully");
+}
+
+// sub_00012150 (Midnight Club 3: DUB Edition Remix Main Game Loop):
+X86_EXTERN_FUNC(__imp__sub_00012150);
+X86_FUNC(sub_00012150) {
+    LOGI("guest: ========================================================");
+    LOGI("guest: >>> MIDNIGHT CLUB 3 REMIX MAIN LOOP (0x00012150) ENTERED <<<");
+    LOGI("guest: ========================================================");
+    __imp__sub_00012150(ctx, base);
+    LOGI("guest: MIDNIGHT CLUB 3 REMIX MAIN LOOP exited");
 }
 
 // sub_00012EA4: Mounts \??\T: (TDATA) and \??\U: (UDATA) for title 0x54540079.

@@ -31531,6 +31531,9 @@ loc_002E0007:
 	{ uint32_t v = (uint32_t)(0x55c2f0u); X86_PUSH32(v); }
 	// 002E0019 mov dword ptr [0x55c2f8], 0x2e2b4d
 	X86_MEM32((uint32_t)(0x55c2f8u)) = (uint32_t)(0x2e2b4du);
+	// Fallthrough into sub_002E0023: call 0x13501, pop esi, xor eax, eax, ret
+	sub_002E0023(ctx, base);
+	return;
 loc_002E0029:
 	// 002E0029 xor eax, eax
 	{ uint32_t a = (uint32_t)(ctx.eax); uint32_t b = (uint32_t)(ctx.eax); uint32_t r = a ^ b; ctx.eax = (uint32_t)(r); cf = 0; of = 0; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
