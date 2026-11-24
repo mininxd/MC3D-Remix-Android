@@ -24,10 +24,8 @@
 #include "xdk/d3d8.h"
 #include "xdk/hle.h"
 
-extern "C" void sub_00415130(X86Context& ctx, uint8_t* base);  // D3DDevice_SetStreamSource
 extern "C" void sub_004168B0(X86Context& ctx, uint8_t* base);  // D3D_KickOffAndWaitForIdle
 extern "C" void sub_00417570(X86Context& ctx, uint8_t* base);  // D3DDevice_DrawVerticesUP
-extern "C" void sub_00417820(X86Context& ctx, uint8_t* base);  // D3DDevice_DrawIndexedVertices
 
 namespace game {
 namespace render_accuracy {
@@ -58,13 +56,11 @@ std::atomic<uint64_t> g_ps_mode_repairs{0};
 std::atomic<uint64_t> g_tex_recoveries{0};
 std::atomic<uint64_t> g_pal_recoveries{0};
 std::atomic<uint64_t> g_push_flushes{0};
-std::atomic<uint64_t> g_diup_draws{0};
 
 std::mutex g_cache_mu;
 uint32_t g_last_dev_tex[4] = {};
 uint32_t g_last_dev_pal[4] = {};
-bool g_rs_texmodes_active = false;
-uint32_t g_rs_texmodes_val = 0;
+std::unordered_map<uint32_t, uint32_t> g_ps_orig_def54;
 
 // Thread-safe clone cache keyed by (original_ps_handle, resolved_tex_modes),
 // avoiding in-place mutation of PixelShader objects in flight on render_thread.
@@ -229,25 +225,33 @@ void SyncProgrammablePixelShader(gpu::State& s, const std::array<gpu::TextureDes
     const uint32_t pDev = SafeR32(addr::kD3dDevicePtr);
     const uint32_t rs_guest = SafeR32(addr::kD3dPsTexModesRs);
     const uint32_t dev_modes = pDev ? SafeR32(pDev + addr::kDevPsTexModes) : 0;
+    const uint32_t rs_state = s.rs[gpu::kRsPsTextureModes];
 
-    uint32_t eff_modes = s.ps->def[54];
+    uint32_t orig_def54 = s.ps->def[54];
     {
         std::lock_guard<std::mutex> lk(g_cache_mu);
-        if (g_rs_texmodes_active && g_rs_texmodes_val != 0) {
-            eff_modes = g_rs_texmodes_val;
-        } else if (eff_modes == 0) {
-            if (rs_guest != 0) eff_modes = rs_guest;
-            else if (dev_modes != 0) eff_modes = dev_modes;
-            else if (s.rs[gpu::kRsPsTextureModes] != 0) eff_modes = s.rs[gpu::kRsPsTextureModes];
-        }
+        auto [it, inserted] = g_ps_orig_def54.emplace(s.ps->handle, s.ps->def[54]);
+        orig_def54 = it->second;
+    }
+
+    uint32_t eff_modes = orig_def54;
+    // Detect explicit SetRenderState(D3DRS_PSTEXTUREMODES) overriding shader creation modes.
+    if (rs_state != 0 && rs_state != orig_def54) {
+        eff_modes = rs_state;
+    } else if (rs_guest != 0 && rs_guest != orig_def54) {
+        eff_modes = rs_guest;
+    } else if (eff_modes == 0) {
+        if (rs_state != 0) eff_modes = rs_state;
+        else if (rs_guest != 0) eff_modes = rs_guest;
+        else if (dev_modes != 0) eff_modes = dev_modes;
     }
 
     const uint32_t read_mask = ScanCombinerTexRegisterMask(s.ps->def);
     for (uint32_t st = 0; st < 4; ++st) {
         uint32_t m = (eff_modes >> (st * 5)) & 0x1Fu;
         if (m == 0) {
-            uint32_t rs_m = (rs_guest >> (st * 5)) & 0x1Fu;
-            if (!rs_m) rs_m = (s.rs[gpu::kRsPsTextureModes] >> (st * 5)) & 0x1Fu;
+            uint32_t rs_m = (rs_state >> (st * 5)) & 0x1Fu;
+            if (!rs_m) rs_m = (rs_guest >> (st * 5)) & 0x1Fu;
             if (rs_m != 0) {
                 m = rs_m;
                 eff_modes |= (m << (st * 5));
@@ -485,15 +489,7 @@ bool SafeW32(uint32_t va, uint32_t value) {
     return true;
 }
 
-void NotifyPsTextureModesSet(uint32_t modes) {
-    std::lock_guard<std::mutex> lk(g_cache_mu);
-    g_rs_texmodes_active = true;
-    g_rs_texmodes_val = modes;
-}
-
 void NotifyPixelShaderSet(uint32_t /*ps_handle*/) {
-    std::lock_guard<std::mutex> lk(g_cache_mu);
-    g_rs_texmodes_active = false;
 }
 
 void NotifyPaletteBound(uint32_t stage, uint32_t pal_va) {
@@ -510,8 +506,6 @@ void InvalidateMc3dStateShadows() {
         SafeW32(addr::kMcPalettesShadow + i * 4u, 0xFFFFFFFFu);
     }
     SafeW32(addr::kMcPsShadow, 0xFFFFFFFFu);
-    std::lock_guard<std::mutex> lk(g_cache_mu);
-    g_rs_texmodes_active = false;
 }
 
 void RecordPushSpanBegin(uint32_t begin_va, uint32_t max_dwords) {
@@ -625,68 +619,6 @@ void FlushCapturedPushSpan(X86Context& ctx, uint8_t* base, uint32_t explicit_end
     }
 }
 
-void ExecuteDrawIndexedVerticesUP(X86Context& ctx, uint8_t* base,
-                                  uint32_t prim, uint32_t index_count,
-                                  uint32_t indices_va, uint32_t verts_va, uint32_t stride) {
-    if (!index_count || !stride || !indices_va || !verts_va) return;
-    if (!CanAccessGuest(indices_va, index_count * 2u)) return;
-
-    const uint32_t pDev = SafeR32(addr::kD3dDevicePtr);
-    const uint32_t vtx_off = pDev ? SafeR32(pDev + addr::kDevVtxOffset) : 0;
-    if (vtx_off != 0 && CanAccessGuest(verts_va + vtx_off, stride)) {
-        verts_va += vtx_off;
-    }
-
-    uint16_t max_idx = 0;
-    const uint16_t* idx_ptr = reinterpret_cast<const uint16_t*>(kernel::HostPtr(indices_va));
-    for (uint32_t i = 0; i < index_count; ++i) {
-        if (idx_ptr[i] > max_idx) max_idx = idx_ptr[i];
-    }
-
-    const uint32_t vert_bytes = (uint32_t(max_idx) + 1u) * stride;
-    if (!CanAccessGuest(verts_va, vert_bytes)) return;
-
-    uint32_t temp_hdr = 0;
-    if (!AllocDiupContiguousVertices(ctx, base, kernel::HostPtr(verts_va), vert_bytes, temp_hdr)) return;
-
-    const uint32_t streams_va = SYM(D3D_Streams);
-    const uint32_t old_stride = SafeR32(streams_va + XDK_Stream_Stride);
-    const uint32_t old_vb = SafeR32(streams_va + XDK_Stream_Buffer);
-    const uint32_t old_vb_common = old_vb ? SafeR32(old_vb) : 0;
-    if (old_vb) SafeW32(old_vb, old_vb_common + 0x00080000u);  // Pin against temporary Release
-
-    ApplyRenderAccuracy();
-
-    // SetStreamSource(0, temp_hdr, stride)
-    X86_PUSH32(stride);
-    X86_PUSH32(temp_hdr);
-    X86_PUSH32(0u);
-    X86_PUSH32(0u);
-    sub_00415130(ctx, base);
-
-    // DrawIndexedVertices(prim, index_count, indices_va)
-    X86_PUSH32(indices_va);
-    X86_PUSH32(index_count);
-    X86_PUSH32(prim);
-    X86_PUSH32(0u);
-    sub_00417820(ctx, base);
-
-    // Restore stream 0.
-    X86_PUSH32(old_stride);
-    X86_PUSH32(old_vb);
-    X86_PUSH32(0u);
-    X86_PUSH32(0u);
-    sub_00415130(ctx, base);
-
-    if (old_vb) SafeW32(old_vb, old_vb_common);
-
-    const uint64_t n = ++g_diup_draws;
-    if (n <= 8) {
-        LOGR("render_accuracy: DIUP draw #%llu prim=%u idx=%u maxV=%u stride=%u",
-             static_cast<unsigned long long>(n), prim, index_count, max_idx, stride);
-    }
-}
-
 void ApplyRenderAccuracy() {
     InitRenderAccuracy();
     ++g_apply_calls;
@@ -712,15 +644,14 @@ void ApplyRenderAccuracy() {
 void OnSwapDiagnostics() {
     const uint64_t f = ++g_swap_count;
     if (f == 1 || (f % 300u) == 0u) {
-        LOGR("render_accuracy: swap=%llu apply=%llu ffFix=%llu psFix=%llu texFix=%llu palFix=%llu push=%llu diup=%llu",
+        LOGR("render_accuracy: swap=%llu apply=%llu ffFix=%llu psFix=%llu texFix=%llu palFix=%llu push=%llu",
              static_cast<unsigned long long>(f),
              static_cast<unsigned long long>(g_apply_calls.load()),
              static_cast<unsigned long long>(g_ff_repairs.load()),
              static_cast<unsigned long long>(g_ps_mode_repairs.load()),
              static_cast<unsigned long long>(g_tex_recoveries.load()),
              static_cast<unsigned long long>(g_pal_recoveries.load()),
-             static_cast<unsigned long long>(g_push_flushes.load()),
-             static_cast<unsigned long long>(g_diup_draws.load()));
+             static_cast<unsigned long long>(g_push_flushes.load()));
     }
 }
 

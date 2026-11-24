@@ -43,14 +43,6 @@ extern "C" void sub_00412580(X86Context& ctx, uint8_t* base) {
     game::render_accuracy::NotifyPaletteBound(stage, pal);
 }
 
-// D3DDevice_SetRenderState_PSTextureModes(modes) - stdcall (ret 0x04)
-extern "C" void __imp__sub_00412D50(X86Context& ctx, uint8_t* base);
-extern "C" void sub_00412D50(X86Context& ctx, uint8_t* base) {
-    const uint32_t modes = game::render_accuracy::SafeR32(ctx.esp + 4u);
-    __imp__sub_00412D50(ctx, base);
-    game::render_accuracy::NotifyPsTextureModesSet(modes);
-}
-
 // D3DDevice_BeginPush(dwords) - stdcall (ret 0x04) & inline wrapper sub_00416390
 extern "C" void __imp__sub_00416860(X86Context& ctx, uint8_t* base);
 extern "C" void sub_00416860(X86Context& ctx, uint8_t* base) {
@@ -66,19 +58,6 @@ extern "C" void sub_00416390(X86Context& ctx, uint8_t* base) {
     __imp__sub_00416390(ctx, base);
     (void)saved_edx;
     game::render_accuracy::RecordPushSpanBegin(ctx.eax, req);
-}
-
-// D3DDevice_DrawIndexedVerticesUP(prim, index_count, p_indices, p_verts, stride) - stdcall (ret 0x14)
-extern "C" void __imp__sub_004176E0(X86Context& ctx, uint8_t* base);
-extern "C" void sub_004176E0(X86Context& ctx, uint8_t* base) {
-    const uint32_t prim        = game::render_accuracy::SafeR32(ctx.esp + 4u);
-    const uint32_t index_count = game::render_accuracy::SafeR32(ctx.esp + 8u);
-    const uint32_t indices_va  = game::render_accuracy::SafeR32(ctx.esp + 12u);
-    const uint32_t verts_va    = game::render_accuracy::SafeR32(ctx.esp + 16u);
-    const uint32_t stride      = game::render_accuracy::SafeR32(ctx.esp + 20u);
-    ctx.esp += 24u;
-    game::render_accuracy::ExecuteDrawIndexedVerticesUP(ctx, base, prim, index_count, indices_va, verts_va, stride);
-    ctx.eax = 0;
 }
 
 // D3DDevice_ApplyStateBlock(token) & deferred restore helpers
@@ -106,15 +85,8 @@ WRAP_POST(sub_0041DD70)
 WRAP_POST(sub_0041DF10)
 
 // ============================================================================
-// 2. MC3D Lifecycle (Init + Present/Swap Diagnostics)
+// 2. MC3D Lifecycle (Present/Swap Diagnostics; sub_002D2850 is owned by game.cpp)
 // ============================================================================
-
-extern "C" void __imp__sub_002D2850(X86Context& ctx, uint8_t* base);
-extern "C" void sub_002D2850(X86Context& ctx, uint8_t* base) {
-    game::render_accuracy::InitRenderAccuracy();
-    __imp__sub_002D2850(ctx, base);
-    game::render_accuracy::ApplyRenderAccuracy();
-}
 
 extern "C" void __imp__sub_002D2990(X86Context& ctx, uint8_t* base);
 extern "C" void sub_002D2990(X86Context& ctx, uint8_t* base) {
