@@ -27618,6 +27618,7 @@ const X86FuncMapping X86FuncMappings[] = {
 	{0x2D228Cu, sub_002D228C},
 	{0x2D2290u, sub_002D2290},
 	{0x2D23FDu, sub_002D23FD},
+	{0x2D2410u, sub_002D2410},
 	{0x2D24CBu, sub_002D24CB},
 	{0x2D24E9u, sub_002D24E9},
 	{0x2D24F0u, sub_002D24F0},

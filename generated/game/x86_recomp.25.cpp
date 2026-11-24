@@ -34189,24 +34189,18 @@ X86_FUNC(__imp__sub_002D127F) {
 X86_WEAK_FUNC(sub_002D127F, __imp__sub_002D127F)
 
 
-X86_FUNC(__imp__sub_002D23FD) {
+X86_FUNC(__imp__sub_002D2410) {
 	X86_LOAD_FLAGS();
 	uint32_t ca = 0, cb = 0;
 	(void)ca; (void)cb;
-	// 002D23FD lea ecx, [ecx]
-	ctx.ecx = (uint32_t)((uint32_t)(ctx.ecx));
-	// 002D2400 scasd eax, dword ptr es:[edi]
-	/* scasd eax, dword ptr es:[edi] */
-	// 002D2401 and ebp, dword ptr [0x2d23bb00]
-	{ uint32_t a = (uint32_t)(ctx.ebp); uint32_t b = (uint32_t)(X86_MEM32((uint32_t)(0x2d23bb00u))); uint32_t r = a & b; ctx.ebp = (uint32_t)(r); cf = 0; of = 0; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
-	// 002D2407 add bh, al
-	{ uint32_t a = (uint32_t)(((uint8_t)(ctx.ebx >> 8))); uint32_t b = (uint32_t)(((uint8_t)ctx.eax)); uint32_t r = a + b; ctx.ebx = (ctx.ebx & 0xFFFF00FFu) | ((uint32_t)(uint8_t)(r) << 8); cf = r < a; of = ((a ^ r) & (b ^ r)) >> 31; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
-	// 002D2409 and ebp, dword ptr [0x2d23d300]
-	{ uint32_t a = (uint32_t)(ctx.ebp); uint32_t b = (uint32_t)(X86_MEM32((uint32_t)(0x2d23d300u))); uint32_t r = a & b; ctx.ebp = (uint32_t)(r); cf = 0; of = 0; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
-	// 002D240F add byte ptr [ebx - 0x2517ef14], al
-	{ uint32_t a = (uint32_t)(X86_MEM8((uint32_t)(ctx.ebx - 0x2517ef14u))); uint32_t b = (uint32_t)(((uint8_t)ctx.eax)); uint32_t r = a + b; X86_MEM8((uint32_t)(ctx.ebx - 0x2517ef14u)) = (uint8_t)(r); cf = r < a; of = ((a ^ r) & (b ^ r)) >> 31; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
-	// 002D2415 add eax, 0xc9335600
-	{ uint32_t a = (uint32_t)(ctx.eax); uint32_t b = (uint32_t)(0xc9335600u); uint32_t r = a + b; ctx.eax = (uint32_t)(r); cf = r < a; of = ((a ^ r) & (b ^ r)) >> 31; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
+	// 002D2410 sub esp, 0x10
+	ctx.esp -= 0x10u;
+	// 002D2413 call 0x3262f2
+	X86_PUSH32(0x2D2418u); sub_003262F2(ctx, base);
+	// 002D2418 push esi
+	{ uint32_t v = (uint32_t)(ctx.esi); X86_PUSH32(v); }
+	// 002D2419 xor ecx, ecx
+	ctx.ecx = 0;
 	// 002D241B push edi
 	{ uint32_t v = (uint32_t)(ctx.edi); X86_PUSH32(v); }
 	// 002D241C lea esp, [esp]
@@ -34319,7 +34313,8 @@ loc_002D2477:
 	// 002D24CA ret 
 	ctx.esp += 4; return;
 }
-X86_WEAK_FUNC(sub_002D23FD, __imp__sub_002D23FD)
+X86_WEAK_FUNC(sub_002D2410, __imp__sub_002D2410)
+X86_WEAK_FUNC(sub_002D23FD, __imp__sub_002D2410)
 
 
 X86_FUNC(__imp__sub_002D361E) {

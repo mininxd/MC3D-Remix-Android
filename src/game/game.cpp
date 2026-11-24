@@ -1044,6 +1044,14 @@ X86_FUNC(sub_000130DE) {
     LOGI("guest: sub_000130DE (CRT init) completed successfully");
 }
 
+// sub_002D2410: Display mode table initialization (resolutions, refresh rates, aspect ratios).
+X86_EXTERN_FUNC(__imp__sub_002D2410);
+X86_FUNC(sub_002D2410) {
+    LOGI("guest: sub_002D2410 (Display Mode Table Init) starting...");
+    __imp__sub_002D2410(ctx, base);
+    LOGI("guest: sub_002D2410 completed (refresh=%u Hz)", X86_MEM32(0x4b4e80u));
+}
+
 // sub_00012EA4: Mounts \??\T: (TDATA) and \??\U: (UDATA) for title 0x54540079.
 // Calling convention: stdcall with 2 arguments (8 bytes) + return address (4 bytes) = 12 bytes.
 X86_FUNC(sub_00012EA4) {

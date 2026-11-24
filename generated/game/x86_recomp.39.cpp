@@ -33455,7 +33455,7 @@ X86_FUNC(__imp__sub_002D2850) {
 	// 002D2860 push edi
 	{ uint32_t v = (uint32_t)(ctx.edi); X86_PUSH32(v); }
 	// 002D2861 call 0x2d2410
-	X86_PUSH32(0x2D2866u); x86_icall(ctx, base, 0x2D2410u);
+	X86_PUSH32(0x2D2866u); sub_002D2410(ctx, base);
 	// 002D2866 xor eax, eax
 	{ uint32_t a = (uint32_t)(ctx.eax); uint32_t b = (uint32_t)(ctx.eax); uint32_t r = a ^ b; ctx.eax = (uint32_t)(r); cf = 0; of = 0; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
 	// 002D2868 mov ecx, 0x11
