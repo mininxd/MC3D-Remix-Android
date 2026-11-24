@@ -1,309 +1,735 @@
 #include "game/render_accuracy.h"
+#include "game/render_accuracy_internal.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
-#include "app/app.h"
 #include "core/log.h"
 #include "cpu/x86_ops.h"
+#include "gpu/shaders.h"
 #include "gpu/state.h"
 #include "gpu/texture.h"
+#include "gpu/vertex.h"
 #include "image_symbols.h"
 #include "kernel/kernel.h"
 #include "kernel/memory.h"
 #include "xdk/d3d8.h"
 #include "xdk/hle.h"
-#include "xdk/layout.h"
-#include "x86_recomp_shared.h"
 
-namespace d3d {
-gpu::State& State();
-std::recursive_mutex& Lock();
-}  // namespace d3d
-
-using namespace kernel;
+extern "C" void sub_00415130(X86Context& ctx, uint8_t* base);  // D3DDevice_SetStreamSource
+extern "C" void sub_004168B0(X86Context& ctx, uint8_t* base);  // D3D_KickOffAndWaitForIdle
+extern "C" void sub_00417570(X86Context& ctx, uint8_t* base);  // D3DDevice_DrawVerticesUP
+extern "C" void sub_00417820(X86Context& ctx, uint8_t* base);  // D3DDevice_DrawIndexedVertices
 
 namespace game {
 namespace render_accuracy {
 
 namespace {
 
-// Cached synthetic texture headers for stages 0..3 when textures are bound via push buffer
-static uint32_t s_synth_tex_headers[4] = {0, 0, 0, 0};
+constexpr uint32_t kPushGuardSentinel = 0xFEEDBABEu;
+constexpr uint32_t kDeferredTssSlots = 22;  // slots 0..21 synced by d3d8.cpp SyncDeferred()
+constexpr uint32_t kMaxDiagUnique = 48;
 
-// Cached synthetic programmable pixel shader for hardware combiner reproduction
-static std::shared_ptr<gpu::PixelShader> s_synth_pixel_shader = nullptr;
+// D3D8 TSS enums / values matching Xbox XDK 5849 & shaders.cpp.
+constexpr uint32_t kTopDisable     = 1;
+constexpr uint32_t kTopSelectArg1  = 2;
+constexpr uint32_t kTopSelectArg2  = 3;
+constexpr uint32_t kTaMask         = 0x0Fu;
+constexpr uint32_t kTaModMask      = 0xF0u;
+constexpr uint32_t kTaDiffuse      = 0u;
+constexpr uint32_t kTaCurrent      = 1u;
+constexpr uint32_t kTaTexture      = 2u;
 
-// Track push buffer scanning progress
-static uint32_t s_last_scanned_push = 0;
+// Runtime state across draws.
+std::once_flag g_init_once;
+std::atomic<bool> g_initialized{false};
+std::atomic<uint64_t> g_apply_calls{0};
+std::atomic<uint64_t> g_swap_count{0};
+std::atomic<uint64_t> g_ff_repairs{0};
+std::atomic<uint64_t> g_ps_mode_repairs{0};
+std::atomic<uint64_t> g_tex_recoveries{0};
+std::atomic<uint64_t> g_pal_recoveries{0};
+std::atomic<uint64_t> g_push_flushes{0};
+std::atomic<uint64_t> g_diup_draws{0};
 
-// Scans pending NV2A push buffer commands up to the current push buffer write pointer
-void ScanPushBuffer(gpu::State& s) {
-    uint32_t pDev = R32(SYM(D3D_pDevice));
-    if (!pDev) return;
-    uint32_t push_end = R32(pDev + XDK_CDevice_Push);
-    if (!push_end) return;
+std::mutex g_cache_mu;
+uint32_t g_last_dev_tex[4] = {};
+uint32_t g_last_dev_pal[4] = {};
+bool g_rs_texmodes_active = false;
+uint32_t g_rs_texmodes_val = 0;
 
-    // Reset scan pointer if push buffer rewound (e.g. ScratchPush rewind)
-    if (s_last_scanned_push == 0 || push_end < s_last_scanned_push ||
-        (push_end - s_last_scanned_push) > 0x100000u) {
-        s_last_scanned_push = (push_end > 0x4000u) ? (push_end - 0x4000u) : push_end;
+// Thread-safe clone cache keyed by (original_ps_handle, resolved_tex_modes),
+// avoiding in-place mutation of PixelShader objects in flight on render_thread.
+struct PsCloneKey {
+    uint32_t handle;
+    uint32_t tex_modes;
+    bool operator==(const PsCloneKey& o) const { return handle == o.handle && tex_modes == o.tex_modes; }
+};
+struct PsCloneHash {
+    size_t operator()(const PsCloneKey& k) const {
+        return (size_t(k.handle) * 1315423911u) ^ (size_t(k.tex_modes) << 1);
     }
+};
+std::unordered_map<PsCloneKey, std::shared_ptr<gpu::PixelShader>, PsCloneHash> g_ps_clones;
 
-    for (uint32_t p = s_last_scanned_push; p + 4 <= push_end;) {
-        uint32_t head = R32(p);
-        uint32_t method = head & 0x1FFCu;
-        uint32_t n = (head >> 18) & 0x7FFu;
-        p += 4;
-        if ((head & 0xA0030003u) || n * 4 > push_end - p) {
-            // Not a method header (jump, call, or invalid token)
-            continue;
-        }
-        for (uint32_t i = 0; i < n && p + 4 <= push_end; i++, p += 4) {
-            uint32_t m = (head & 0x40000000u) ? method : (method + i * 4);
-            uint32_t v = R32(p);
-            if ((m >> 2) < s.simple.size()) {
-                s.simple[m >> 2] = v;
-            }
-        }
-    }
-    s_last_scanned_push = push_end;
+// Bounded per-shape diagnostic deduplication.
+std::unordered_set<uint64_t> g_logged_shapes;
+
+// Contiguous scratch ring for HLE DrawIndexedVerticesUP execution.
+constexpr uint32_t kDiupRingBytes = 4u << 20;
+constexpr uint32_t kDiupHeaderCount = 64;
+std::mutex g_diup_mu;
+uint32_t g_diup_ring = 0;
+uint32_t g_diup_pos = 0;
+uint32_t g_diup_hdr_idx = 0;
+uint32_t g_diup_headers[kDiupHeaderCount] = {};
+
+thread_local uint32_t tl_push_begin = 0;
+thread_local uint32_t tl_push_max_dwords = 0;
+thread_local uint32_t tl_push_vs_handle = 0;
+thread_local std::shared_ptr<gpu::VertexShader> tl_push_vs;
+
+inline bool UsesTextureArg(uint32_t arg) {
+    return (arg & kTaMask) == kTaTexture;
 }
 
-// Synchronizes active stage textures from guest CDevice table and hardware registers
-void SyncStageTextures(gpu::State& s) {
-    uint32_t pDev = R32(SYM(D3D_pDevice));
-    for (int st = 0; st < 4; st++) {
-        // 1. Check if guest CDevice table has a bound texture header
-        if (pDev) {
-            uint32_t guest_tex = R32(pDev + XDK_CDevice_Textures + st * 4);
-            if (guest_tex != 0) {
-                s.textures[st] = guest_tex;
-            }
-        }
+inline uint32_t ReplaceTextureArg(uint32_t arg, uint32_t replacement) {
+    return UsesTextureArg(arg) ? ((arg & kTaModMask) | replacement) : arg;
+}
 
-        // 2. Check hardware push buffer texture offset (0x1B00 + st * 0x40) and format (0x1B04 + st * 0x40)
-        uint32_t pb_offset = s.simple[(0x1B00u + st * 0x40u) >> 2];
-        uint32_t pb_format = s.simple[(0x1B04u + st * 0x40u) >> 2];
-        uint32_t pb_pitch = s.simple[(0x1B10u + st * 0x40u) >> 2];
-
-        if (pb_offset != 0 && pb_format != 0) {
-            if (!s_synth_tex_headers[st]) {
-                s_synth_tex_headers[st] = mem::AllocSystem(64);
-            }
-            uint32_t h = s_synth_tex_headers[st];
-            bool cube = (pb_format & 4u) != 0;
-            W32(h + 0, cube ? 0x00070001u : 0x00040001u);  // Common: texture type, refcount 1
-            W32(h + 4, pb_offset);                          // Data: physical address
-            W32(h + 8, 0);                                  // Lock: 0
-            W32(h + 12, pb_format);                         // Format: container format
-            W32(h + 16, pb_pitch);                          // Size / Pitch
-            W32(h + 20, 0);
-
-            // If stage texture is currently unbound or points to invalid memory, bind synthetic header
-            if (s.textures[st] == 0) {
-                s.textures[st] = h;
-            }
-        }
-
-        // 3. Texture addressing (wrap / clamp / mirror) from 0x1B08 + st * 0x40
-        uint32_t pb_addr = s.simple[(0x1B08u + st * 0x40u) >> 2];
-        if (pb_addr != 0 && s.tss[st][gpu::kTssAddressU] == 0) {
-            s.tss[st][gpu::kTssAddressU] = pb_addr & 0xFu;
-            s.tss[st][gpu::kTssAddressV] = (pb_addr >> 4) & 0xFu;
-            s.tss[st][gpu::kTssAddressW] = (pb_addr >> 8) & 0xFu;
-        }
+void WriteTss(gpu::State& s, uint32_t st, uint32_t slot, uint32_t val) {
+    s.tss[st][slot] = val;
+    if (slot < 32) {
+        SafeW32(addr::kD3dDeferredTss + st * 0x80u + slot * 4u, val);
     }
 }
 
-// Repairs PS_TEXTUREMODES so bound textures never sample to opaque black
-void SyncTextureModes(gpu::State& s) {
-    // Read hardware push buffer texture modes
-    uint32_t pb_modes = s.simple[0x1E70u >> 2];
-    if (pb_modes != 0) {
-        s.rs[gpu::kRsPsTextureModes] = pb_modes;
+void WriteRs(gpu::State& s, uint32_t rs, uint32_t val) {
+    if (rs < gpu::kRsMax) {
+        s.rs[rs] = val;
+        SafeW32(addr::kD3dRenderState + rs * 4u, val);
     }
-
-    uint32_t modes = s.rs[gpu::kRsPsTextureModes];
-    for (int st = 0; st < 4; st++) {
-        uint32_t m = (modes >> (st * 5)) & 0x1Fu;
-        if (s.textures[st] != 0 && m == 0) {
-            // Stage has a bound texture, but mode 0 forces shader to sample float4(0,0,0,1)
-            // Auto-detect mode from texture descriptor
-            gpu::TextureDesc td;
-            uint32_t auto_mode = 1;  // standard 2D lookup
-            if (gpu::Describe(s.textures[st], td)) {
-                if (td.cube) auto_mode = 3;
-                else if (td.depth > 1) auto_mode = 2;
-                else auto_mode = 1;
-            }
-            modes |= (auto_mode << (st * 5));
-        }
-    }
-    s.rs[gpu::kRsPsTextureModes] = modes;
-    s.simple[0x1E70u >> 2] = modes;
 }
 
-// Synthesizes programmable PixelShader combiners from NV2A hardware registers
-void SyncCombiners(gpu::State& s) {
-    uint32_t combiner_count = s.simple[0x1E60u >> 2];
+bool TryDescribeTexture(uint32_t tex_va, gpu::TextureDesc& out) {
+    if (!tex_va || !CanAccessGuest(tex_va, 20)) return false;
+    return gpu::Describe(tex_va, out) && out.data != 0;
+}
 
-    if (combiner_count != 0 && s.ps == nullptr) {
-        if (!s_synth_pixel_shader) {
-            s_synth_pixel_shader = std::make_shared<gpu::PixelShader>();
+bool IsP8Format(const gpu::TextureDesc& d) {
+    if (d.format == 0x0Bu) return true;
+    const char* name = gpu::Format(d.format).name;
+    return name && std::strstr(name, "P8") != nullptr;
+}
+
+// Pulls latest deferred RS/TSS from guest RAM so fixes operate on post-game state.
+void PullDeferredFromGuest(gpu::State& s) {
+    for (uint32_t st = 0; st < 4; ++st) {
+        for (uint32_t slot = 0; slot < kDeferredTssSlots; ++slot) {
+            uint32_t ea = addr::kD3dDeferredTss + st * 0x80u + slot * 4u;
+            if (CanAccessGuest(ea, 4)) s.tss[st][slot] = kernel::R32(ea);
         }
-        uint32_t* def = s_synth_pixel_shader->def;
+        uint32_t tci_ea = addr::kD3dDeferredTss + st * 0x80u + gpu::kTssTexCoordIndex * 4u;
+        if (CanAccessGuest(tci_ea, 4)) s.tss[st][gpu::kTssTexCoordIndex] = kernel::R32(tci_ea);
+    }
+    for (uint32_t rs = gpu::kRsDeferredFirst; rs <= 135; ++rs) {
+        uint32_t ea = addr::kD3dRenderState + rs * 4u;
+        if (CanAccessGuest(ea, 4)) s.rs[rs] = kernel::R32(ea);
+    }
+}
 
-        // Alpha inputs (0..7): method 0x260
-        for (int i = 0; i < 8; i++) def[i] = s.simple[(0x260u >> 2) + i];
+void SyncStageTexturesAndPalettes(gpu::State& s, std::array<gpu::TextureDesc, 4>& tex_descs,
+                                  std::array<bool, 4>& tex_ok) {
+    const uint32_t pDev = SafeR32(addr::kD3dDevicePtr);
+    for (uint32_t st = 0; st < 4; ++st) {
+        const uint32_t dev_tex = pDev ? SafeR32(pDev + addr::kDevTextures + st * 4u) : 0;
+        const uint32_t dev_pal = pDev ? SafeR32(pDev + addr::kDevPalettes + st * 4u) : 0;
+        const uint32_t mc_pal  = SafeR32(addr::kMcPalettesShadow + st * 4u);
 
-        // Final combiner ABCD & EFGH: methods 0x288, 0x28C
-        def[8] = s.simple[0x288u >> 2];
-        def[9] = s.simple[0x28Cu >> 2];
+        {
+            std::lock_guard<std::mutex> lk(g_cache_mu);
+            if (dev_tex != g_last_dev_tex[st]) {
+                s.textures[st] = dev_tex;
+                g_last_dev_tex[st] = dev_tex;
+                ++g_tex_recoveries;
+            } else if (s.textures[st] == 0 && dev_tex != 0) {
+                s.textures[st] = dev_tex;
+                ++g_tex_recoveries;
+            }
 
-        // Alpha outputs (26..33): method 0xAA0
-        for (int i = 0; i < 8; i++) def[26 + i] = s.simple[(0xAA0u >> 2) + i];
+            if (dev_pal != g_last_dev_pal[st]) {
+                s.palettes[st] = dev_pal;
+                g_last_dev_pal[st] = dev_pal;
+                ++g_pal_recoveries;
+            } else if (s.palettes[st] == 0 && dev_pal != 0) {
+                s.palettes[st] = dev_pal;
+                ++g_pal_recoveries;
+            }
+        }
 
-        // RGB inputs (34..41): method 0xAC0
-        for (int i = 0; i < 8; i++) def[34 + i] = s.simple[(0xAC0u >> 2) + i];
+        tex_ok[st] = TryDescribeTexture(s.textures[st], tex_descs[st]);
+        if (!tex_ok[st] && s.textures[st] != 0) {
+            LOG_FIRST(16, "render_accuracy: Describe failed st=%u tex=%08X common=%08X data=%08X fmt=%08X size=%08X",
+                      st, s.textures[st], SafeR32(s.textures[st]), SafeR32(s.textures[st] + 4),
+                      SafeR32(s.textures[st] + 12), SafeR32(s.textures[st] + 16));
+            // Do not leave a broken pointer masquerading as a valid texture.
+            if (dev_tex != s.textures[st] && TryDescribeTexture(dev_tex, tex_descs[st])) {
+                s.textures[st] = dev_tex;
+                tex_ok[st] = true;
+                ++g_tex_recoveries;
+            }
+        }
 
-        // Compare mode: method 0x17F8
-        def[42] = s.simple[0x17F8u >> 2];
+        if (tex_ok[st] && IsP8Format(tex_descs[st]) && s.palettes[st] == 0) {
+            if (dev_pal && CanAccessGuest(dev_pal, 8)) {
+                s.palettes[st] = dev_pal;
+                ++g_pal_recoveries;
+            } else if (mc_pal && CanAccessGuest(mc_pal, 8)) {
+                s.palettes[st] = mc_pal;
+                ++g_pal_recoveries;
+            }
+        }
+    }
+}
 
-        // RGB outputs (45..52): method 0x1E40
-        for (int i = 0; i < 8; i++) def[45 + i] = s.simple[(0x1E40u >> 2) + i];
+uint32_t ScanCombinerTexRegisterMask(const uint32_t* def) {
+    uint32_t num_stages = std::clamp<uint32_t>(def[53] & 0x0Fu, 1u, 8u);
+    uint32_t mask = 0;
+    auto check_word = [&](uint32_t w, int count) {
+        for (int b = 0; b < count; ++b) {
+            uint32_t reg = (w >> (b * 8)) & 0x0Fu;
+            if (reg >= 0x8u && reg <= 0xBu) mask |= 1u << (reg - 0x8u);
+        }
+    };
+    for (uint32_t i = 0; i < num_stages; ++i) {
+        check_word(def[0 + i], 4);   // AlphaInputs
+        check_word(def[34 + i], 4);  // RgbInputs
+    }
+    check_word(def[8], 4);  // FinalAbcd
+    check_word(def[9], 3);  // FinalEfgh (E, F, G)
+    return mask;
+}
 
-        // Combiner count: method 0x1E60
-        def[53] = combiner_count;
+uint32_t InferTexModeForDesc(const gpu::TextureDesc& d) {
+    if (d.cube) return 3u;       // PS_TEXTUREMODES_CUBEMAP
+    if (d.depth > 1) return 2u;  // PS_TEXTUREMODES_PROJECT3D
+    return 1u;                   // PS_TEXTUREMODES_PROJECT2D
+}
 
-        // Dot mapping: method 0x1E74
-        def[55] = s.simple[0x1E74u >> 2];
+void SyncProgrammablePixelShader(gpu::State& s, const std::array<gpu::TextureDesc, 4>& tex_descs,
+                                 const std::array<bool, 4>& tex_ok) {
+    const uint32_t pDev = SafeR32(addr::kD3dDevicePtr);
+    const uint32_t rs_guest = SafeR32(addr::kD3dPsTexModesRs);
+    const uint32_t dev_modes = pDev ? SafeR32(pDev + addr::kDevPsTexModes) : 0;
 
-        // Input texture: method 0x1E78
-        def[56] = s.simple[0x1E78u >> 2];
-
-        s_synth_pixel_shader->handle = 0x80000001u;
-        s.ps = s_synth_pixel_shader;
+    uint32_t eff_modes = s.ps->def[54];
+    {
+        std::lock_guard<std::mutex> lk(g_cache_mu);
+        if (g_rs_texmodes_active && g_rs_texmodes_val != 0) {
+            eff_modes = g_rs_texmodes_val;
+        } else if (eff_modes == 0) {
+            if (rs_guest != 0) eff_modes = rs_guest;
+            else if (dev_modes != 0) eff_modes = dev_modes;
+            else if (s.rs[gpu::kRsPsTextureModes] != 0) eff_modes = s.rs[gpu::kRsPsTextureModes];
+        }
     }
 
-    // Fixed-function fallback: if still no pixel shader, ensure stage 0 modulates texture with diffuse
-    if (s.ps == nullptr && s.textures[0] != 0 && s.tss[0][gpu::kTssColorOp] <= 1) {
-        s.tss[0][gpu::kTssColorOp] = 4;  // D3DTOP_MODULATE
-        s.tss[0][gpu::kTssColorArg1] = 2;  // D3DTA_TEXTURE
-        s.tss[0][gpu::kTssColorArg2] = 1;  // D3DTA_CURRENT
-        s.tss[0][gpu::kTssAlphaOp] = 2;   // D3DTOP_SELECTARG1
-        s.tss[0][gpu::kTssAlphaArg1] = 2;  // D3DTA_TEXTURE
+    const uint32_t read_mask = ScanCombinerTexRegisterMask(s.ps->def);
+    for (uint32_t st = 0; st < 4; ++st) {
+        uint32_t m = (eff_modes >> (st * 5)) & 0x1Fu;
+        if (m == 0) {
+            uint32_t rs_m = (rs_guest >> (st * 5)) & 0x1Fu;
+            if (!rs_m) rs_m = (s.rs[gpu::kRsPsTextureModes] >> (st * 5)) & 0x1Fu;
+            if (rs_m != 0) {
+                m = rs_m;
+                eff_modes |= (m << (st * 5));
+            } else if ((read_mask & (1u << st)) && tex_ok[st]) {
+                m = InferTexModeForDesc(tex_descs[st]);
+                eff_modes |= (m << (st * 5));
+            }
+        }
     }
+
+    WriteRs(s, gpu::kRsPsTextureModes, eff_modes);
+
+    if (s.ps->def[54] != eff_modes) {
+        ++g_ps_mode_repairs;
+        std::lock_guard<std::mutex> lk(g_cache_mu);
+        PsCloneKey key{s.ps->handle, eff_modes};
+        auto it = g_ps_clones.find(key);
+        std::shared_ptr<gpu::PixelShader> cloned;
+        if (it != g_ps_clones.end() &&
+            std::memcmp(it->second->def, s.ps->def, 54 * sizeof(uint32_t)) == 0 &&
+            it->second->def[55] == s.ps->def[55] &&
+            it->second->def[56] == s.ps->def[56]) {
+            cloned = it->second;
+        } else {
+            cloned = std::make_shared<gpu::PixelShader>(*s.ps);
+            cloned->def[54] = eff_modes;
+            g_ps_clones[key] = cloned;
+        }
+        s.ps = std::move(cloned);
+    }
+}
+
+bool StageReadsTexture(const gpu::State& s, uint32_t st) {
+    const uint32_t cop = s.tss[st][gpu::kTssColorOp];
+    const uint32_t aop = s.tss[st][gpu::kTssAlphaOp];
+    if (cop > kTopDisable) {
+        if (UsesTextureArg(s.tss[st][gpu::kTssColorArg1])) return true;
+        if (cop > kTopSelectArg1 && UsesTextureArg(s.tss[st][gpu::kTssColorArg2])) return true;
+        if (UsesTextureArg(s.tss[st][gpu::kTssColorArg0])) return true;
+    }
+    if (aop > kTopDisable) {
+        if (UsesTextureArg(s.tss[st][gpu::kTssAlphaArg1])) return true;
+        if (aop > kTopSelectArg1 && UsesTextureArg(s.tss[st][gpu::kTssAlphaArg2])) return true;
+        if (UsesTextureArg(s.tss[st][gpu::kTssAlphaArg0])) return true;
+    }
+    return false;
+}
+
+// Prevents fixed-function [FF] unbound texture stages (kTexNone -> CONST(1,1,1,1)) from
+// overwriting textured Stage 0 output or diffuse vertex shading with solid white.
+void SyncFixedFunctionStages(gpu::State& s, const std::array<bool, 4>& tex_ok) {
+    // Stage 0 with no bound texture: replace SELECTARG1(TEXTURE) with DIFFUSE so
+    // vertex colors propagate instead of constant white (1,1,1,1).
+    if (!tex_ok[0]) {
+        uint32_t cop0 = s.tss[0][gpu::kTssColorOp];
+        if (cop0 == kTopSelectArg1 && UsesTextureArg(s.tss[0][gpu::kTssColorArg1])) {
+            WriteTss(s, 0, gpu::kTssColorArg1, ReplaceTextureArg(s.tss[0][gpu::kTssColorArg1], kTaDiffuse));
+            ++g_ff_repairs;
+        } else if (cop0 == kTopSelectArg2 && UsesTextureArg(s.tss[0][gpu::kTssColorArg2])) {
+            WriteTss(s, 0, gpu::kTssColorArg2, ReplaceTextureArg(s.tss[0][gpu::kTssColorArg2], kTaDiffuse));
+            ++g_ff_repairs;
+        }
+        uint32_t aop0 = s.tss[0][gpu::kTssAlphaOp];
+        if (aop0 == kTopSelectArg1 && UsesTextureArg(s.tss[0][gpu::kTssAlphaArg1])) {
+            WriteTss(s, 0, gpu::kTssAlphaArg1, ReplaceTextureArg(s.tss[0][gpu::kTssAlphaArg1], kTaDiffuse));
+            ++g_ff_repairs;
+        } else if (aop0 == kTopSelectArg2 && UsesTextureArg(s.tss[0][gpu::kTssAlphaArg2])) {
+            WriteTss(s, 0, gpu::kTssAlphaArg2, ReplaceTextureArg(s.tss[0][gpu::kTssAlphaArg2], kTaDiffuse));
+            ++g_ff_repairs;
+        }
+    }
+
+    // Stages 1..3: Xbox NV2A fixed-function treats unbound TEXTURE stages as disabled/pass-through
+    // instead of replacing CURRENT with white (1,1,1,1) as MakePixelKey/TexFetch does.
+    for (uint32_t st = 1; st < 4; ++st) {
+        const uint32_t cop = s.tss[st][gpu::kTssColorOp];
+        if (cop <= kTopDisable) break;  // D3D8 stops stage chain at first ColorOp == DISABLE
+        if (tex_ok[st]) continue;
+
+        const bool any_later_tex = [&] {
+            for (uint32_t k = st + 1; k < 4; ++k) {
+                if (s.tss[k][gpu::kTssColorOp] <= kTopDisable) break;
+                if (tex_ok[k] || !StageReadsTexture(s, k)) return true;
+            }
+            return false;
+        }();
+
+        if (!any_later_tex && StageReadsTexture(s, st)) {
+            WriteTss(s, st, gpu::kTssColorOp, kTopDisable);
+            WriteTss(s, st, gpu::kTssAlphaOp, kTopDisable);
+            ++g_ff_repairs;
+            break;
+        }
+
+        if (UsesTextureArg(s.tss[st][gpu::kTssColorArg1])) {
+            WriteTss(s, st, gpu::kTssColorArg1, ReplaceTextureArg(s.tss[st][gpu::kTssColorArg1], kTaCurrent));
+            ++g_ff_repairs;
+        }
+        if (UsesTextureArg(s.tss[st][gpu::kTssColorArg2])) {
+            WriteTss(s, st, gpu::kTssColorArg2, ReplaceTextureArg(s.tss[st][gpu::kTssColorArg2], kTaCurrent));
+            ++g_ff_repairs;
+        }
+        if (UsesTextureArg(s.tss[st][gpu::kTssColorArg0])) {
+            WriteTss(s, st, gpu::kTssColorArg0, ReplaceTextureArg(s.tss[st][gpu::kTssColorArg0], kTaCurrent));
+            ++g_ff_repairs;
+        }
+        if (UsesTextureArg(s.tss[st][gpu::kTssAlphaArg1])) {
+            WriteTss(s, st, gpu::kTssAlphaArg1, ReplaceTextureArg(s.tss[st][gpu::kTssAlphaArg1], kTaCurrent));
+            ++g_ff_repairs;
+        }
+        if (UsesTextureArg(s.tss[st][gpu::kTssAlphaArg2])) {
+            WriteTss(s, st, gpu::kTssAlphaArg2, ReplaceTextureArg(s.tss[st][gpu::kTssAlphaArg2], kTaCurrent));
+            ++g_ff_repairs;
+        }
+        if (UsesTextureArg(s.tss[st][gpu::kTssAlphaArg0])) {
+            WriteTss(s, st, gpu::kTssAlphaArg0, ReplaceTextureArg(s.tss[st][gpu::kTssAlphaArg0], kTaCurrent));
+            ++g_ff_repairs;
+        }
+    }
+}
+
+void LogUniqueDrawState(const gpu::State& s, const std::array<gpu::TextureDesc, 4>& tex_descs,
+                        const std::array<bool, 4>& tex_ok) {
+    if (g_swap_count.load(std::memory_order_relaxed) < 5) return;  // skip earliest splash frames
+    uint64_t sig = s.ps ? (uint64_t(s.ps->handle) << 32) ^ s.ps->def[54]
+                        : (uint64_t(s.tss[0][gpu::kTssColorOp]) |
+                           (uint64_t(s.tss[1][gpu::kTssColorOp]) << 8) |
+                           (uint64_t(s.tss[2][gpu::kTssColorOp]) << 16) |
+                           (uint64_t(s.tss[0][gpu::kTssColorArg1]) << 24));
+    for (int i = 0; i < 4; ++i) {
+        sig ^= (uint64_t(tex_ok[i] ? tex_descs[i].format : 0xFFu) << (32 + i * 8));
+        if (s.textures[i] == 0 && ((s.ps && ((ScanCombinerTexRegisterMask(s.ps->def) >> i) & 1u)) ||
+                                   (!s.ps && StageReadsTexture(s, uint32_t(i))))) {
+            sig ^= (1ull << (56 + i));
+        }
+    }
+
+    std::lock_guard<std::mutex> lk(g_cache_mu);
+    if (g_logged_shapes.size() >= kMaxDiagUnique || !g_logged_shapes.insert(sig).second) return;
+
+    if (s.ps) {
+        LOGR("render_accuracy[PROG] ps=%08X modes=%05X readMask=%X tex=(%08X:%s,%08X:%s,%08X:%s,%08X:%s) pal=(%08X,%08X)",
+             s.ps->handle, s.ps->def[54], ScanCombinerTexRegisterMask(s.ps->def),
+             s.textures[0], tex_ok[0] ? gpu::Format(tex_descs[0].format).name : "NONE",
+             s.textures[1], tex_ok[1] ? gpu::Format(tex_descs[1].format).name : "NONE",
+             s.textures[2], tex_ok[2] ? gpu::Format(tex_descs[2].format).name : "NONE",
+             s.textures[3], tex_ok[3] ? gpu::Format(tex_descs[3].format).name : "NONE",
+             s.palettes[0], s.palettes[1]);
+    } else {
+        LOGR("render_accuracy[FF] cop=(%u,%u,%u,%u) arg1=(%u,%u,%u) tex=(%08X:%s,%08X:%s) pal=%08X",
+             s.tss[0][gpu::kTssColorOp], s.tss[1][gpu::kTssColorOp],
+             s.tss[2][gpu::kTssColorOp], s.tss[3][gpu::kTssColorOp],
+             s.tss[0][gpu::kTssColorArg1], s.tss[1][gpu::kTssColorArg1], s.tss[2][gpu::kTssColorArg1],
+             s.textures[0], tex_ok[0] ? gpu::Format(tex_descs[0].format).name : "NONE",
+             s.textures[1], tex_ok[1] ? gpu::Format(tex_descs[1].format).name : "NONE",
+             s.palettes[0]);
+    }
+}
+
+uint32_t CurrentVertexStrideBytes(const gpu::State& s) {
+    if (s.vs_handle & 1u) return s.vs ? s.vs->stream_stride[0] : 0;
+    gpu::VertexShader fvf{};
+    gpu::FvfInputs(s.vs_handle, fvf);
+    return fvf.stream_stride[0];
+}
+
+void ApplySimpleMethodToState(gpu::State& s, uint32_t method, uint32_t val) {
+    if ((method >> 2) < s.simple.size()) s.simple[method >> 2] = val;
+}
+
+uint32_t AllocDiupContiguousVertices(X86Context& ctx, uint8_t* base,
+                                     const void* src, uint32_t bytes, uint32_t& out_hdr_va) {
+    std::lock_guard<std::mutex> lk(g_diup_mu);
+    if (!g_diup_ring) {
+        g_diup_ring = mem::AllocContiguous(kDiupRingBytes, 0, 0xFFFFFFFFu, 0x1000u);
+        for (uint32_t i = 0; i < kDiupHeaderCount; ++i) {
+            g_diup_headers[i] = mem::AllocSystem(20, 16);
+            std::memset(kernel::HostPtr(g_diup_headers[i]), 0, 20);
+            // High refcount ensures SetStreamSource Release never frees permanent scratch headers.
+            kernel::W32(g_diup_headers[i], 0x01400001u);
+        }
+        LOGR("render_accuracy: allocated DIUP ring=%08X (%u MB)", g_diup_ring, kDiupRingBytes >> 20);
+    }
+
+    const uint32_t room = (bytes + 63u) & ~63u;
+    if (room > kDiupRingBytes) return 0;
+
+    if (g_diup_pos + room > kDiupRingBytes) {
+        g_diup_mu.unlock();
+        X86_PUSH32(0u);
+        sub_004168B0(ctx, base);  // Wait for GPU before overwriting ring head
+        g_diup_mu.lock();
+        g_diup_pos = 0;
+    }
+
+    const uint32_t dst_va = g_diup_ring + g_diup_pos;
+    std::memcpy(kernel::HostPtr(dst_va), src, bytes);
+    g_diup_pos += room;
+
+    out_hdr_va = g_diup_headers[g_diup_hdr_idx];
+    g_diup_hdr_idx = (g_diup_hdr_idx + 1u) % kDiupHeaderCount;
+    kernel::W32(out_hdr_va, 0x01400001u);
+    kernel::W32(out_hdr_va + 4u, mem::PhysicalFromVirtual(dst_va));
+    return dst_va;
 }
 
 }  // namespace
 
+bool CanAccessGuest(uint32_t va, uint32_t bytes) {
+    if (va < 0x10000u || bytes == 0) return false;
+    uint64_t end = uint64_t(va) + bytes - 1u;
+    if (end > 0xFFFFFFFFull) return false;
+    uint32_t p = va & ~0xFFFu;
+    uint32_t last = uint32_t(end) & ~0xFFFu;
+    while (true) {
+        if (!mem::IsCommitted(p)) return false;
+        if (p == last) break;
+        p += 0x1000u;
+    }
+    return true;
+}
+
+uint32_t SafeR32(uint32_t va, uint32_t fallback) {
+    return CanAccessGuest(va, 4) ? kernel::R32(va) : fallback;
+}
+
+uint16_t SafeR16(uint32_t va, uint16_t fallback) {
+    if (!CanAccessGuest(va, 2)) return fallback;
+    return *reinterpret_cast<const uint16_t*>(kernel::HostPtr(va));
+}
+
+bool SafeW32(uint32_t va, uint32_t value) {
+    if (!CanAccessGuest(va, 4)) return false;
+    kernel::W32(va, value);
+    return true;
+}
+
+void NotifyPsTextureModesSet(uint32_t modes) {
+    std::lock_guard<std::mutex> lk(g_cache_mu);
+    g_rs_texmodes_active = true;
+    g_rs_texmodes_val = modes;
+}
+
+void NotifyPixelShaderSet(uint32_t /*ps_handle*/) {
+    std::lock_guard<std::mutex> lk(g_cache_mu);
+    g_rs_texmodes_active = false;
+}
+
+void NotifyPaletteBound(uint32_t stage, uint32_t pal_va) {
+    std::lock_guard<std::recursive_mutex> lock(d3d::Lock());
+    d3d::State().palettes[stage & 3u] = pal_va;
+    std::lock_guard<std::mutex> lk(g_cache_mu);
+    g_last_dev_pal[stage & 3u] = pal_va;
+}
+
+void InvalidateMc3dStateShadows() {
+    // Force MC3D to miss shadow comparisons and issue D3D SetTexture/SetPalette/SetPS next draw.
+    for (uint32_t i = 0; i < 4; ++i) {
+        SafeW32(addr::kMcTexturesShadow + i * 4u, 0xFFFFFFFFu);
+        SafeW32(addr::kMcPalettesShadow + i * 4u, 0xFFFFFFFFu);
+    }
+    SafeW32(addr::kMcPsShadow, 0xFFFFFFFFu);
+    std::lock_guard<std::mutex> lk(g_cache_mu);
+    g_rs_texmodes_active = false;
+}
+
+void RecordPushSpanBegin(uint32_t begin_va, uint32_t max_dwords) {
+    if (!begin_va || !max_dwords || max_dwords > 0x20000u) return;
+    if (!CanAccessGuest(begin_va, max_dwords * 4u)) return;
+    for (uint32_t i = 0; i < max_dwords; ++i) {
+        kernel::W32(begin_va + i * 4u, kPushGuardSentinel);
+    }
+    tl_push_begin = begin_va;
+    tl_push_max_dwords = max_dwords;
+    std::lock_guard<std::recursive_mutex> lock(d3d::Lock());
+    tl_push_vs_handle = d3d::State().vs_handle;
+    tl_push_vs = d3d::State().vs;
+}
+
+void FlushCapturedPushSpan(X86Context& ctx, uint8_t* base, uint32_t explicit_end, const char* tag) {
+    const uint32_t begin = tl_push_begin;
+    const uint32_t max_dwords = tl_push_max_dwords;
+    const uint32_t saved_push_vs_handle = tl_push_vs_handle;
+    std::shared_ptr<gpu::VertexShader> saved_push_vs = std::move(tl_push_vs);
+    tl_push_begin = 0;
+    tl_push_max_dwords = 0;
+    tl_push_vs_handle = 0;
+    tl_push_vs.reset();
+    if (!begin || !max_dwords) return;
+
+    const uint32_t max_end = begin + max_dwords * 4u;
+    uint32_t end = (explicit_end > begin && explicit_end <= max_end) ? explicit_end : max_end;
+    if (!CanAccessGuest(begin, end - begin)) return;
+
+    constexpr uint32_t kBeginEnd = 0x17FCu;
+    constexpr uint32_t kInlineArray = 0x1818u;
+
+    uint32_t prim = 0;
+    std::vector<uint32_t> vertices;
+    uint32_t p = begin;
+    while (p + 4 <= end) {
+        const uint32_t head = kernel::R32(p);
+        if (head == kPushGuardSentinel) break;
+        const uint32_t method = head & 0x1FFCu;
+        const uint32_t count = (head >> 18) & 0x7FFu;
+        p += 4;
+        if ((head & 0xA0030003u) != 0 || count * 4u > end - p) break;
+
+        for (uint32_t i = 0; i < count; ++i, p += 4) {
+            const uint32_t m = (head & 0x40000000u) ? method : (method + i * 4u);
+            const uint32_t v = kernel::R32(p);
+            if (m == kInlineArray) {
+                if (prim) vertices.push_back(v);
+            } else if (m != kBeginEnd) {
+                std::lock_guard<std::recursive_mutex> lock(d3d::Lock());
+                ApplySimpleMethodToState(d3d::State(), m, v);
+            } else if (v != 0) {
+                prim = v;
+                vertices.clear();
+            } else if (prim != 0) {
+                // Several push callers restore the prior VertexShader right after EndPush;
+                // temporarily bind the draw's captured VS/FVF so stride and inputs match.
+                uint32_t post_vs_handle = 0;
+                std::shared_ptr<gpu::VertexShader> post_vs;
+                uint32_t stride = 0;
+                {
+                    std::lock_guard<std::recursive_mutex> lock(d3d::Lock());
+                    auto& s = d3d::State();
+                    post_vs_handle = s.vs_handle;
+                    post_vs = s.vs;
+                    if (saved_push_vs_handle != 0) {
+                        s.vs_handle = saved_push_vs_handle;
+                        s.vs = saved_push_vs;
+                    }
+                    stride = CurrentVertexStrideBytes(s);
+                }
+                ApplyRenderAccuracy();
+                const uint32_t bytes = uint32_t(vertices.size()) * 4u;
+                if (stride && bytes >= stride && (bytes % stride) == 0) {
+                    const uint32_t vert_count = bytes / stride;
+                    uint32_t guest_hdr = 0;
+                    const uint32_t guest_verts =
+                        AllocDiupContiguousVertices(ctx, base, vertices.data(), bytes, guest_hdr);
+                    (void)guest_hdr;
+                    if (guest_verts) {
+                        const uint32_t fl = ++g_push_flushes;
+                        if (fl <= 8) {
+                            LOGR("render_accuracy: PushFlush[%s] prim=%u verts=%u stride=%u vs=%08X",
+                                 tag, prim, vert_count, stride, saved_push_vs_handle);
+                        }
+                        const uint32_t saved_eax = ctx.eax;
+                        const uint32_t saved_ecx = ctx.ecx;
+                        const uint32_t saved_edx = ctx.edx;
+                        X86_PUSH32(stride);
+                        X86_PUSH32(guest_verts);
+                        X86_PUSH32(vert_count);
+                        X86_PUSH32(prim);
+                        X86_PUSH32(0u);
+                        sub_00417570(ctx, base);
+                        ctx.eax = saved_eax;
+                        ctx.ecx = saved_ecx;
+                        ctx.edx = saved_edx;
+                    }
+                }
+                {
+                    std::lock_guard<std::recursive_mutex> lock(d3d::Lock());
+                    auto& s = d3d::State();
+                    s.vs_handle = post_vs_handle;
+                    s.vs = std::move(post_vs);
+                }
+                prim = 0;
+                vertices.clear();
+            }
+        }
+    }
+}
+
+void ExecuteDrawIndexedVerticesUP(X86Context& ctx, uint8_t* base,
+                                  uint32_t prim, uint32_t index_count,
+                                  uint32_t indices_va, uint32_t verts_va, uint32_t stride) {
+    if (!index_count || !stride || !indices_va || !verts_va) return;
+    if (!CanAccessGuest(indices_va, index_count * 2u)) return;
+
+    const uint32_t pDev = SafeR32(addr::kD3dDevicePtr);
+    const uint32_t vtx_off = pDev ? SafeR32(pDev + addr::kDevVtxOffset) : 0;
+    if (vtx_off != 0 && CanAccessGuest(verts_va + vtx_off, stride)) {
+        verts_va += vtx_off;
+    }
+
+    uint16_t max_idx = 0;
+    const uint16_t* idx_ptr = reinterpret_cast<const uint16_t*>(kernel::HostPtr(indices_va));
+    for (uint32_t i = 0; i < index_count; ++i) {
+        if (idx_ptr[i] > max_idx) max_idx = idx_ptr[i];
+    }
+
+    const uint32_t vert_bytes = (uint32_t(max_idx) + 1u) * stride;
+    if (!CanAccessGuest(verts_va, vert_bytes)) return;
+
+    uint32_t temp_hdr = 0;
+    if (!AllocDiupContiguousVertices(ctx, base, kernel::HostPtr(verts_va), vert_bytes, temp_hdr)) return;
+
+    const uint32_t streams_va = SYM(D3D_Streams);
+    const uint32_t old_stride = SafeR32(streams_va + XDK_Stream_Stride);
+    const uint32_t old_vb = SafeR32(streams_va + XDK_Stream_Buffer);
+    const uint32_t old_vb_common = old_vb ? SafeR32(old_vb) : 0;
+    if (old_vb) SafeW32(old_vb, old_vb_common + 0x00080000u);  // Pin against temporary Release
+
+    ApplyRenderAccuracy();
+
+    // SetStreamSource(0, temp_hdr, stride)
+    X86_PUSH32(stride);
+    X86_PUSH32(temp_hdr);
+    X86_PUSH32(0u);
+    X86_PUSH32(0u);
+    sub_00415130(ctx, base);
+
+    // DrawIndexedVertices(prim, index_count, indices_va)
+    X86_PUSH32(indices_va);
+    X86_PUSH32(index_count);
+    X86_PUSH32(prim);
+    X86_PUSH32(0u);
+    sub_00417820(ctx, base);
+
+    // Restore stream 0.
+    X86_PUSH32(old_stride);
+    X86_PUSH32(old_vb);
+    X86_PUSH32(0u);
+    X86_PUSH32(0u);
+    sub_00415130(ctx, base);
+
+    if (old_vb) SafeW32(old_vb, old_vb_common);
+
+    const uint64_t n = ++g_diup_draws;
+    if (n <= 8) {
+        LOGR("render_accuracy: DIUP draw #%llu prim=%u idx=%u maxV=%u stride=%u",
+             static_cast<unsigned long long>(n), prim, index_count, max_idx, stride);
+    }
+}
+
 void ApplyRenderAccuracy() {
+    InitRenderAccuracy();
+    ++g_apply_calls;
+
     std::lock_guard<std::recursive_mutex> lock(d3d::Lock());
     gpu::State& s = d3d::State();
 
-    // 1. Scan any pending push buffer commands into s.simple
-    ScanPushBuffer(s);
+    PullDeferredFromGuest(s);
 
-    // 2. Synchronize all deferred and complex render states (92..165)
-    for (uint32_t i = gpu::kRsDeferredFirst; i < gpu::kRsMax; i++) {
-        s.rs[i] = R32(SYM(D3D_RenderState) + i * 4);
+    std::array<gpu::TextureDesc, 4> tex_descs{};
+    std::array<bool, 4> tex_ok{};
+    SyncStageTexturesAndPalettes(s, tex_descs, tex_ok);
+
+    if (s.ps != nullptr) {
+        SyncProgrammablePixelShader(s, tex_descs, tex_ok);
+    } else {
+        SyncFixedFunctionStages(s, tex_ok);
     }
 
-    // 3. Synchronize all 32 texture stage states across all 4 stages (including kTssTexCoordIndex)
-    for (int st = 0; st < 4; st++) {
-        uint32_t stage_base = SYM(D3D_DeferredTextureState) + st * 32 * 4;
-        for (uint32_t i = 0; i < gpu::kTssCount; i++) {
-            s.tss[st][i] = R32(stage_base + i * 4);
-        }
-    }
+    LogUniqueDrawState(s, tex_descs, tex_ok);
+}
 
-    // 4. Synchronize textures and synthesize headers if push buffer set
-    SyncStageTextures(s);
-
-    // 5. Repair texture modes so sampled textures are never opaque black
-    SyncTextureModes(s);
-
-    // 6. Synthesize programmable combiners from hardware NV2A registers
-    SyncCombiners(s);
-
-    // 7. Synchronize TextureFactor for TFACTOR combiner stages
-    uint32_t tfactor = s.rs[gpu::kRsTextureFactor];
-    if (tfactor == 0) {
-        tfactor = R32(SYM(D3D_RenderState) + gpu::kRsTextureFactor * 4);
-        if (tfactor != 0) s.rs[gpu::kRsTextureFactor] = tfactor;
+void OnSwapDiagnostics() {
+    const uint64_t f = ++g_swap_count;
+    if (f == 1 || (f % 300u) == 0u) {
+        LOGR("render_accuracy: swap=%llu apply=%llu ffFix=%llu psFix=%llu texFix=%llu palFix=%llu push=%llu diup=%llu",
+             static_cast<unsigned long long>(f),
+             static_cast<unsigned long long>(g_apply_calls.load()),
+             static_cast<unsigned long long>(g_ff_repairs.load()),
+             static_cast<unsigned long long>(g_ps_mode_repairs.load()),
+             static_cast<unsigned long long>(g_tex_recoveries.load()),
+             static_cast<unsigned long long>(g_pal_recoveries.load()),
+             static_cast<unsigned long long>(g_push_flushes.load()),
+             static_cast<unsigned long long>(g_diup_draws.load()));
     }
 }
 
 void InitRenderAccuracy() {
-    LOGI("render_accuracy: initialized graphics accuracy subsystem");
+    std::call_once(g_init_once, [] {
+        g_initialized.store(true, std::memory_order_release);
+        LOGR("render_accuracy: initialized (MC3DR Xbox D3D8/NV2A HLE+Combiner Accuracy Engine)");
+    });
 }
 
 }  // namespace render_accuracy
 }  // namespace game
-
-// =============================================================================
-// Recompiler Weak-Symbol Overrides (Strong Definitions)
-// These intercept critical graphics pipeline stages to ensure full accuracy.
-// =============================================================================
-
-// Inlined D3D dirty-flag state committer
-X86_EXTERN_FUNC(__imp__sub_0041DCF0);
-X86_FUNC(sub_0041DCF0) {
-    __imp__sub_0041DCF0(ctx, base);
-    game::render_accuracy::ApplyRenderAccuracy();
-}
-
-// Inlined push texture modes (PS_TEXTUREMODES)
-X86_EXTERN_FUNC(__imp__sub_0041C8A0);
-X86_FUNC(sub_0041C8A0) {
-    __imp__sub_0041C8A0(ctx, base);
-    game::render_accuracy::ApplyRenderAccuracy();
-}
-
-// Inlined push deferred texture states
-X86_EXTERN_FUNC(__imp__sub_0041CC20);
-X86_FUNC(sub_0041CC20) {
-    __imp__sub_0041CC20(ctx, base);
-    game::render_accuracy::ApplyRenderAccuracy();
-}
-
-// Inlined combiner setup (pushes 0x1E60 and 36 combiner dwords)
-X86_EXTERN_FUNC(__imp__sub_00420280);
-X86_FUNC(sub_00420280) {
-    __imp__sub_00420280(ctx, base);
-    game::render_accuracy::ApplyRenderAccuracy();
-}
-
-// Inlined push render states
-X86_EXTERN_FUNC(__imp__sub_0041CE10);
-X86_FUNC(sub_0041CE10) {
-    __imp__sub_0041CE10(ctx, base);
-    game::render_accuracy::ApplyRenderAccuracy();
-}
-
-// Inlined push viewport / scissor
-X86_EXTERN_FUNC(__imp__sub_0041C730);
-X86_FUNC(sub_0041C730) {
-    __imp__sub_0041C730(ctx, base);
-    game::render_accuracy::ApplyRenderAccuracy();
-}
-
-// Inlined DrawIndexedVertices dispatch
-X86_EXTERN_FUNC(__imp__sub_0041DD70);
-X86_FUNC(sub_0041DD70) {
-    game::render_accuracy::ApplyRenderAccuracy();
-    __imp__sub_0041DD70(ctx, base);
-}
-
-// Inlined DrawVerticesUP dispatch
-X86_EXTERN_FUNC(__imp__sub_0041DF10);
-X86_FUNC(sub_0041DF10) {
-    game::render_accuracy::ApplyRenderAccuracy();
-    __imp__sub_0041DF10(ctx, base);
-}
