@@ -108,6 +108,13 @@ void Loaded() {
     StartHardwareTicker();
     LOGI("hardware: MMIO apertures committed and APU/NV2A ticker running");
 
+    // Ensure all critical partition mappings and symbolic links exist for Midnight Club 3
+    kernel::CreateSymbolicLink("\\??\\D:", "\\Device\\CdRom0");
+    kernel::CreateSymbolicLink("\\??\\Z:", "\\Device\\Harddisk0\\Partition5");
+    kernel::CreateSymbolicLink("\\??\\T:", "\\Device\\Harddisk0\\Partition1\\TDATA\\54540079");
+    kernel::CreateSymbolicLink("\\??\\U:", "\\Device\\Harddisk0\\Partition1\\UDATA\\54540079");
+    kernel::CreateSymbolicLink("\\Device\\Harddisk0\\Partition0", "\\Device\\Harddisk0\\Partition1");
+
     // Ensure network link status export (PhyGetLinkState, ordinal 252) returns active link
     kernel::RegisterExport(252, "PhyGetLinkState", [](X86Context& ctx, uint8_t*) {
         LOGI("kernel: PhyGetLinkState -> returning link up (0x0B)");
@@ -853,5 +860,105 @@ X86_FUNC(sub_002DB61C) { ctx.esp += 4; }
 X86_FUNC(sub_002DB624) { ctx.esp += 4; }
 X86_FUNC(sub_002DB630) { ctx.esp += 4; }
 X86_FUNC(sub_002DB644) { ctx.esp += 4; }
+
+// ============================================================================
+// Midnight Club 3: XDK CRT & Filesystem Initialization Bridges and Overrides
+// ============================================================================
+
+// sub_000142B9: Queries available free blocks for game saves on hard disk.
+// In the original XDK binary, this queries XQueryVolumeInformation and returns the free block count in eax.
+// Original calling convention: cdecl, 0 arguments (esp += 4 on return).
+X86_FUNC(sub_000142B9) {
+    LOGI("guest: sub_000142B9() -> reporting 0x80000 free blocks (8 GiB)");
+    ctx.eax = 0x00080000u; // 524,288 blocks of 16KB = 8 GiB available free space
+    ctx.esp += 4;
+}
+
+// Fallback label for sub_000142BD if ever targeted indirectly
+X86_FUNC(sub_000142BD) {
+    LOGI("guest: sub_000142BD() -> reporting 0x80000 free blocks (8 GiB)");
+    ctx.eax = 0x00080000u;
+    ctx.esp += 4;
+}
+
+// sub_0001461D (XMountUtilityDrive):
+// Mounts utility partition 5 (\??\Z:) and returns 1 on success.
+// Calling convention: stdcall with 1 argument (4 bytes) + return address (4 bytes) = 8 bytes popped.
+X86_FUNC(sub_0001461D) {
+    LOGI("guest: sub_0001461D (XMountUtilityDrive) -> mounting Z: and returning 1");
+    std::string z_host = kernel::ResolvePath("\\Device\\Harddisk0\\Partition5", 0);
+    std::error_code ec;
+    if (!z_host.empty()) std::filesystem::create_directories(z_host, ec);
+    kernel::CreateSymbolicLink("\\??\\Z:", "\\Device\\Harddisk0\\Partition5");
+    ctx.eax = 1;
+    ctx.esp += 8;
+}
+
+// sub_000130DE (CRT initialization):
+// In the original binary, 0x13114 falls through into 0x13116 (sub_00013116).
+// The recompiler split them into two functions, causing sub_000130DE to end abruptly without
+// executing sub_00013116 or popping the callee-saved registers and returning.
+X86_EXTERN_FUNC(__imp__sub_000130DE);
+X86_EXTERN_FUNC(sub_00013116);
+X86_FUNC(sub_000130DE) {
+    LOGI("guest: sub_000130DE (CRT init) -> executing loop 1");
+    __imp__sub_000130DE(ctx, base);
+    LOGI("guest: sub_000130DE (CRT init) -> executing loop 2 (sub_00013116)");
+    sub_00013116(ctx, base);
+}
+
+// sub_00012EA4: Mounts \??\T: (TDATA) and \??\U: (UDATA) for title 0x54540079.
+// Calling convention: stdcall with 2 arguments (8 bytes) + return address (4 bytes) = 12 bytes.
+X86_FUNC(sub_00012EA4) {
+    uint32_t title_id = X86_MEM32(ctx.esp + 4);
+    uint32_t name_ptr = X86_MEM32(ctx.esp + 8);
+    LOGI("guest: sub_00012EA4(title_id=0x%08X, name_ptr=0x%08X) -> mounting T: and U:", title_id, name_ptr);
+    std::string t_host = kernel::ResolvePath("\\Device\\Harddisk0\\Partition1\\TDATA\\54540079", 0);
+    std::string u_host = kernel::ResolvePath("\\Device\\Harddisk0\\Partition1\\UDATA\\54540079", 0);
+    std::error_code ec;
+    if (!t_host.empty()) std::filesystem::create_directories(t_host, ec);
+    if (!u_host.empty()) std::filesystem::create_directories(u_host, ec);
+    kernel::CreateSymbolicLink("\\??\\T:", "\\Device\\Harddisk0\\Partition1\\TDATA\\54540079");
+    kernel::CreateSymbolicLink("\\??\\U:", "\\Device\\Harddisk0\\Partition1\\UDATA\\54540079");
+    ctx.eax = 0; // STATUS_SUCCESS
+    ctx.esp += 12;
+}
+
+// sub_00012F5E: Verifies partition 1 cluster size is 16KB.
+// Calling convention: stdcall with 1 argument (4 bytes) + return address (4 bytes) = 8 bytes.
+X86_FUNC(sub_00012F5E) {
+    LOGI("guest: sub_00012F5E() -> verifying cluster size (STATUS_SUCCESS)");
+    ctx.eax = 0; // STATUS_SUCCESS
+    ctx.esp += 8;
+}
+
+// sub_00012EF9: Fatal exit handler that reboots to the Xbox dashboard.
+X86_EXTERN_FUNC(__imp__sub_00012EF9);
+X86_FUNC(sub_00012EF9) {
+    uint32_t arg1 = X86_MEM32(ctx.esp + 4);
+    uint32_t arg2 = X86_MEM32(ctx.esp + 8);
+    uint32_t arg3 = X86_MEM32(ctx.esp + 12);
+    LOGE("guest: sub_00012EF9 (FATAL EXIT) called! arg1=%u, arg2=%u, arg3=0x%X", arg1, arg2, arg3);
+    __imp__sub_00012EF9(ctx, base);
+}
+
+// sub_00012F6F: Hardware and filesystem pre-initialization wrapper.
+X86_EXTERN_FUNC(__imp__sub_00012F6F);
+X86_FUNC(sub_00012F6F) {
+    LOGI("guest: sub_00012F6F (Hardware/FS Pre-Init) starting...");
+    __imp__sub_00012F6F(ctx, base);
+    LOGI("guest: sub_00012F6F (Hardware/FS Pre-Init) completed successfully");
+}
+
+// sub_00012150: Midnight Club 3 main() entry point wrapper.
+X86_EXTERN_FUNC(__imp__sub_00012150);
+X86_FUNC(sub_00012150) {
+    LOGI("================================================================================");
+    LOGI("guest: ENTERING MIDNIGHT CLUB 3: DUB EDITION REMIX MAIN LOOP (sub_00012150)");
+    LOGI("================================================================================");
+    __imp__sub_00012150(ctx, base);
+    LOGI("guest: sub_00012150 returned");
+}
+
 
 
