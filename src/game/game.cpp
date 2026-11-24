@@ -466,8 +466,13 @@ X86_FUNC(sub_00415440) {
     }
     uint32_t eax = X86_MEM32(esi + 0x794);
     if (!eax) {
+#if HAS_D3D_FvfShader
+        X86_MEM32(esi + 0x794) = SYM(D3D_FvfShader);
+        eax = SYM(D3D_FvfShader);
+#else
         X86_MEM32(esi + 0x794) = 0x00425400u;
         eax = 0x00425400u;
+#endif
     }
     if (!mem::IsCommitted(eax + 4)) {
         ctx.esp += 4;

@@ -262,6 +262,7 @@ XOnlineStartup                                       = 0x3DF23B
 D3D_DeferredTextureState    = 0x4228E0
 D3D_Device                  = 0x422D80
 D3D_DirtyFlags              = 0x4228D8
+D3D_FvfShader               = 0x425400
 D3D_IndexData               = 0x4228D4
 D3D_pDevice                 = 0x422D78
 D3D_RenderState             = 0x422AE0

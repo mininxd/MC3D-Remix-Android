@@ -492,6 +492,8 @@
 #define HAS_D3D_Device 1
 #define SYM_D3D_DirtyFlags 004228D8
 #define HAS_D3D_DirtyFlags 1
+#define SYM_D3D_FvfShader 00425400
+#define HAS_D3D_FvfShader 1
 #define SYM_D3D_IndexData 004228D4
 #define HAS_D3D_IndexData 1
 #define SYM_D3D_RenderState 00422AE0

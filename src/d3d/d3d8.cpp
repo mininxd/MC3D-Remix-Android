@@ -306,6 +306,54 @@ void EnsureBackend(uint32_t w, uint32_t h) {
     if (kRenderThread) g_backend = gpu::CreateThreadedBackend(std::move(g_backend));
 }
 
+// the viewport as D3DDevice_SetViewport stores it, for the game's own inlined readers
+void StoreViewport() {
+    if (XDK_CDevice_Viewport == xdk::kUnknown) return;
+    const gpu::Viewport& v = g_state.viewport;
+    uint32_t p = kDevice + XDK_CDevice_Viewport;
+    W32(p, v.x);
+    W32(p + 4, v.y);
+    W32(p + 8, v.w);
+    W32(p + 12, v.h);
+    float min_z = v.min_z;
+    float max_z = v.max_z;
+    std::memcpy(HostPtr(p + 16), &min_z, 4);
+    std::memcpy(HostPtr(p + 20), &max_z, 4);
+}
+
+constexpr bool kVBlank = XDK_CDevice_VBlankCount != xdk::kUnknown && XDK_CDevice_VBlankEvent != xdk::kUnknown &&
+                         XDK_CDevice_VBlankCallback != xdk::kUnknown;
+
+// what the library's vertical blank interrupt leaves for the title: count, event, callback
+void VerticalBlank(X86Context& ctx) {
+    using clock = std::chrono::steady_clock;
+    uint32_t info = mem::AllocSystem(12);
+    uint32_t shown = 0;
+    auto next = clock::now();
+    for (;;) {
+        while (game::g_focus_paused) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            next = clock::now();
+        }
+        next = std::max(next + std::chrono::microseconds(16667), clock::now());
+        std::this_thread::sleep_until(next);
+        uint32_t count = Dev(XDK_CDevice_VBlankCount) + 1;
+        uint32_t swaps = Dev(kDevSwapCount);
+        SetDev(XDK_CDevice_VBlankCount, count);
+        ObjectRef event = FromPointer(kDevice + XDK_CDevice_VBlankEvent);
+        if (event) SetEvent(*event);
+        if (uint32_t callback = Dev(XDK_CDevice_VBlankCallback)) {
+            W32(info, count);
+            W32(info + 4, swaps);
+            W32(info + 8, swaps != shown);
+            CallGuest(ctx, callback, {info});
+        }
+        shown = swaps;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (event) ResetEvent(*event);
+    }
+}
+
 // the device fields the recompiled getters read: targets, super sampling and depth scale
 void ApplyDeviceTargets() {
     SetDev(kDevRenderTarget, g_buffers[1]);
@@ -324,7 +372,11 @@ void ApplyDeviceTargets() {
         std::memcpy(HostPtr(kDevice + XDK_CDevice_BackBufferScale + 4), &one, 4);
     }
     if (XDK_CDevice_DisplayFlags != xdk::kUnknown) SetDev(XDK_CDevice_DisplayFlags, 0x400000 | (app::Widescreen() ? 0x10000 : 0));
-    SetDev(XDK_CDevice_VertexShader, 0x00425400u);
+#if HAS_D3D_FvfShader
+    if (XDK_CDevice_VertexShader != xdk::kUnknown) SetDev(XDK_CDevice_VertexShader, SYM(D3D_FvfShader));
+#elif defined(XDK_CDevice_VertexShader)
+    if (XDK_CDevice_VertexShader != xdk::kUnknown) SetDev(XDK_CDevice_VertexShader, 0x00425400u);
+#endif
 }
 }  // namespace
 
@@ -353,6 +405,16 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
     g_state = gpu::State{};
     g_state.viewport = {0, 0, p.width, p.height, 0.0f, 1.0f};
     ApplyDeviceTargets();
+    StoreViewport();
+    if (kVBlank) {
+        SetDev(XDK_CDevice_VBlankEvent, 0x00040000);  // notification event, signalled
+        SetDev(XDK_CDevice_VBlankEvent + 4, 1);
+        static bool started = false;
+        if (!started) {
+            StartHostThread("vertical blank", VerticalBlank);
+            started = true;
+        }
+    }
     g_state.rt = SurfaceOf(g_buffers[1]);
     g_state.zs = SurfaceOf(g_depth);
     UpdateViewportConstants();
@@ -454,6 +516,13 @@ HLE_STDCALL(D3D_MakeRequestedSpace, 2) {
 }
 
 HLE_STDCALL(D3DDevice_BlockUntilVerticalBlank, 0) {
+    if (kVBlank) {
+        ObjectRef event = FromPointer(kDevice + XDK_CDevice_VBlankEvent);
+        if (event) {
+            WaitForSingleObject(*event, 100);
+            return 0;
+        }
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(16));
     return 0;
 }
@@ -580,6 +649,7 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
     }
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     g_presents++;
+    LOG_FIRST(16, "d3d: Swap called (present count=%u)", g_presents);
     // the kept display is shown until the title presents its own
     kernel::SetSavedDataAddress(0);
     ApplyPendingGamma();
@@ -617,6 +687,7 @@ HLE_STDCALL(D3DDevice_SetViewport, 1) {
     g_state.viewport = {R32(v), R32(v + 4), R32(v + 8), R32(v + 12), GF(v + 16), GF(v + 20)};
     g_state.scissor_count = 0;
     UpdateViewportConstants();
+    StoreViewport();
     return 0;
 }
 
@@ -899,10 +970,17 @@ HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
         } else {
             LOG_FIRST(8, "d3d: SetVertexShader with unknown handle %08X", h);
         }
+#if HAS_D3D_FvfShader
+        SetDev(XDK_CDevice_VertexShader, (h & ~1u) ? (h & ~1u) : SYM(D3D_FvfShader));
+    } else {
+        SetDev(XDK_CDevice_VertexShader, SYM(D3D_FvfShader));
+    }
+#else
         SetDev(XDK_CDevice_VertexShader, (h & ~1u) ? (h & ~1u) : 0x00425400u);
     } else {
         SetDev(XDK_CDevice_VertexShader, 0x00425400u);
     }
+#endif
     return 0;
 }
 
