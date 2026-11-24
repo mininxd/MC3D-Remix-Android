@@ -1044,16 +1044,6 @@ X86_FUNC(sub_000130DE) {
     LOGI("guest: sub_000130DE (CRT init) completed successfully");
 }
 
-// sub_00012150 (Midnight Club 3: DUB Edition Remix Main Game Loop):
-X86_EXTERN_FUNC(__imp__sub_00012150);
-X86_FUNC(sub_00012150) {
-    LOGI("guest: ========================================================");
-    LOGI("guest: >>> MIDNIGHT CLUB 3 REMIX MAIN LOOP (0x00012150) ENTERED <<<");
-    LOGI("guest: ========================================================");
-    __imp__sub_00012150(ctx, base);
-    LOGI("guest: MIDNIGHT CLUB 3 REMIX MAIN LOOP exited");
-}
-
 // sub_00012EA4: Mounts \??\T: (TDATA) and \??\U: (UDATA) for title 0x54540079.
 // Calling convention: stdcall with 2 arguments (8 bytes) + return address (4 bytes) = 12 bytes.
 X86_FUNC(sub_00012EA4) {
