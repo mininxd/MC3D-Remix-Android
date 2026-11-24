@@ -881,18 +881,7 @@ X86_FUNC(sub_000142BD) {
     ctx.esp += 4;
 }
 
-// sub_0001461D (XMountUtilityDrive):
-// Mounts utility partition 5 (\??\Z:) and returns 1 on success.
-// Calling convention: stdcall with 1 argument (4 bytes) + return address (4 bytes) = 8 bytes popped.
-X86_FUNC(sub_0001461D) {
-    LOGI("guest: sub_0001461D (XMountUtilityDrive) -> mounting Z: and returning 1");
-    std::string z_host = kernel::ResolvePath("\\Device\\Harddisk0\\Partition5", 0);
-    std::error_code ec;
-    if (!z_host.empty()) std::filesystem::create_directories(z_host, ec);
-    kernel::CreateSymbolicLink("\\??\\Z:", "\\Device\\Harddisk0\\Partition5");
-    ctx.eax = 1;
-    ctx.esp += 8;
-}
+// Note: sub_0001461D (XMountUtilityDrive) is already implemented by xapi.cpp
 
 // sub_000130DE (CRT initialization):
 // In the original binary, 0x13114 falls through into 0x13116 (sub_00013116).
