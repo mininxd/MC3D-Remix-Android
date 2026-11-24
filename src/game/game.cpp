@@ -1030,18 +1030,158 @@ X86_FUNC(sub_002E181E) {
     LOGI("guest: sub_002E181E completed");
 }
 
-// sub_000130DE (CRT initialization):
-// In the original binary, 0x13114 falls through into 0x13116 (sub_00013116).
-// The recompiler split them into two functions, causing sub_000130DE to end abruptly without
-// executing sub_00013116 or popping the callee-saved registers and returning.
-X86_EXTERN_FUNC(__imp__sub_000130DE);
-X86_EXTERN_FUNC(sub_00013116);
+// ============================================================================
+// CRT Static Initialization (sub_000130DE) & Work Queue (sub_0020DE40) Overrides
+// ============================================================================
+
+// sub_000130DE: CRT static initialization (Loop 1: initializers, Loop 2: static constructors).
+// In the original XBE binary, 0x130DE executed Loop 1 over [0x4ad25c, 0x4ad278), then fell through into
+// 0x13116 (Loop 2) iterating over [0x4a8150, 0x4ad258) which runs 337 static C++ constructors.
+// In the static recompilation, Loop 2 relied on guest ctx.esi as loop counter. If any constructor clobbered
+// esi or changed stack layout, the loop terminated prematurely, skipping essential object initializations
+// (such as sub_003783C0 at 0x4aa5f8, which creates the work queue semaphores).
+// Here we implement the loops natively with protected C++ local iteration and caller-stack preservation.
 X86_FUNC(sub_000130DE) {
-    LOGI("guest: sub_000130DE (CRT init) -> executing loop 1 (initializers)");
-    __imp__sub_000130DE(ctx, base);
-    LOGI("guest: sub_000130DE (CRT init) -> executing loop 2 (static constructors / sub_00013116)");
-    sub_00013116(ctx, base);
-    LOGI("guest: sub_000130DE (CRT init) completed successfully");
+    LOGI("guest: sub_000130DE (CRT init) -> executing Loop 1 (pre-initializers)");
+    uint32_t init_hook = X86_MEM32(0x4b5d0cu);
+    if (init_hook != 0) {
+        uint32_t saved_esp = ctx.esp;
+        X86_PUSH32(0x130E9u);
+        x86_icall(ctx, base, init_hook);
+        ctx.esp = saved_esp;
+    }
+    for (uint32_t cur = 0x4ad25cu; cur < 0x4ad278u; cur += 4) {
+        uint32_t fn = X86_MEM32(cur);
+        if (fn != 0 && fn != 0xFFFFFFFFu) {
+            uint32_t saved_esp = ctx.esp;
+            X86_PUSH32(0x13108u);
+            x86_icall(ctx, base, fn);
+            ctx.esp = saved_esp;
+        }
+    }
+
+    LOGI("guest: sub_000130DE (CRT init) -> executing Loop 2 (337 static C++ constructors)");
+    uint32_t count = 0;
+    for (uint32_t cur = 0x4a8150u; cur < 0x4ad258u; cur += 4) {
+        uint32_t fn = X86_MEM32(cur);
+        if (fn != 0 && fn != 0xFFFFFFFFu) {
+            uint32_t saved_esp = ctx.esp;
+            X86_PUSH32(0x1312Cu);
+            x86_icall(ctx, base, fn);
+            ctx.esp = saved_esp;
+            count++;
+        }
+    }
+    LOGI("guest: sub_000130DE (CRT init) completed successfully: %u constructors executed", count);
+    LOGI("guest: post-init queue semaphore [0x534A98]=0x%08X, mutex [0x534A94]=0x%08X",
+         X86_MEM32(0x534A98u), X86_MEM32(0x534A94u));
+
+    // sub_000130DE is called via `call 0x130de`, so callee pops return address:
+    ctx.esp += 4;
+}
+
+// sub_00013116: Stub override in case it is called independently.
+X86_FUNC(sub_00013116) {
+    ctx.esp += 4;
+}
+
+// sub_0020DE40: Work queue pop wait method (__thiscall, this pointer in ctx.ecx).
+// Fetches queue task semaphore handle at [this + 0x150] = [0x534A98] and mutex at [this + 0x14C] = [0x534A94].
+// If static initialization had not yet executed sub_003783C0 (which initializes the queue synchronization handles),
+// we lazily initialize them here to guarantee valid handles for WaitForSingleObject.
+X86_EXTERN_FUNC(__imp__sub_0020DE40);
+X86_EXTERN_FUNC(sub_003783C0);
+X86_FUNC(sub_0020DE40) {
+    uint32_t this_ptr = ctx.ecx;
+    if (X86_MEM32(0x534A98u) == 0 || X86_MEM32(0x534A94u) == 0) {
+        LOGW("guest: sub_0020DE40: queue semaphores uninitialized! Initializing via sub_003783C0...");
+        uint32_t saved_esp = ctx.esp;
+        uint32_t saved_ecx = ctx.ecx;
+        X86_PUSH32(0x20DE40u);
+        sub_003783C0(ctx, base);
+        ctx.esp = saved_esp;
+        ctx.ecx = saved_ecx;
+        LOGI("guest: queue semaphores initialized: sem=0x%08X, mutex=0x%08X",
+             X86_MEM32(0x534A98u), X86_MEM32(0x534A94u));
+    }
+    ctx.ecx = this_ptr;
+    __imp__sub_0020DE40(ctx, base);
+}
+
+// ============================================================================
+// Win32 / Xbox Error Reporting Overrides (Thread-Safe & NULL-Safe)
+// ============================================================================
+
+static thread_local uint32_t t_guest_last_error = 0;
+
+// sub_00013187: Win32 SetLastError(dwErrCode).
+// In original binary, writes dwErrCode to [eax + 8] where eax = [StackBase + _tls_index*4].
+// If TLS block was not allocated for the calling worker thread, eax was NULL causing SIGSEGV at 0x100000008.
+X86_FUNC(sub_00013187) {
+    uint32_t dwErrCode = X86_MEM32(ctx.esp + 4);
+    t_guest_last_error = dwErrCode;
+    uint32_t stack_base = ctx.fs_base ? X86_MEM32(ctx.fs_base + 0x4u) : 0;
+    uint32_t tls_idx = X86_MEM32(0x4cb678u);
+    if (stack_base != 0) {
+        uint32_t tls_ptr = X86_MEM32(stack_base + tls_idx * 4u);
+        if (tls_ptr != 0) {
+            X86_MEM32(tls_ptr + 8u) = dwErrCode;
+        }
+    }
+    // ret 4: pop 4-byte argument + 4-byte return address
+    ctx.esp += 8;
+}
+
+// sub_0001315F: Win32 GetLastError().
+// Returns last error code in ctx.eax.
+X86_FUNC(sub_0001315F) {
+    uint32_t err = t_guest_last_error;
+    uint32_t stack_base = ctx.fs_base ? X86_MEM32(ctx.fs_base + 0x4u) : 0;
+    uint32_t tls_idx = X86_MEM32(0x4cb678u);
+    if (stack_base != 0) {
+        uint32_t tls_ptr = X86_MEM32(stack_base + tls_idx * 4u);
+        if (tls_ptr != 0) {
+            err = X86_MEM32(tls_ptr + 8u);
+        }
+    }
+    ctx.eax = err;
+    // ret: pop 4-byte return address
+    ctx.esp += 4;
+}
+
+// sub_0001317D: Continuation stub for sub_0001315F if reached directly.
+X86_FUNC(sub_0001317D) {
+    ctx.eax = t_guest_last_error;
+    ctx.esp += 4;
+}
+
+// sub_000131B5: Win32 BaseSetLastNTError(NTSTATUS Status).
+// Translates NTSTATUS to DOS error via RtlNtStatusToDosError at [0x447720],
+// stores it in SetLastError, and returns the DOS error in ctx.eax.
+X86_FUNC(sub_000131B5) {
+    uint32_t status = X86_MEM32(ctx.esp + 4);
+    uint32_t pfnRtlNtStatusToDosError = X86_MEM32(0x447720u);
+    uint32_t dos_err = status;
+    if (pfnRtlNtStatusToDosError != 0) {
+        uint32_t saved_esp = ctx.esp;
+        X86_PUSH32(status);
+        X86_PUSH32(0x131BFu);
+        x86_icall(ctx, base, pfnRtlNtStatusToDosError);
+        dos_err = ctx.eax;
+        ctx.esp = saved_esp;
+    }
+    t_guest_last_error = dos_err;
+    uint32_t stack_base = ctx.fs_base ? X86_MEM32(ctx.fs_base + 0x4u) : 0;
+    uint32_t tls_idx = X86_MEM32(0x4cb678u);
+    if (stack_base != 0) {
+        uint32_t tls_ptr = X86_MEM32(stack_base + tls_idx * 4u);
+        if (tls_ptr != 0) {
+            X86_MEM32(tls_ptr + 8u) = dos_err;
+        }
+    }
+    ctx.eax = dos_err;
+    // ret 4: pop 4-byte argument + 4-byte return address
+    ctx.esp += 8;
 }
 
 // sub_002D2410: Display mode table initialization (resolutions, refresh rates, aspect ratios).
@@ -1344,6 +1484,11 @@ X86_FUNC(sub_000148DE) {
 X86_EXTERN_FUNC(__imp__sub_00012F6F);
 X86_FUNC(sub_00012F6F) {
     LOGI("guest: sub_00012F6F (Hardware/FS Pre-Init) starting...");
+    if (X86_MEM32(0x4cb678u) == 0) {
+        // Initialize _tls_index fallback (-37 / 0xFFFFFFDB)
+        X86_MEM32(0x4cb678u) = 0xFFFFFFDBu;
+        LOGI("guest: initialized _tls_index [0x4cb678] = 0x%08X", X86_MEM32(0x4cb678u));
+    }
     __imp__sub_00012F6F(ctx, base);
     LOGI("guest: sub_00012F6F (Hardware/FS Pre-Init) completed successfully");
 }
