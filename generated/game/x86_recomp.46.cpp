@@ -120,6 +120,8 @@ X86_FUNC(__imp__sub_0001751A) {
 	ctx.ebp = (uint32_t)(ctx.esp);
 	// 0001751D sub esp, 0x10
 	{ uint32_t a = (uint32_t)(ctx.esp); uint32_t b = (uint32_t)(0x10u); uint32_t r = a - b; ctx.esp = (uint32_t)(r); cf = a < b; of = ((a ^ b) & (a ^ r)) >> 31; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
+	X86_SAVE_FLAGS();
+	sub_00017520(ctx, base);
 }
 X86_WEAK_FUNC(sub_0001751A, __imp__sub_0001751A)
 

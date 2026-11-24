@@ -1066,6 +1066,38 @@ X86_FUNC(sub_00017121) {
     LOGI("guest: sub_00017121 (CreateSemaphoreA) completed, handle=0x%08X", ctx.eax);
 }
 
+// sub_0001751A: Win32 ReadFile(hFile, lpBuffer, nBytesToRead, lpNumberOfBytesRead, lpOverlapped)
+// In the original XBE binary, 0x1751A is the function entry point containing:
+//   push ebp
+//   mov ebp, esp
+//   sub esp, 0x10
+// which falls through directly into 0x17520 (sub_00017520).
+// The static recompiler split them into separate functions, leaving sub_0001751A with only
+// the 3-instruction prologue and returning immediately without calling NtReadFile or cleaning up the stack.
+// This corrupted the guest stack and returned 0 bytes, ultimately clobbering ebx to NULL in stream readers.
+X86_EXTERN_FUNC(sub_00017520);
+X86_FUNC(sub_0001751A) {
+    uint32_t hFile = X86_MEM32(ctx.esp + 4);
+    uint32_t lpBuffer = X86_MEM32(ctx.esp + 8);
+    uint32_t nBytes = X86_MEM32(ctx.esp + 12);
+    uint32_t lpBytesRead = X86_MEM32(ctx.esp + 16);
+    LOGI("guest: sub_0001751A (ReadFile) starting, handle=0x%08X, buf=0x%08X, nBytes=%u",
+         hFile, lpBuffer, nBytes);
+    { uint32_t v = (uint32_t)(ctx.ebp); X86_PUSH32(v); }
+    ctx.ebp = (uint32_t)(ctx.esp);
+    ctx.esp -= 0x10;
+    sub_00017520(ctx, base);
+    uint32_t bytesRead = lpBytesRead ? X86_MEM32(lpBytesRead) : 0;
+    LOGI("guest: sub_0001751A (ReadFile) completed, success=%u, bytesRead=%u", ctx.eax, bytesRead);
+}
+
+// sub_0001727E: Fallthrough directly into sub_0001727F
+X86_EXTERN_FUNC(sub_0001727F);
+X86_FUNC(sub_0001727E) {
+    { uint32_t v = (uint32_t)(ctx.ebx); X86_PUSH32(v); }
+    sub_0001727F(ctx, base);
+}
+
 // sub_00012EA4: Mounts \??\T: (TDATA) and \??\U: (UDATA) for title 0x54540079.
 // Calling convention: stdcall with 2 arguments (8 bytes) + return address (4 bytes) = 12 bytes.
 X86_FUNC(sub_00012EA4) {
