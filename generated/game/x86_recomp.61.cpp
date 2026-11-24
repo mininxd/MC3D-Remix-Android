@@ -30781,7 +30781,7 @@ X86_FUNC(__imp__sub_002E5BB0) {
 	// 002E5BBF mov dword ptr [esp], ecx
 	X86_MEM32((uint32_t)(ctx.esp)) = (uint32_t)(ctx.ecx);
 	// 002E5BC3 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 002E5BC5 mov ecx, dword ptr [eax + 0x20]
 	ctx.ecx = (uint32_t)(X86_MEM32((uint32_t)(ctx.eax + 0x20u)));
 	// 002E5BC8 fstp dword ptr [eax + 0x20]
@@ -33344,7 +33344,7 @@ loc_003068D0:
 	// 003068EC fldlg2 
 	/* fldlg2  */
 	// 003068EE fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 003068F0 fyl2x 
 	{ X87_ST(1) = X87_ST(1) * (std::log(X87_ST(0)) / std::log(2.0)); x87_pop(ctx); }
 	// 003068F2 fmul qword ptr [0x4781f8]

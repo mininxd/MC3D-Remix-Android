@@ -18436,7 +18436,7 @@ loc_001D1BC0:
 	// 001D1C08 movss xmm1, dword ptr [esp + 0x18]
 	{ uint32_t ea = (uint32_t)(ctx.esp + 0x18u); ctx.xmm[1].u[0] = X86_MEM32(ea); ctx.xmm[1].u[1] = ctx.xmm[1].u[2] = ctx.xmm[1].u[3] = 0; }
 	// 001D1C0E fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 001D1C10 movss xmm2, dword ptr [esp + 0x14]
 	{ uint32_t ea = (uint32_t)(ctx.esp + 0x14u); ctx.xmm[2].u[0] = X86_MEM32(ea); ctx.xmm[2].u[1] = ctx.xmm[2].u[2] = ctx.xmm[2].u[3] = 0; }
 	// 001D1C16 fpatan 
@@ -28563,7 +28563,7 @@ X86_FUNC(__imp__sub_002E5950) {
 	// 002E596C mov dword ptr [esp + 0xc], edx
 	X86_MEM32((uint32_t)(ctx.esp + 0xcu)) = (uint32_t)(ctx.edx);
 	// 002E5970 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 002E5972 mov edx, dword ptr [eax + 0x2c]
 	ctx.edx = (uint32_t)(X86_MEM32((uint32_t)(ctx.eax + 0x2cu)));
 	// 002E5975 mov dword ptr [esp], ecx
@@ -28605,7 +28605,7 @@ X86_FUNC(__imp__sub_002E5950) {
 	// 002E59B1 mov dword ptr [eax + 0x10], ecx
 	X86_MEM32((uint32_t)(ctx.eax + 0x10u)) = (uint32_t)(ctx.ecx);
 	// 002E59B4 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 002E59B6 mov ecx, dword ptr [eax + 0x60]
 	ctx.ecx = (uint32_t)(X86_MEM32((uint32_t)(ctx.eax + 0x60u)));
 	// 002E59B9 fstp dword ptr [eax + 0x40]
@@ -33145,7 +33145,7 @@ X86_FUNC(__imp__sub_0035CCD0) {
 	// 0035CD90 fld dword ptr [0x447c1c]
 	x87_push(ctx, (double)X86_MEMF32((uint32_t)(0x447c1cu)));
 	// 0035CD96 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 0035CD98 fcomip st(1)
 	{ double a = X87_ST(0), b = X87_ST(1); bool u = std::isnan(a) || std::isnan(b); zf = u || a == b; pf = u; cf = u || a < b; of = 0; sf = 0; x87_pop(ctx); }
 	// 0035CD9A fstp st(0)
@@ -43936,7 +43936,7 @@ loc_0041045E:
 	// 00410473 fldln2 
 	/* fldln2  */
 	// 00410475 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 00410477 fyl2x 
 	{ X87_ST(1) = X87_ST(1) * (std::log(X87_ST(0)) / std::log(2.0)); x87_pop(ctx); }
 	// 00410479 fmul dword ptr [0x47cf68]

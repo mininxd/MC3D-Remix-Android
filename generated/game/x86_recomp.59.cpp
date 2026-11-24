@@ -20048,7 +20048,7 @@ loc_001E56F1:
 	// 001E572A fld dword ptr [esi + 0x1d0]
 	x87_push(ctx, (double)X86_MEMF32((uint32_t)(ctx.esi + 0x1d0u)));
 	// 001E5730 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 001E5732 fcomip st(1)
 	{ double a = X87_ST(0), b = X87_ST(1); bool u = std::isnan(a) || std::isnan(b); zf = u || a == b; pf = u; cf = u || a < b; of = 0; sf = 0; x87_pop(ctx); }
 	// 001E5734 fstp st(0)
@@ -20206,9 +20206,9 @@ loc_001E57C0:
 	// 001E5827 fsqrt 
 	X87_ST(0) = std::sqrt(X87_ST(0));
 	// 001E5829 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 001E582B fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 001E582D fsubp st(1)
 	X87_ST(1) = x87_prec(ctx, X87_ST(1) - X87_ST(0)); x87_pop(ctx);
 	// 001E582F fstp dword ptr [esi + 0x1c]
@@ -29635,7 +29635,7 @@ X86_FUNC(__imp__sub_002E5A30) {
 	// 002E5A4C mov dword ptr [esp + 0x1c], edx
 	X86_MEM32((uint32_t)(ctx.esp + 0x1cu)) = (uint32_t)(ctx.edx);
 	// 002E5A50 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 002E5A52 mov edx, dword ptr [eax + 0x24]
 	ctx.edx = (uint32_t)(X86_MEM32((uint32_t)(ctx.eax + 0x24u)));
 	// 002E5A55 fstp dword ptr [eax + 0x20]
@@ -29649,7 +29649,7 @@ X86_FUNC(__imp__sub_002E5A30) {
 	// 002E5A62 mov dword ptr [esp + 0x2c], edx
 	X86_MEM32((uint32_t)(ctx.esp + 0x2cu)) = (uint32_t)(ctx.edx);
 	// 002E5A66 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 002E5A68 mov edx, dword ptr [eax + 0x2c]
 	ctx.edx = (uint32_t)(X86_MEM32((uint32_t)(ctx.eax + 0x2cu)));
 	// 002E5A6B mov dword ptr [esp], ecx
@@ -32463,7 +32463,7 @@ loc_003068D0:
 	// 003068EC fldlg2 
 	/* fldlg2  */
 	// 003068EE fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 003068F0 fyl2x 
 	{ X87_ST(1) = X87_ST(1) * (std::log(X87_ST(0)) / std::log(2.0)); x87_pop(ctx); }
 	// 003068F2 fmul qword ptr [0x4781f8]

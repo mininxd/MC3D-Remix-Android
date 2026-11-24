@@ -19589,7 +19589,7 @@ loc_0021B36E:
 	// 0021B384 fldln2 
 	/* fldln2  */
 	// 0021B386 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 0021B388 fyl2x 
 	{ X87_ST(1) = X87_ST(1) * (std::log(X87_ST(0)) / std::log(2.0)); x87_pop(ctx); }
 	// 0021B38A fmul dword ptr [0x46e388]
@@ -33740,7 +33740,7 @@ loc_0033113A:
 	// 00331140 fld dword ptr [esi + 0x28]
 	x87_push(ctx, (double)X86_MEMF32((uint32_t)(ctx.esi + 0x28u)));
 	// 00331143 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 00331145 fcomip st(1)
 	{ double a = X87_ST(0), b = X87_ST(1); bool u = std::isnan(a) || std::isnan(b); zf = u || a == b; pf = u; cf = u || a < b; of = 0; sf = 0; x87_pop(ctx); }
 	// 00331147 fstp st(0)

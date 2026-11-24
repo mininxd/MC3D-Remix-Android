@@ -21350,3 +21350,7 @@ const X86FuncMapping X86FuncMappings[] = {
 	{0x447691u, sub_00447691},
 	{0, nullptr}
 };
+
+const uint32_t X86Continuations[] = {
+	0,
+};

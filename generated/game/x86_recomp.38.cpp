@@ -28149,7 +28149,7 @@ loc_00300AAE:
 	// 00300ABA fmul dword ptr [edi]
 	X87_ST(0) = x87_prec(ctx, X87_ST(0) * (double)X86_MEMF32((uint32_t)(ctx.edi)));
 	// 00300ABC fxch st(3)
-	std::swap(X87_ST(0), X87_ST(3));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(3); X87_ST(3) = tmp; }
 	// 00300ABE fmul dword ptr [0x493610]
 	X87_ST(0) = x87_prec(ctx, X87_ST(0) * (double)X86_MEMF32((uint32_t)(0x493610u)));
 	// 00300AC4 faddp st(3)
@@ -28157,7 +28157,7 @@ loc_00300AAE:
 	// 00300AC6 fmul dword ptr [edi + 4]
 	X87_ST(0) = x87_prec(ctx, X87_ST(0) * (double)X86_MEMF32((uint32_t)(ctx.edi + 0x4u)));
 	// 00300AC9 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 00300ACB fmul dword ptr [0x493610]
 	X87_ST(0) = x87_prec(ctx, X87_ST(0) * (double)X86_MEMF32((uint32_t)(0x493610u)));
 	// 00300AD1 faddp st(1)
@@ -28179,21 +28179,21 @@ loc_00300AAE:
 	// 00300AE1 fmul st(3)
 	X87_ST(0) = x87_prec(ctx, X87_ST(0) * X87_ST(3));
 	// 00300AE3 fxch st(4)
-	std::swap(X87_ST(0), X87_ST(4));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(4); X87_ST(4) = tmp; }
 	// 00300AE5 fadd st(3)
 	X87_ST(0) = x87_prec(ctx, X87_ST(0) + X87_ST(3));
 	// 00300AE7 fsub dword ptr [esi + ebx*4]
 	X87_ST(0) = x87_prec(ctx, X87_ST(0) - (double)X86_MEMF32((uint32_t)(ctx.esi + ctx.ebx * 4u)));
 	// 00300AEA fxch st(4)
-	std::swap(X87_ST(0), X87_ST(4));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(4); X87_ST(4) = tmp; }
 	// 00300AEC fxch st(5)
-	std::swap(X87_ST(0), X87_ST(5));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(5); X87_ST(5) = tmp; }
 	// 00300AEE fadd st(2)
 	X87_ST(0) = x87_prec(ctx, X87_ST(0) + X87_ST(2));
 	// 00300AF0 fsub dword ptr [esi + ebx*4 + 0x10]
 	X87_ST(0) = x87_prec(ctx, X87_ST(0) - (double)X86_MEMF32((uint32_t)(ctx.esi + ctx.ebx * 4u + 0x10u)));
 	// 00300AF4 fxch st(5)
-	std::swap(X87_ST(0), X87_ST(5));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(5); X87_ST(5) = tmp; }
 	// 00300AF6 fld st(3)
 	x87_push(ctx, X87_ST(3));
 	// 00300AF8 fstp dword ptr [esi + ebx*4]

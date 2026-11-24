@@ -4757,7 +4757,7 @@ X86_FUNC(__imp__sub_0008B7E0) {
 	// 0008B81D fsin 
 	X87_ST(0) = std::sin(X87_ST(0));
 	// 0008B81F fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 0008B821 fstp dword ptr [eax + 0x14]
 	X86_MEMF32((uint32_t)(ctx.eax + 0x14u)) = (float)X87_ST(0); x87_pop(ctx);
 	// 0008B824 fst dword ptr [eax + 0x18]
@@ -14131,7 +14131,7 @@ X86_FUNC(__imp__sub_001A0310) {
 	// 001A037D fld dword ptr [0x447c1c]
 	x87_push(ctx, (double)X86_MEMF32((uint32_t)(0x447c1cu)));
 	// 001A0383 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 001A0385 fcomip st(1)
 	{ double a = X87_ST(0), b = X87_ST(1); bool u = std::isnan(a) || std::isnan(b); zf = u || a == b; pf = u; cf = u || a < b; of = 0; sf = 0; x87_pop(ctx); }
 	// 001A0387 fstp st(0)
@@ -23886,9 +23886,9 @@ X86_FUNC(__imp__sub_002B0EF0) {
 	// 002B0F03 fabs 
 	X87_ST(0) = std::fabs(X87_ST(0));
 	// 002B0F05 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 002B0F07 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 002B0F09 faddp st(1)
 	X87_ST(1) = x87_prec(ctx, X87_ST(1) + X87_ST(0)); x87_pop(ctx);
 	// 002B0F0B fld dword ptr [eax]
@@ -23910,9 +23910,9 @@ X86_FUNC(__imp__sub_002B0EF0) {
 	// 002B0F21 fabs 
 	X87_ST(0) = std::fabs(X87_ST(0));
 	// 002B0F23 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 002B0F25 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 002B0F27 faddp st(1)
 	X87_ST(1) = x87_prec(ctx, X87_ST(1) + X87_ST(0)); x87_pop(ctx);
 	// 002B0F29 fld dword ptr [eax + 0xc]
@@ -23934,9 +23934,9 @@ X86_FUNC(__imp__sub_002B0EF0) {
 	// 002B0F40 fabs 
 	X87_ST(0) = std::fabs(X87_ST(0));
 	// 002B0F42 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 002B0F44 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 002B0F46 faddp st(1)
 	X87_ST(1) = x87_prec(ctx, X87_ST(1) + X87_ST(0)); x87_pop(ctx);
 	// 002B0F48 fld dword ptr [eax + 0x18]
@@ -23958,9 +23958,9 @@ X86_FUNC(__imp__sub_002B0EF0) {
 	// 002B0F5F fabs 
 	X87_ST(0) = std::fabs(X87_ST(0));
 	// 002B0F61 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 002B0F63 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 002B0F65 faddp st(1)
 	X87_ST(1) = x87_prec(ctx, X87_ST(1) + X87_ST(0)); x87_pop(ctx);
 	// 002B0F67 fld dword ptr [eax + 0x24]
@@ -32946,7 +32946,7 @@ X86_FUNC(__imp__sub_00338FC0) {
 	// 00338FEB fld qword ptr [0x4a2450]
 	x87_push(ctx, X86_MEMF64((uint32_t)(0x4a2450u)));
 	// 00338FF1 fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 00338FF3 fcomip st(1)
 	{ double a = X87_ST(0), b = X87_ST(1); bool u = std::isnan(a) || std::isnan(b); zf = u || a == b; pf = u; cf = u || a < b; of = 0; sf = 0; x87_pop(ctx); }
 	// 00338FF5 fstp st(0)
@@ -32956,7 +32956,7 @@ X86_FUNC(__imp__sub_00338FC0) {
 	// 00338FF9 fldlg2 
 	/* fldlg2  */
 	// 00338FFB fxch st(1)
-	std::swap(X87_ST(0), X87_ST(1));
+	{ double tmp = X87_ST(0); X87_ST(0) = X87_ST(1); X87_ST(1) = tmp; }
 	// 00338FFD fyl2x 
 	{ X87_ST(1) = X87_ST(1) * (std::log(X87_ST(0)) / std::log(2.0)); x87_pop(ctx); }
 	// 00338FFF fmul dword ptr [0x44d844]
