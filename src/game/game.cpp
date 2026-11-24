@@ -358,16 +358,6 @@ X86_FUNC(sub_003C20C8) {
     ctx.esp += 12;
 }
 
-X86_FUNC(sub_003C21B8) {
-    ctx.eax = 0;
-    ctx.esp += 12;
-}
-
-X86_FUNC(sub_003C21D4) {
-    ctx.eax = 0;
-    ctx.esp += 16;
-}
-
 // IDirectSoundBuffer::SetFilter(this, pFilter)
 X86_FUNC(sub_003C2240) {
     ctx.eax = 0;
