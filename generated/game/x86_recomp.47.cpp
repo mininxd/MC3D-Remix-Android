@@ -357,6 +357,8 @@ loc_00015BAD:
 	X86_MEM32((uint32_t)(ctx.ebp - 0x24u)) = (uint32_t)(0x5acu);
 	// 00015BB4 or dword ptr [ebp + 0x18], 0xffffffff
 	{ uint32_t a = (uint32_t)(X86_MEM32((uint32_t)(ctx.ebp + 0x18u))); uint32_t b = (uint32_t)(0xffffffffu); uint32_t r = a | b; X86_MEM32((uint32_t)(ctx.ebp + 0x18u)) = (uint32_t)(r); cf = 0; of = 0; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
+	// 00015BB8 jmp 0x15bc3
+	goto loc_00015BC3;
 loc_00015BBA:
 	// 00015BBA cmp dword ptr [ebp + 0x18], esi
 	{ uint32_t a = (uint32_t)(X86_MEM32((uint32_t)(ctx.ebp + 0x18u))); uint32_t b = (uint32_t)(ctx.esi); uint32_t r = a - b; cf = a < b; of = ((a ^ b) & (a ^ r)) >> 31; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); ca = a; cb = b; }

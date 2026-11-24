@@ -931,6 +931,19 @@ X86_FUNC(sub_00012EF9) {
     __imp__sub_00012EF9(ctx, base);
 }
 
+// sub_00015A76: RtlCreateHeap(Flags, Base, Reserve, Commit, Lock, Parameters)
+X86_EXTERN_FUNC(__imp__sub_00015A76);
+X86_FUNC(sub_00015A76) {
+    uint32_t flags = X86_MEM32(ctx.esp + 4);
+    uint32_t heap_base = X86_MEM32(ctx.esp + 8);
+    uint32_t reserve = X86_MEM32(ctx.esp + 12);
+    uint32_t commit = X86_MEM32(ctx.esp + 16);
+    LOGI("guest: sub_00015A76 (RtlCreateHeap) starting... flags=0x%X, base=0x%X, reserve=0x%X, commit=0x%X",
+         flags, heap_base, reserve, commit);
+    __imp__sub_00015A76(ctx, base);
+    LOGI("guest: sub_00015A76 (RtlCreateHeap) returned heap=0x%X", ctx.eax);
+}
+
 // sub_00012F6F: Hardware and filesystem pre-initialization wrapper.
 X86_EXTERN_FUNC(__imp__sub_00012F6F);
 X86_FUNC(sub_00012F6F) {
