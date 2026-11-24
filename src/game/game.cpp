@@ -172,6 +172,62 @@ void Loaded() {
 
         kernel::Return(ctx, 0u, 5);
     });
+
+    // Ordinal 24: ExQueryNonVolatileSetting (5 args, stdcall = 20 bytes stack)
+    // Supports European/PAL console configuration for Midnight Club 3: DUB Edition Remix (Europe).
+    kernel::RegisterExport(24, "ExQueryNonVolatileSetting", [](X86Context& ctx, uint8_t*) {
+        uint32_t index = kernel::R32(ctx.esp + 4);
+        uint32_t type_out = kernel::R32(ctx.esp + 8);
+        uint32_t value = kernel::R32(ctx.esp + 12);
+        uint32_t len = kernel::R32(ctx.esp + 16);
+        uint32_t result_len = kernel::R32(ctx.esp + 20);
+
+        uint32_t v = 0;
+        switch (index) {
+            case 7:   v = 1; break;                   // XC_LANGUAGE (1 = English)
+            case 8:                                   // XC_VIDEO_FLAGS (widescreen, 480p, PAL60)
+                v = 0x00010000u | 0x00080000u | 0x00200000u;
+                break;
+            case 9:   v = 0; break;                   // XC_AUDIO_FLAGS (stereo)
+            case 0xA: v = 0; break;                   // XC_MAX_GAME_SAVE_BLOCKS (0 = unlimited / no parental restriction)
+            case 0x11: v = 0; break;                  // XC_PARENTAL_CONTROL_GAMES (0 = all ratings permitted)
+            case 0x12: v = 2; break;                  // XC_DVD_REGION (2 = Europe / PAL)
+            case 0x101:                               // XC_FACTORY_ETHERNET_ADDR (6-byte console MAC)
+                if (value && len >= 6) {
+                    uint8_t mac[6] = {0x00, 0x50, 0xF2, 0x54, 0x00, 0x79};
+                    std::memcpy(kernel::HostPtr(value), mac, 6);
+                }
+                break;
+            case 0x103: v = 0x00400200u; break;       // XC_FACTORY_AV_REGION (0x00400200 = PAL-I Europe)
+            case 0x104: v = 4; break;                  // XC_FACTORY_GAME_REGION (4 = Europe / Rest of World)
+            default: break;
+        }
+
+        if (index == 0xFFFF) {
+            // Full 256-byte EEPROM image
+            if (type_out) kernel::W32(type_out, 3); // REG_BINARY
+            if (value && len >= 0x100) {
+                std::memset(kernel::HostPtr(value), 0, len);
+                kernel::W32(value + 0x2C, 4);                     // factory game region: 4 (Europe)
+                kernel::W32(value + 0x58, 0x00400200u);           // factory video standard: PAL-I
+                kernel::W32(value + 0xE8, 1);                     // language: English
+                kernel::W32(value + 0xEC, 0x00010000u | 0x00080000u | 0x00200000u); // video flags
+                kernel::W32(value + 0xF0, 0);                     // audio flags: stereo
+            }
+            if (result_len) kernel::W32(result_len, 0x100);
+            LOGI("kernel: ExQueryNonVolatileSetting(0xFFFF) -> full PAL EEPROM image");
+            kernel::Return(ctx, 0u, 5);
+            return;
+        }
+
+        if (type_out) kernel::W32(type_out, 4); // REG_DWORD
+        if (value && len >= 4 && index != 0x101) {
+            kernel::W32(value, v);
+        }
+        if (result_len) kernel::W32(result_len, (index == 0x101) ? 6 : 4);
+        LOGI("kernel: ExQueryNonVolatileSetting(index=0x%X) -> 0x%X", index, v);
+        kernel::Return(ctx, 0u, 5);
+    });
 }
 
 }  // namespace game
@@ -865,19 +921,21 @@ X86_FUNC(sub_002DB644) { ctx.esp += 4; }
 // Midnight Club 3: XDK CRT & Filesystem Initialization Bridges and Overrides
 // ============================================================================
 
-// sub_000142B9: Queries available free blocks for game saves on hard disk.
-// In the original XDK binary, this queries XQueryVolumeInformation and returns the free block count in eax.
-// Original calling convention: cdecl, 0 arguments (esp += 4 on return).
+// sub_000142B9: Queries XC_MAX_GAME_SAVE_BLOCKS parental limit via ExQueryNonVolatileSetting(0xA).
+// When unset/disabled, it returns 0.
+// Caller compares Certificate->AllowedSaveBlocks (0) against eax.
+// If edi (0) < eax, it triggers FATAL EXIT 4 (parental save block limit exceeded).
+// Returning 0 ensures edi (0) >= eax (0) is true (jae taken), allowing pre-init to proceed.
 X86_FUNC(sub_000142B9) {
-    LOGI("guest: sub_000142B9() -> reporting 0x80000 free blocks (8 GiB)");
-    ctx.eax = 0x00080000u; // 524,288 blocks of 16KB = 8 GiB available free space
+    LOGI("guest: sub_000142B9() -> querying XC_MAX_GAME_SAVE_BLOCKS limit (returning 0)");
+    ctx.eax = 0;
     ctx.esp += 4;
 }
 
 // Fallback label for sub_000142BD if ever targeted indirectly
 X86_FUNC(sub_000142BD) {
-    LOGI("guest: sub_000142BD() -> reporting 0x80000 free blocks (8 GiB)");
-    ctx.eax = 0x00080000u;
+    LOGI("guest: sub_000142BD() -> querying XC_MAX_GAME_SAVE_BLOCKS limit (returning 0)");
+    ctx.eax = 0;
     ctx.esp += 4;
 }
 
