@@ -481,3 +481,301 @@ X86_FUNC(sub_00415440) {
     __imp__sub_00415440(ctx, base);
 }
 
+// Sound engine voice & stream unallocated channel safety guards
+X86_EXTERN_FUNC(__imp__sub_0040F198);
+X86_FUNC(sub_0040F198) {
+    uint32_t esi = ctx.ecx;
+    if (esi < 0x10000u) {
+        ctx.eax = 0;
+        ctx.esp += 4;
+        return;
+    }
+    uint32_t buf = X86_MEM32(esi + 0x1Cu);
+    uint32_t strm = X86_MEM32(esi + 0x20u);
+    if (!buf && !strm) {
+        ctx.eax = 0;
+        ctx.esp += 4;
+        return;
+    }
+    if (!buf && strm) {
+        if (strm < 0x10000u || !mem::IsCommitted(strm)) {
+            ctx.eax = 0;
+            ctx.esp += 4;
+            return;
+        }
+        uint32_t vt = X86_MEM32(strm);
+        if (vt < 0x10000u || !mem::IsCommitted(vt + 0x0Cu)) {
+            ctx.eax = 0;
+            ctx.esp += 4;
+            return;
+        }
+    }
+    __imp__sub_0040F198(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_0040F6EF);
+X86_FUNC(sub_0040F6EF) {
+    uint32_t esi = ctx.ecx;
+    if (esi < 0x10000u) {
+        ctx.eax = 0;
+        ctx.esp += 8;
+        return;
+    }
+    uint32_t buf = X86_MEM32(esi + 0x1Cu);
+    uint32_t strm = X86_MEM32(esi + 0x20u);
+    if (!buf && !strm) {
+        uint32_t out_ptr = X86_MEM32(ctx.esp + 4);
+        if (out_ptr >= 0x10000u && mem::IsCommitted(out_ptr)) {
+            X86_MEM32(out_ptr) = 0;
+        }
+        ctx.eax = 0;
+        ctx.esp += 8;
+        return;
+    }
+    if (!buf && strm) {
+        if (strm < 0x10000u || !mem::IsCommitted(strm)) {
+            uint32_t out_ptr = X86_MEM32(ctx.esp + 4);
+            if (out_ptr >= 0x10000u && mem::IsCommitted(out_ptr)) {
+                X86_MEM32(out_ptr) = 0;
+            }
+            ctx.eax = 0;
+            ctx.esp += 8;
+            return;
+        }
+        uint32_t vt = X86_MEM32(strm);
+        if (vt < 0x10000u || !mem::IsCommitted(vt + 0x0Cu)) {
+            uint32_t out_ptr = X86_MEM32(ctx.esp + 4);
+            if (out_ptr >= 0x10000u && mem::IsCommitted(out_ptr)) {
+                X86_MEM32(out_ptr) = 0;
+            }
+            ctx.eax = 0;
+            ctx.esp += 8;
+            return;
+        }
+    }
+    __imp__sub_0040F6EF(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_0040F735);
+X86_FUNC(sub_0040F735) {
+    uint32_t esi = ctx.ecx;
+    if (esi < 0x10000u) { ctx.eax = 0; ctx.esp += 12; return; }
+    uint32_t strm = X86_MEM32(esi + 0x20u);
+    if (strm < 0x10000u || !mem::IsCommitted(strm)) { ctx.eax = 0; ctx.esp += 12; return; }
+    uint32_t vt = X86_MEM32(strm);
+    if (vt < 0x10000u || !mem::IsCommitted(vt + 0x10u)) { ctx.eax = 0; ctx.esp += 12; return; }
+    __imp__sub_0040F735(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_0040F76F);
+X86_FUNC(sub_0040F76F) {
+    uint32_t esi = ctx.ecx;
+    if (esi < 0x10000u) { ctx.eax = 0; ctx.esp += 4; return; }
+    uint32_t strm = X86_MEM32(esi + 0x20u);
+    if (strm < 0x10000u || !mem::IsCommitted(strm)) { ctx.eax = 0; ctx.esp += 4; return; }
+    uint32_t vt = X86_MEM32(strm);
+    if (vt < 0x10000u || !mem::IsCommitted(vt + 0x18u)) { ctx.eax = 0; ctx.esp += 4; return; }
+    __imp__sub_0040F76F(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_0040F7DD);
+X86_FUNC(sub_0040F7DD) {
+    uint32_t esi = ctx.ecx;
+    if (esi < 0x10000u) { ctx.eax = 0; ctx.esp += 4; return; }
+    uint32_t strm = X86_MEM32(esi + 0x20u);
+    if (strm < 0x10000u || !mem::IsCommitted(strm)) { ctx.eax = 0; ctx.esp += 4; return; }
+    uint32_t vt = X86_MEM32(strm);
+    if (vt < 0x10000u || !mem::IsCommitted(vt + 0x14u)) { ctx.eax = 0; ctx.esp += 4; return; }
+    __imp__sub_0040F7DD(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_0040F7A1);
+X86_FUNC(sub_0040F7A1) {
+    uint32_t esi = ctx.ecx;
+    if (esi < 0x10000u) { ctx.eax = 0; ctx.esp += 16; return; }
+    uint32_t strm = X86_MEM32(esi + 0x20u);
+    if (strm < 0x10000u || !mem::IsCommitted(strm)) { ctx.eax = 0; ctx.esp += 16; return; }
+    __imp__sub_0040F7A1(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_0040F229);
+X86_FUNC(sub_0040F229) {
+    uint32_t esi = ctx.ecx;
+    if (esi < 0x10000u) { ctx.eax = 0; ctx.esp += 8; return; }
+    uint32_t buf = X86_MEM32(esi + 0x1Cu);
+    uint32_t strm = X86_MEM32(esi + 0x20u);
+    if (!buf && (!strm || strm < 0x10000u || !mem::IsCommitted(strm))) {
+        ctx.eax = 0;
+        ctx.esp += 8;
+        return;
+    }
+    __imp__sub_0040F229(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_0040F304);
+X86_FUNC(sub_0040F304) {
+    uint32_t esi = ctx.ecx;
+    if (esi < 0x10000u) { ctx.eax = 0; ctx.esp += 8; return; }
+    uint32_t buf = X86_MEM32(esi + 0x1Cu);
+    uint32_t strm = X86_MEM32(esi + 0x20u);
+    if (!buf && (!strm || strm < 0x10000u || !mem::IsCommitted(strm))) {
+        ctx.eax = 0;
+        ctx.esp += 8;
+        return;
+    }
+    __imp__sub_0040F304(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_0040F34A);
+X86_FUNC(sub_0040F34A) {
+    uint32_t esi = ctx.ecx;
+    if (esi < 0x10000u) { ctx.eax = 0; ctx.esp += 12; return; }
+    uint32_t buf = X86_MEM32(esi + 0x1Cu);
+    uint32_t strm = X86_MEM32(esi + 0x20u);
+    if (!buf && (!strm || strm < 0x10000u || !mem::IsCommitted(strm))) {
+        ctx.eax = 0;
+        ctx.esp += 12;
+        return;
+    }
+    __imp__sub_0040F34A(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_0040F390);
+X86_FUNC(sub_0040F390) {
+    uint32_t esi = ctx.ecx;
+    if (esi < 0x10000u) { ctx.eax = 0; ctx.esp += 4; return; }
+    uint32_t buf = X86_MEM32(esi + 0x1Cu);
+    uint32_t strm = X86_MEM32(esi + 0x20u);
+    if (!buf && (!strm || strm < 0x10000u || !mem::IsCommitted(strm))) {
+        ctx.eax = 0;
+        ctx.esp += 4;
+        return;
+    }
+    __imp__sub_0040F390(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_0040F3DA);
+X86_FUNC(sub_0040F3DA) {
+    uint32_t esi = ctx.ecx;
+    if (esi < 0x10000u) { ctx.eax = 0; ctx.esp += 12; return; }
+    uint32_t buf = X86_MEM32(esi + 0x1Cu);
+    uint32_t strm = X86_MEM32(esi + 0x20u);
+    if (!buf && (!strm || strm < 0x10000u || !mem::IsCommitted(strm))) {
+        ctx.eax = 0;
+        ctx.esp += 12;
+        return;
+    }
+    __imp__sub_0040F3DA(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_0040F420);
+X86_FUNC(sub_0040F420) {
+    uint32_t esi = ctx.ecx;
+    if (esi < 0x10000u) { ctx.eax = 0; ctx.esp += 12; return; }
+    uint32_t buf = X86_MEM32(esi + 0x1Cu);
+    uint32_t strm = X86_MEM32(esi + 0x20u);
+    if (!buf && (!strm || strm < 0x10000u || !mem::IsCommitted(strm))) {
+        ctx.eax = 0;
+        ctx.esp += 12;
+        return;
+    }
+    __imp__sub_0040F420(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_0040F466);
+X86_FUNC(sub_0040F466) {
+    uint32_t esi = ctx.ecx;
+    if (esi < 0x10000u) { ctx.eax = 0; ctx.esp += 12; return; }
+    uint32_t buf = X86_MEM32(esi + 0x1Cu);
+    if (!buf || buf < 0x10000u || !mem::IsCommitted(buf)) {
+        ctx.eax = 0;
+        ctx.esp += 12;
+        return;
+    }
+    __imp__sub_0040F466(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_0040F4DA);
+X86_FUNC(sub_0040F4DA) {
+    uint32_t esi = ctx.ecx;
+    if (esi < 0x10000u) { ctx.eax = 0; ctx.esp += 12; return; }
+    uint32_t buf = X86_MEM32(esi + 0x1Cu);
+    uint32_t strm = X86_MEM32(esi + 0x20u);
+    if (!buf && (!strm || strm < 0x10000u || !mem::IsCommitted(strm))) {
+        ctx.eax = 0;
+        ctx.esp += 12;
+        return;
+    }
+    __imp__sub_0040F4DA(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_0040F520);
+X86_FUNC(sub_0040F520) {
+    uint32_t esi = ctx.ecx;
+    if (esi < 0x10000u) { ctx.eax = 0; ctx.esp += 8; return; }
+    uint32_t buf = X86_MEM32(esi + 0x1Cu);
+    uint32_t strm = X86_MEM32(esi + 0x20u);
+    if (!buf && (!strm || strm < 0x10000u || !mem::IsCommitted(strm))) {
+        ctx.eax = 0;
+        ctx.esp += 8;
+        return;
+    }
+    __imp__sub_0040F520(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_0040F566);
+X86_FUNC(sub_0040F566) {
+    uint32_t esi = ctx.ecx;
+    if (esi < 0x10000u) { ctx.eax = 0; ctx.esp += 8; return; }
+    uint32_t buf = X86_MEM32(esi + 0x1Cu);
+    uint32_t strm = X86_MEM32(esi + 0x20u);
+    if (!buf && (!strm || strm < 0x10000u || !mem::IsCommitted(strm))) {
+        ctx.eax = 0;
+        ctx.esp += 8;
+        return;
+    }
+    __imp__sub_0040F566(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_0040F5AC);
+X86_FUNC(sub_0040F5AC) {
+    uint32_t esi = ctx.ecx;
+    if (esi < 0x10000u) { ctx.eax = 0; ctx.esp += 8; return; }
+    uint32_t buf = X86_MEM32(esi + 0x1Cu);
+    uint32_t strm = X86_MEM32(esi + 0x20u);
+    if (!buf && (!strm || strm < 0x10000u || !mem::IsCommitted(strm))) {
+        ctx.eax = 0;
+        ctx.esp += 8;
+        return;
+    }
+    __imp__sub_0040F5AC(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_0040F663);
+X86_FUNC(sub_0040F663) {
+    uint32_t esi = ctx.ecx;
+    if (esi < 0x10000u) { ctx.eax = 0; ctx.esp += 8; return; }
+    uint32_t buf = X86_MEM32(esi + 0x1Cu);
+    uint32_t strm = X86_MEM32(esi + 0x20u);
+    if (!buf && (!strm || strm < 0x10000u || !mem::IsCommitted(strm))) {
+        ctx.eax = 0;
+        ctx.esp += 8;
+        return;
+    }
+    __imp__sub_0040F663(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_0040F6A9);
+X86_FUNC(sub_0040F6A9) {
+    uint32_t esi = ctx.ecx;
+    if (esi < 0x10000u) { ctx.eax = 0; ctx.esp += 8; return; }
+    uint32_t buf = X86_MEM32(esi + 0x1Cu);
+    uint32_t strm = X86_MEM32(esi + 0x20u);
+    if (!buf && (!strm || strm < 0x10000u || !mem::IsCommitted(strm))) {
+        ctx.eax = 0;
+        ctx.esp += 8;
+        return;
+    }
+    __imp__sub_0040F6A9(ctx, base);
+}
+
