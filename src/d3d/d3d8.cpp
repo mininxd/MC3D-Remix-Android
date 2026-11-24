@@ -516,13 +516,6 @@ HLE_STDCALL(D3D_MakeRequestedSpace, 2) {
 }
 
 HLE_STDCALL(D3DDevice_BlockUntilVerticalBlank, 0) {
-    if (kVBlank) {
-        ObjectRef event = FromPointer(kDevice + XDK_CDevice_VBlankEvent);
-        if (event) {
-            WaitForSingleObject(*event, 100);
-            return 0;
-        }
-    }
     std::this_thread::sleep_for(std::chrono::milliseconds(16));
     return 0;
 }
@@ -649,7 +642,7 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
     }
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     g_presents++;
-    LOG_FIRST(16, "d3d: Swap called (present count=%u)", g_presents);
+    LOG_FIRST(16, "d3d: Swap called (present count=%u)", (uint32_t)g_presents.load());
     // the kept display is shown until the title presents its own
     kernel::SetSavedDataAddress(0);
     ApplyPendingGamma();
