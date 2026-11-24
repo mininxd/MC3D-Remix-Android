@@ -917,6 +917,51 @@ X86_FUNC(sub_002DB624) { ctx.esp += 4; }
 X86_FUNC(sub_002DB630) { ctx.esp += 4; }
 X86_FUNC(sub_002DB644) { ctx.esp += 4; }
 
+// sub_002DE0AA: CRT buffer / stream table initializer (called from sub_002DFFB9 during CRT constructor loop)
+// In the original XBE binary, this function begins at 0x002DE0AA.
+// In MSVC CRT, this sets up default buffer pointers for standard stream table at 0x4B5DC8.
+X86_EXTERN_FUNC(sub_002E25B5);
+X86_FUNC(sub_002DE0AA) {
+    LOGI("guest: sub_002DE0AA (CRT buffer table init) starting...");
+    uint32_t saved_esi = ctx.esi;
+    uint32_t saved_edi = ctx.edi;
+
+    uint32_t esi = 0;
+    uint32_t edi = 0x55C148u;
+
+    while (esi < 0x24u) {
+        uint32_t flag = X86_MEM32(esi * 8u + 0x4B5DCCu);
+        if (flag == 1) {
+            uint32_t entry = esi * 8u + 0x4B5DC8u;
+            X86_MEM32(entry) = edi;
+            // Push arguments for sub_002E25B5(pBuffer, 0xFA0)
+            X86_PUSH32(0xFA0u);
+            X86_PUSH32(edi);
+            edi += 0x1Cu;
+            X86_PUSH32(0x2DE0D5u); // return address for sub_002E25B5
+            sub_002E25B5(ctx, base);
+            ctx.esp += 8; // clean up args (0xFA0 and edi)
+
+            if (ctx.eax == 0) {
+                X86_MEM32(esi * 8u + 0x4B5DC8u) = 0;
+                ctx.eax = 0;
+                ctx.edi = saved_edi;
+                ctx.esi = saved_esi;
+                ctx.esp += 4; // pop caller return address
+                LOGE("guest: sub_002DE0AA failed to allocate CRT buffer at index %u", esi);
+                return;
+            }
+        }
+        esi++;
+    }
+
+    ctx.eax = 1;
+    ctx.edi = saved_edi;
+    ctx.esi = saved_esi;
+    ctx.esp += 4; // pop caller return address
+    LOGI("guest: sub_002DE0AA (CRT buffer table init) completed successfully");
+}
+
 // ============================================================================
 // Midnight Club 3: XDK CRT & Filesystem Initialization Bridges and Overrides
 // ============================================================================
