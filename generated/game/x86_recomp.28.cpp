@@ -142,6 +142,8 @@ X86_FUNC(__imp__sub_00017121) {
 	(void)ca; (void)cb;
 	// 00017121 push ebp
 	{ uint32_t v = (uint32_t)(ctx.ebp); X86_PUSH32(v); }
+	X86_SAVE_FLAGS();
+	sub_00017122(ctx, base);
 }
 X86_WEAK_FUNC(sub_00017121, __imp__sub_00017121)
 

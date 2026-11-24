@@ -1052,6 +1052,20 @@ X86_FUNC(sub_002D2410) {
     LOGI("guest: sub_002D2410 completed (refresh=%u Hz)", X86_MEM32(0x4b4e80u));
 }
 
+// sub_00017121: Win32 CreateSemaphoreA wrapper.
+// In the original binary, 0x17121 (push ebp) falls through directly into 0x17122 (sub_00017122).
+// The recompiler split them into separate functions, leaving sub_00017121 with only `push ebp`
+// and returning immediately without executing the semaphore creation or cleaning up the stack.
+// This corrupted the guest stack and caused asset stream open/read to fail with an indirect call trap.
+X86_EXTERN_FUNC(sub_00017122);
+X86_FUNC(sub_00017121) {
+    LOGI("guest: sub_00017121 (CreateSemaphoreA) starting, initial=%u, max=%u",
+         X86_MEM32(ctx.esp + 8), X86_MEM32(ctx.esp + 12));
+    { uint32_t v = (uint32_t)(ctx.ebp); X86_PUSH32(v); }
+    sub_00017122(ctx, base);
+    LOGI("guest: sub_00017121 (CreateSemaphoreA) completed, handle=0x%08X", ctx.eax);
+}
+
 // sub_00012EA4: Mounts \??\T: (TDATA) and \??\U: (UDATA) for title 0x54540079.
 // Calling convention: stdcall with 2 arguments (8 bytes) + return address (4 bytes) = 12 bytes.
 X86_FUNC(sub_00012EA4) {
