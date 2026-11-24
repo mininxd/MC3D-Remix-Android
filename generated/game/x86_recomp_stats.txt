@@ -1,5 +1,5 @@
-functions 22487
-instructions 1530455
+functions 22695
+instructions 1541836
 unimplemented aaa 8
 unimplemented aad 10
 unimplemented aam 4
