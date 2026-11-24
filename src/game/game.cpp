@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <thread>
 
 namespace game {
@@ -826,4 +827,31 @@ X86_FUNC(sub_0040F6A9) {
     }
     __imp__sub_0040F6A9(ctx, base);
 }
+
+// Native CRT memcpy / memmove replacement (0x002DB4C0)
+// Overrides the weak recompiled CRT memcpy assembly routine.
+// In MSVC CRT x86, memcpy is an alias for memmove (handles overlapping ranges).
+// cdecl calling convention:
+//   [esp + 4]  = dest
+//   [esp + 8]  = src
+//   [esp + 12] = count
+// Return value: eax = dest.
+// Callee pops return address (esp += 4), caller cleans arguments (add esp, 12).
+X86_FUNC(sub_002DB4C0) {
+    uint32_t dest  = X86_MEM32(ctx.esp + 4);
+    uint32_t src   = X86_MEM32(ctx.esp + 8);
+    uint32_t count = X86_MEM32(ctx.esp + 12);
+    if (count != 0 && dest >= 0x10000u && src >= 0x10000u) {
+        std::memmove(base + dest, base + src, count);
+    }
+    ctx.eax = dest;
+    ctx.esp += 4;
+}
+
+// Fallback stubs for internal memcpy labels if ever targeted indirectly
+X86_FUNC(sub_002DB61C) { ctx.esp += 4; }
+X86_FUNC(sub_002DB624) { ctx.esp += 4; }
+X86_FUNC(sub_002DB630) { ctx.esp += 4; }
+X86_FUNC(sub_002DB644) { ctx.esp += 4; }
+
 

@@ -13,6 +13,10 @@ code_sections = [".text", "D3DX", "XGRPH", "BINK", "BINK32", "BINK32A", "BINK16"
 [functions]
 0x0001359C = "thread_startex"
 0x0001292B = "game_main_thread"
+0x002DB61C = "sub_002DB61C"
+0x002DB624 = "sub_002DB624"
+0x002DB630 = "sub_002DB630"
+0x002DB644 = "sub_002DB644"
 
 # functions the host replaces or calls by name, 0 where the image has none
 [symbols]
