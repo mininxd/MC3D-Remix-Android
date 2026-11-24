@@ -807,22 +807,24 @@ HLE_STDCALL(D3DDevice_SetMaterial, 1) {
     return 0;
 }
 
-// the XDK keeps its own light lists, the renderer gets a copy
-HLE_WRAP(D3DDevice_SetLight, 2) {
+// Direct3D 8 Lighting: Handled entirely on host renderer to prevent guest CDevice list corruption
+HLE_STDCALL(D3DDevice_SetLight, 2) {
     uint32_t i = a[0];
     uint32_t l = a[1];
     if (i < 8 && l) {
         std::lock_guard<std::recursive_mutex> lock(g_lock);
         std::memcpy(g_state.lights[i].data(), HostPtr(l), 26 * 4);
     }
+    return 0;
 }
-HLE_WRAP(D3DDevice_LightEnable, 2) {
+HLE_STDCALL(D3DDevice_LightEnable, 2) {
     uint32_t i = a[0];
     uint32_t on = a[1];
     if (i < 8) {
         std::lock_guard<std::recursive_mutex> lock(g_lock);
         g_state.light_enable = on ? g_state.light_enable | 1u << i : g_state.light_enable & ~(1u << i);
     }
+    return 0;
 }
 
 // resources in use
