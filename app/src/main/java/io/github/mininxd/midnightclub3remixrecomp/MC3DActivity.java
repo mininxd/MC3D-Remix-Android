@@ -80,9 +80,7 @@ public class MC3DActivity extends SDLActivity {
         // 2. Persist directly to external storage in case native code cannot be reached
         String[] paths = new String[] {
             "/storage/emulated/0/mc3dr/crash_log.txt",
-            "/sdcard/mc3dr/crash_log.txt",
-            "/sdcard/mc3dr/app_logs.txt",
-            "/storage/emulated/0/mc3dr/app_logs.txt"
+            "/sdcard/mc3dr/crash_log.txt"
         };
         for (String p : paths) {
             try {

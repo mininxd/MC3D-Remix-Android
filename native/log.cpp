@@ -53,6 +53,39 @@ static size_t g_count = 0;
 static auto g_start = std::chrono::steady_clock::now();
 static std::string g_path = "memory://ring_buffer";
 static std::atomic<bool> g_handling_crash{false};
+static FILE* g_file = nullptr;
+static std::string g_file_path;
+
+static void EnsureLogFileOpenLocked() {
+    if (g_file) return;
+    const char* const kCandidatePaths[] = {
+        "/sdcard/mc3dr/app_logs.txt",
+        "/storage/emulated/0/mc3dr/app_logs.txt",
+        "app_logs.txt"
+    };
+    for (const char* p : kCandidatePaths) {
+        FILE* f = std::fopen(p, "w");
+        if (f) {
+            g_file = f;
+            g_file_path = p;
+            g_path = p;
+            std::time_t now = std::time(nullptr);
+            char time_str[64] = {};
+            std::strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S UTC", std::gmtime(&now));
+            std::fprintf(g_file, "================================================================================\n");
+            std::fprintf(g_file, "       MIDNIGHT CLUB 3: DUB EDITION REMIX - RUNTIME EXECUTION LOG\n");
+            std::fprintf(g_file, "================================================================================\n");
+            std::fprintf(g_file, "Session Started: %s\n", time_str);
+            std::fprintf(g_file, "Package:         io.github.mininxd.midnightclub3remixrecomp\n");
+            std::fprintf(g_file, "Build Commit:    %s\n", MC3D_COMMIT);
+            std::fprintf(g_file, "Architecture:    aarch64-linux-android\n");
+            std::fprintf(g_file, "Log Mode:        Continuous Persistent File Logging\n");
+            std::fprintf(g_file, "================================================================================\n");
+            std::fflush(g_file);
+            break;
+        }
+    }
+}
 
 const char* LevelName(Level lv) {
     switch (lv) {
@@ -154,9 +187,9 @@ static void CrashSignalHandler(int sig, siginfo_t* info, void* ucontext) {
 }  // namespace
 
 void Init(const std::string&, const std::string&, bool) {
-    // In-memory ring buffer is always active from startup.
-    // We install the native crash handlers on initialization.
     InstallCrashHandlers();
+    std::lock_guard<std::mutex> lock(g_mutex);
+    EnsureLogFileOpenLocked();
 }
 
 const std::string& Path() {
@@ -177,15 +210,25 @@ void Write(Level lv, const char* fmt, ...) {
     __android_log_print(AndroidPriority(lv), "MC3DR", "[%9.3f] [%s] [t%04x] %s",
                         t, LevelName(lv), tid, msg);
 
-    // 2. Store in memory ring buffer (Zero disk writes during normal play)
+    // 2. Store in memory ring buffer and persist continuously to disk (ALWAYS RECORD)
     std::lock_guard<std::mutex> lock(g_mutex);
     g_ring[g_head] = LogEntry{t, lv, tid, msg};
     g_head = (g_head + 1) % kRingCapacity;
     if (g_count < kRingCapacity) g_count++;
+
+    EnsureLogFileOpenLocked();
+    if (g_file) {
+        std::fprintf(g_file, "[%9.3f] [%-6s] [t%04x] %s\n", t, LevelName(lv), tid, msg);
+        std::fflush(g_file);
+    }
 }
 
 void Flush() {
-    // Ring buffer lives in RAM; nothing to flush during normal operation
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_file) {
+        std::fflush(g_file);
+        fsync(fileno(g_file));
+    }
 }
 
 void InstallCrashHandlers() {
@@ -266,12 +309,10 @@ void SaveCrashReport(const char* category, const char* details, const void*) {
     // 1. Output to Android logcat
     __android_log_write(ANDROID_LOG_FATAL, "MC3DR_Crash", report.c_str());
 
-    // 2. Persist ONLY ON CRASH to external storage paths
+    // 2. Persist standalone crash report to crash_log.txt
     const char* const kOutputPaths[] = {
         "/storage/emulated/0/mc3dr/crash_log.txt",
-        "/sdcard/mc3dr/crash_log.txt",
-        "/sdcard/mc3dr/app_logs.txt",
-        "/storage/emulated/0/mc3dr/app_logs.txt"
+        "/sdcard/mc3dr/crash_log.txt"
     };
 
     for (const char* path : kOutputPaths) {
@@ -282,6 +323,15 @@ void SaveCrashReport(const char* category, const char* details, const void*) {
             fsync(fileno(f));
             std::fclose(f);
         }
+    }
+
+    // 3. Append crash diagnostic to active continuous app_logs.txt
+    std::lock_guard<std::mutex> lock(g_mutex);
+    EnsureLogFileOpenLocked();
+    if (g_file) {
+        std::fprintf(g_file, "\n%s\n", report.c_str());
+        std::fflush(g_file);
+        fsync(fileno(g_file));
     }
 }
 
