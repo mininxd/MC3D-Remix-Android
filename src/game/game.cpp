@@ -1193,49 +1193,39 @@ X86_FUNC(sub_002D2410) {
 }
 
 // sub_00017121: Win32 CreateSemaphoreA wrapper.
-// In the original binary, 0x17121 (push ebp) falls through directly into 0x17122 (sub_00017122).
-// The recompiler split them into separate functions, leaving sub_00017121 with only `push ebp`
-// and returning immediately without executing the semaphore creation or cleaning up the stack.
-// This corrupted the guest stack and caused asset stream open/read to fail with an indirect call trap.
-X86_EXTERN_FUNC(sub_00017122);
+// In the clean recompilation, sub_00017121 safely falls through into sub_00017122.
+X86_EXTERN_FUNC(__imp__sub_00017121);
 X86_FUNC(sub_00017121) {
     LOGI("guest: sub_00017121 (CreateSemaphoreA) starting, initial=%u, max=%u",
          X86_MEM32(ctx.esp + 8), X86_MEM32(ctx.esp + 12));
-    { uint32_t v = (uint32_t)(ctx.ebp); X86_PUSH32(v); }
-    sub_00017122(ctx, base);
+    __imp__sub_00017121(ctx, base);
     LOGI("guest: sub_00017121 (CreateSemaphoreA) completed, handle=0x%08X", ctx.eax);
 }
 
+// Thread-safe multi-threaded guest file I/O mutex (Racas architecture for Android SMP)
+static std::recursive_mutex g_guest_io_mutex;
+
 // sub_0001751A: Win32 ReadFile(hFile, lpBuffer, nBytesToRead, lpNumberOfBytesRead, lpOverlapped)
-// In the original XBE binary, 0x1751A is the function entry point containing:
-//   push ebp
-//   mov ebp, esp
-//   sub esp, 0x10
-// which falls through directly into 0x17520 (sub_00017520).
-// The static recompiler split them into separate functions, leaving sub_0001751A with only
-// the 3-instruction prologue and returning immediately without calling NtReadFile or cleaning up the stack.
-// This corrupted the guest stack and returned 0 bytes, ultimately clobbering ebx to NULL in stream readers.
-X86_EXTERN_FUNC(sub_00017520);
+// Protect concurrent background streaming threads from corrupting shared file position & buffer pointers.
+X86_EXTERN_FUNC(__imp__sub_0001751A);
 X86_FUNC(sub_0001751A) {
+    std::lock_guard<std::recursive_mutex> lock(g_guest_io_mutex);
     uint32_t hFile = X86_MEM32(ctx.esp + 4);
     uint32_t lpBuffer = X86_MEM32(ctx.esp + 8);
     uint32_t nBytes = X86_MEM32(ctx.esp + 12);
     uint32_t lpBytesRead = X86_MEM32(ctx.esp + 16);
-    LOGI("guest: sub_0001751A (ReadFile) starting, handle=0x%08X, buf=0x%08X, nBytes=%u",
-         hFile, lpBuffer, nBytes);
-    { uint32_t v = (uint32_t)(ctx.ebp); X86_PUSH32(v); }
-    ctx.ebp = (uint32_t)(ctx.esp);
-    ctx.esp -= 0x10;
-    sub_00017520(ctx, base);
+    __imp__sub_0001751A(ctx, base);
     uint32_t bytesRead = lpBytesRead ? X86_MEM32(lpBytesRead) : 0;
-    LOGI("guest: sub_0001751A (ReadFile) completed, success=%u, bytesRead=%u", ctx.eax, bytesRead);
+    LOGI("guest: sub_0001751A (ReadFile) completed, handle=0x%08X, req=%u, read=%u, success=%u",
+         hFile, nBytes, bytesRead, ctx.eax);
 }
 
-// sub_0001727E: Fallthrough directly into sub_0001727F
-X86_EXTERN_FUNC(sub_0001727F);
-X86_FUNC(sub_0001727E) {
-    { uint32_t v = (uint32_t)(ctx.ebx); X86_PUSH32(v); }
-    sub_0001727F(ctx, base);
+// sub_002D2850: Direct3D initialization and CDevice configuration (XDK 5849)
+X86_EXTERN_FUNC(__imp__sub_002D2850);
+X86_FUNC(sub_002D2850) {
+    LOGI("guest: sub_002D2850 (Direct3D CreateDevice & CDevice setup) starting...");
+    __imp__sub_002D2850(ctx, base);
+    LOGI("guest: sub_002D2850 completed with result=0x%08X (CDevice=0x%08X)", ctx.eax, X86_MEM32(0x55B9C8u));
 }
 
 // sub_00012EA4: Mounts \??\T: (TDATA) and \??\U: (UDATA) for title 0x54540079.
