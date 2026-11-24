@@ -156,6 +156,9 @@ loc_00015EF3:
 	{ uint32_t a = (uint32_t)(X86_MEM32((uint32_t)(ctx.eax))); uint32_t b = (uint32_t)(ctx.eax); uint32_t r = a - b; cf = a < b; of = ((a ^ b) & (a ^ r)) >> 31; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); ca = a; cb = b; }
 	// 00015F0B je 0x15f95
 	if (zf) { goto loc_00015F95; }
+	// 00015F11: list not empty, allocate from free block in sub_00015F11
+	sub_00015F11(ctx, base);
+	return;
 loc_00015F95:
 	// 00015F95 mov ecx, dword ptr [ebp - 0x28]
 	ctx.ecx = (uint32_t)(X86_MEM32((uint32_t)(ctx.ebp - 0x28u)));

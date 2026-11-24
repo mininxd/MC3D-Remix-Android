@@ -301,6 +301,9 @@ loc_000155AB:
 	X86_MEM32((uint32_t)(ctx.esi + 0x28u)) = (uint32_t)(ctx.edi);
 	// 000155FC mov dword ptr [esi + 0x24], edx
 	X86_MEM32((uint32_t)(ctx.esi + 0x24u)) = (uint32_t)(ctx.edx);
+	// 000155FF: Fall through into sub_000155FF (registers segment, marks busy, inserts free block, returns al=1)
+	sub_000155FF(ctx, base);
+	return;
 loc_0001563E:
 	// 0001563E pop edi
 	{ uint32_t v = X86_MEM32(ctx.esp); ctx.esp += 4; ctx.edi = (uint32_t)(v); }
