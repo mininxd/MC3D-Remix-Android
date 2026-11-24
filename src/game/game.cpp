@@ -116,6 +116,54 @@ void Loaded() {
     kernel::RegisterExport(253, "PhyInitialize", [](X86Context& ctx, uint8_t*) {
         kernel::Return(ctx, 0u, 2);
     });
+
+    // Ordinal 76: IoQueryVolumeInformation (5 args, stdcall = 20 bytes stack)
+    // NTSTATUS IoQueryVolumeInformation(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock, PVOID FsInformation, ULONG Length, FS_INFORMATION_CLASS FsInformationClass);
+    kernel::RegisterExport(76, "IoQueryVolumeInformation", [](X86Context& ctx, uint8_t*) {
+        uint32_t handle = kernel::R32(ctx.esp + 4);
+        uint32_t p_io_status = kernel::R32(ctx.esp + 8);
+        uint32_t p_fs_info = kernel::R32(ctx.esp + 12);
+        uint32_t length = kernel::R32(ctx.esp + 16);
+        uint32_t fs_info_class = kernel::R32(ctx.esp + 20);
+
+        LOGI("kernel: IoQueryVolumeInformation(handle=0x%X, class=%u, len=%u)", handle, fs_info_class, length);
+
+        if (p_io_status) {
+            kernel::W32(p_io_status, 0); // Status = STATUS_SUCCESS
+            kernel::W32(p_io_status + 4, length); // Information = bytes written
+        }
+
+        if (p_fs_info && length >= 4) {
+            if (fs_info_class == 5 /* FileFsAttributeInformation */) {
+                // FILE_FS_ATTRIBUTE_INFORMATION:
+                // ULONG FileSystemAttributes (0x00)
+                // LONG MaximumComponentNameLength (0x04) = 42
+                // ULONG FileSystemNameLength (0x08) = 4
+                // CHAR FileSystemName[4] (0x0C) = "FATX" (0x58544146)
+                kernel::W32(p_fs_info, 0);
+                if (length >= 8) kernel::W32(p_fs_info + 4, 42);
+                if (length >= 12) kernel::W32(p_fs_info + 8, 4);
+                if (length >= 16) kernel::W32(p_fs_info + 12, 0x58544146u);
+            } else if (fs_info_class == 1 /* FileFsVolumeInformation */) {
+                if (length >= 12) kernel::W32(p_fs_info + 8, 0x12345678u);
+                if (length >= 16) kernel::W32(p_fs_info + 12, 0);
+            } else if (fs_info_class == 3 /* FileFsSizeInformation */) {
+                if (length >= 24) {
+                    kernel::W32(p_fs_info, 0x00100000u);
+                    kernel::W32(p_fs_info + 4, 0);
+                    kernel::W32(p_fs_info + 8, 0x00080000u);
+                    kernel::W32(p_fs_info + 12, 0);
+                    kernel::W32(p_fs_info + 16, 32); // 16KB clusters
+                    kernel::W32(p_fs_info + 20, 512); // sector size
+                }
+            } else if (fs_info_class == 4 /* FileFsDeviceInformation */) {
+                kernel::W32(p_fs_info, 7); // FILE_DEVICE_DISK
+                if (length >= 8) kernel::W32(p_fs_info + 4, 0);
+            }
+        }
+
+        kernel::Return(ctx, 0u, 5);
+    });
 }
 
 }  // namespace game
