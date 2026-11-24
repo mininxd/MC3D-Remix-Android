@@ -43129,7 +43129,7 @@ X86_FUNC(__imp__sub_003A31BC) {
 	// 003A31BC jb 0x3a3223
 	if (cf) { X86_SAVE_FLAGS(); x86_icall(ctx, base, 0x3A3223u); return; }
 	// 003A31BE imul esi, dword ptr [bp + di + 0x74], 0x69207265
-	{ int64_t r = (int64_t)(int32_t)(X86_MEM32((uint32_t)(bp + di + 0x74u))) * (int64_t)(int32_t)(0x69207265u); ctx.esi = (uint32_t)((uint32_t)r); cf = of = (r != (int32_t)r); }
+	{ int64_t r = (int64_t)(int32_t)(X86_MEM32((uint32_t)(((uint16_t)ctx.ebp) + ((uint16_t)ctx.edi) + 0x74u))) * (int64_t)(int32_t)(0x69207265u); ctx.esi = (uint32_t)((uint32_t)r); cf = of = (r != (int32_t)r); }
 	// 003A31C6 outsb dx, byte ptr [esi]
 	/* outsb dx, byte ptr [esi] */
 	// 003A31C7 imul esi, dword ptr [ecx + ebp*2 + 0x61], 0x617a696c
@@ -43184,7 +43184,7 @@ loc_003A321A:
 	// 003A321A outsd dx, dword ptr [esi]
 	/* outsd dx, dword ptr [esi] */
 	// 003A321B add byte ptr [bx + si], al
-	{ uint32_t a = (uint32_t)(X86_MEM8((uint32_t)(bx + si))); uint32_t b = (uint32_t)(((uint8_t)ctx.eax)); uint32_t r = a + b; X86_MEM8((uint32_t)(bx + si)) = (uint8_t)(r); cf = r < a; of = ((a ^ r) & (b ^ r)) >> 31; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
+	{ uint32_t a = (uint32_t)(X86_MEM8((uint32_t)(((uint16_t)ctx.ebx) + ((uint16_t)ctx.esi)))); uint32_t b = (uint32_t)(((uint8_t)ctx.eax)); uint32_t r = a + b; X86_MEM8((uint32_t)(((uint16_t)ctx.ebx) + ((uint16_t)ctx.esi))) = (uint8_t)(r); cf = r < a; of = ((a ^ r) & (b ^ r)) >> 31; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
 	// 003A321E add byte ptr [eax], al
 	{ uint32_t a = (uint32_t)(X86_MEM8((uint32_t)(ctx.eax))); uint32_t b = (uint32_t)(((uint8_t)ctx.eax)); uint32_t r = a + b; X86_MEM8((uint32_t)(ctx.eax)) = (uint8_t)(r); cf = r < a; of = ((a ^ r) & (b ^ r)) >> 31; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
 loc_003A3257:

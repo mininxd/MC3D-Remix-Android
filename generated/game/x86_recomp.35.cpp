@@ -51411,7 +51411,7 @@ X86_FUNC(__imp__sub_00421A12) {
 	// 00421A5D jne 0x421ac6
 	if (!zf) { X86_SAVE_FLAGS(); x86_icall(ctx, base, 0x421AC6u); return; }
 	// 00421A5F imul ebp, dword ptr [bp + 0x67], 0x6c656820
-	{ int64_t r = (int64_t)(int32_t)(X86_MEM32((uint32_t)(bp + 0x67u))) * (int64_t)(int32_t)(0x6c656820u); ctx.ebp = (uint32_t)((uint32_t)r); cf = of = (r != (int32_t)r); }
+	{ int64_t r = (int64_t)(int32_t)(X86_MEM32((uint32_t)(((uint16_t)ctx.ebp) + 0x67u))) * (int64_t)(int32_t)(0x6c656820u); ctx.ebp = (uint32_t)((uint32_t)r); cf = of = (r != (int32_t)r); }
 	// 00421A67 jo 0x421a97
 	if (of) { X86_SAVE_FLAGS(); x86_icall(ctx, base, 0x421A97u); return; }
 	// 00421A69 or al, byte ptr [eax]
@@ -51434,7 +51434,7 @@ loc_00421A75:
 	// 00421A7F popal 
 	/* popal  */
 	// 00421A80 and byte ptr gs:[bx + 0x72], dh
-	{ uint32_t a = (uint32_t)(X86_MEM8((uint32_t)(bx + 0x72u))); uint32_t b = (uint32_t)(((uint8_t)(ctx.edx >> 8))); uint32_t r = a & b; X86_MEM8((uint32_t)(bx + 0x72u)) = (uint8_t)(r); cf = 0; of = 0; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
+	{ uint32_t a = (uint32_t)(X86_MEM8((uint32_t)(((uint16_t)ctx.ebx) + 0x72u))); uint32_t b = (uint32_t)(((uint8_t)(ctx.edx >> 8))); uint32_t r = a & b; X86_MEM8((uint32_t)(((uint16_t)ctx.ebx) + 0x72u)) = (uint8_t)(r); cf = 0; of = 0; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
 	// 00421A85 imul esi, dword ptr [ebp + 0x20], 0x656d6974
 	{ int64_t r = (int64_t)(int32_t)(X86_MEM32((uint32_t)(ctx.ebp + 0x20u))) * (int64_t)(int32_t)(0x656d6974u); ctx.esi = (uint32_t)((uint32_t)r); cf = of = (r != (int32_t)r); }
 	// 00421A8D sub eax, 0xa74756f
@@ -51448,7 +51448,7 @@ loc_00421A75:
 	// 00421A9F popal 
 	/* popal  */
 	// 00421AA0 and byte ptr gs:[bp + si + 0x65], dh
-	{ uint32_t a = (uint32_t)(X86_MEM8((uint32_t)(bp + si + 0x65u))); uint32_t b = (uint32_t)(((uint8_t)(ctx.edx >> 8))); uint32_t r = a & b; X86_MEM8((uint32_t)(bp + si + 0x65u)) = (uint8_t)(r); cf = 0; of = 0; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
+	{ uint32_t a = (uint32_t)(X86_MEM8((uint32_t)(((uint16_t)ctx.ebp) + ((uint16_t)ctx.esi) + 0x65u))); uint32_t b = (uint32_t)(((uint8_t)(ctx.edx >> 8))); uint32_t r = a & b; X86_MEM8((uint32_t)(((uint16_t)ctx.ebp) + ((uint16_t)ctx.esi) + 0x65u)) = (uint8_t)(r); cf = 0; of = 0; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
 	// 00421AA5 popal 
 	/* popal  */
 	// 00421AA6 and byte ptr fs:[ecx + ebp*2 + 0x6d], dh

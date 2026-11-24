@@ -45588,7 +45588,7 @@ loc_003A374C:
 	// 003A376D outsb dx, byte ptr [esi]
 	/* outsb dx, byte ptr [esi] */
 	// 003A376E and byte ptr gs:[bp + di + 0x6f], ah
-	{ uint32_t a = (uint32_t)(X86_MEM8((uint32_t)(bp + di + 0x6fu))); uint32_t b = (uint32_t)(((uint8_t)(ctx.eax >> 8))); uint32_t r = a & b; X86_MEM8((uint32_t)(bp + di + 0x6fu)) = (uint8_t)(r); cf = 0; of = 0; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
+	{ uint32_t a = (uint32_t)(X86_MEM8((uint32_t)(((uint16_t)ctx.ebp) + ((uint16_t)ctx.edi) + 0x6fu))); uint32_t b = (uint32_t)(((uint8_t)(ctx.eax >> 8))); uint32_t r = a & b; X86_MEM8((uint32_t)(((uint16_t)ctx.ebp) + ((uint16_t)ctx.edi) + 0x6fu)) = (uint8_t)(r); cf = 0; of = 0; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
 	// 003A3773 outsb dx, byte ptr [esi]
 	/* outsb dx, byte ptr [esi] */
 	// 003A3774 jae 0x3a37ea
@@ -45602,7 +45602,7 @@ loc_003A374C:
 	// 003A377A jb 0x3a37e1
 	if (cf) { X86_SAVE_FLAGS(); x86_icall(ctx, base, 0x3A37E1u); return; }
 	// 003A377C imul esi, dword ptr [bp + di + 0x74], 0x28207265
-	{ int64_t r = (int64_t)(int32_t)(X86_MEM32((uint32_t)(bp + di + 0x74u))) * (int64_t)(int32_t)(0x28207265u); ctx.esi = (uint32_t)((uint32_t)r); cf = of = (r != (int32_t)r); }
+	{ int64_t r = (int64_t)(int32_t)(X86_MEM32((uint32_t)(((uint16_t)ctx.ebp) + ((uint16_t)ctx.edi) + 0x74u))) * (int64_t)(int32_t)(0x28207265u); ctx.esi = (uint32_t)((uint32_t)r); cf = of = (r != (int32_t)r); }
 	// 003A3784 arpl word ptr [ecx], di
 	/* arpl word ptr [ecx], di */
 	// 003A3786 sub al, 0x20
@@ -45821,7 +45821,7 @@ loc_003A38DC:
 	// 003A38E3 imul edi, dword ptr [edx + 0x65], 0x65722064
 	{ int64_t r = (int64_t)(int32_t)(X86_MEM32((uint32_t)(ctx.edx + 0x65u))) * (int64_t)(int32_t)(0x65722064u); ctx.edi = (uint32_t)((uint32_t)r); cf = of = (r != (int32_t)r); }
 	// 003A38EA imul esi, dword ptr [bp + di + 0x74], 0x202e7265
-	{ int64_t r = (int64_t)(int32_t)(X86_MEM32((uint32_t)(bp + di + 0x74u))) * (int64_t)(int32_t)(0x202e7265u); ctx.esi = (uint32_t)((uint32_t)r); cf = of = (r != (int32_t)r); }
+	{ int64_t r = (int64_t)(int32_t)(X86_MEM32((uint32_t)(((uint16_t)ctx.ebp) + ((uint16_t)ctx.edi) + 0x74u))) * (int64_t)(int32_t)(0x202e7265u); ctx.esi = (uint32_t)((uint32_t)r); cf = of = (r != (int32_t)r); }
 	// 003A38F2 push esp
 	{ uint32_t v = (uint32_t)(ctx.esp); X86_PUSH32(v); }
 	// 003A38F3 jne 0x3a3967

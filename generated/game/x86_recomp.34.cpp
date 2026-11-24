@@ -38105,7 +38105,7 @@ X86_FUNC(__imp__sub_003A3218) {
 	// 003A321A outsd dx, dword ptr [esi]
 	/* outsd dx, dword ptr [esi] */
 	// 003A321B add byte ptr [bx + si], al
-	{ uint32_t a = (uint32_t)(X86_MEM8((uint32_t)(bx + si))); uint32_t b = (uint32_t)(((uint8_t)ctx.eax)); uint32_t r = a + b; X86_MEM8((uint32_t)(bx + si)) = (uint8_t)(r); cf = r < a; of = ((a ^ r) & (b ^ r)) >> 31; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
+	{ uint32_t a = (uint32_t)(X86_MEM8((uint32_t)(((uint16_t)ctx.ebx) + ((uint16_t)ctx.esi)))); uint32_t b = (uint32_t)(((uint8_t)ctx.eax)); uint32_t r = a + b; X86_MEM8((uint32_t)(((uint16_t)ctx.ebx) + ((uint16_t)ctx.esi))) = (uint8_t)(r); cf = r < a; of = ((a ^ r) & (b ^ r)) >> 31; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
 	// 003A321E add byte ptr [eax], al
 	{ uint32_t a = (uint32_t)(X86_MEM8((uint32_t)(ctx.eax))); uint32_t b = (uint32_t)(((uint8_t)ctx.eax)); uint32_t r = a + b; X86_MEM8((uint32_t)(ctx.eax)) = (uint8_t)(r); cf = r < a; of = ((a ^ r) & (b ^ r)) >> 31; zf = r == 0; sf = (r >> 31) & 1; pf = X86_PARITY(r); }
 }

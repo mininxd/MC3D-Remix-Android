@@ -35568,7 +35568,7 @@ loc_00380EFC:
 	// 00380F03 jb 0x380f6a
 	if (cf) { X86_SAVE_FLAGS(); x86_icall(ctx, base, 0x380F6Au); return; }
 	// 00380F05 imul esi, dword ptr [bp + di + 0x74], 0x65207265
-	{ int64_t r = (int64_t)(int32_t)(X86_MEM32((uint32_t)(bp + di + 0x74u))) * (int64_t)(int32_t)(0x65207265u); ctx.esi = (uint32_t)((uint32_t)r); cf = of = (r != (int32_t)r); }
+	{ int64_t r = (int64_t)(int32_t)(X86_MEM32((uint32_t)(((uint16_t)ctx.ebp) + ((uint16_t)ctx.edi) + 0x74u))) * (int64_t)(int32_t)(0x65207265u); ctx.esi = (uint32_t)((uint32_t)r); cf = of = (r != (int32_t)r); }
 	// 00380F0D js 0x380f7f
 	if (sf) { goto loc_00380F7F; }
 	// 00380F0F arpl word ptr gs:[ebp + 0x64], si

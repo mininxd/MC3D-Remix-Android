@@ -47551,7 +47551,7 @@ loc_003A38C7:
 	// 003A38E3 imul edi, dword ptr [edx + 0x65], 0x65722064
 	{ int64_t r = (int64_t)(int32_t)(X86_MEM32((uint32_t)(ctx.edx + 0x65u))) * (int64_t)(int32_t)(0x65722064u); ctx.edi = (uint32_t)((uint32_t)r); cf = of = (r != (int32_t)r); }
 	// 003A38EA imul esi, dword ptr [bp + di + 0x74], 0x202e7265
-	{ int64_t r = (int64_t)(int32_t)(X86_MEM32((uint32_t)(bp + di + 0x74u))) * (int64_t)(int32_t)(0x202e7265u); ctx.esi = (uint32_t)((uint32_t)r); cf = of = (r != (int32_t)r); }
+	{ int64_t r = (int64_t)(int32_t)(X86_MEM32((uint32_t)(((uint16_t)ctx.ebp) + ((uint16_t)ctx.edi) + 0x74u))) * (int64_t)(int32_t)(0x202e7265u); ctx.esi = (uint32_t)((uint32_t)r); cf = of = (r != (int32_t)r); }
 	// 003A38F2 push esp
 	{ uint32_t v = (uint32_t)(ctx.esp); X86_PUSH32(v); }
 	// 003A38F3 jne 0x3a3967
