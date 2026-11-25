@@ -66,16 +66,7 @@ extern "C" void sub_000DFB40(X86Context& ctx, uint8_t* base) {
     game::objlog::LogResourcePageIn("PAGE_SHDR", a0, a1, a2);
 }
 
-// Immediate-mode D3DDevice_End (flushes D3DDevice_Begin/End primitives)
-extern "C" void __imp__sub_00417B00(X86Context& ctx, uint8_t* base);
-extern "C" void sub_00417B00(X86Context& ctx, uint8_t* base) {
-    game::objlog::SetDrawHint("D3D_END", ctx.ecx);
-    game::render_accuracy::ApplyRenderAccuracy();
-    __imp__sub_00417B00(ctx, base);
-    game::objlog::ClearDrawHint();
-}
-
-// Immediate-mode primitive builder wrapping Begin/End (sub_004182E0)
+// Immediate-mode primitive builder wrapping Begin/End (sub_004182E0; D3DDevice_End sub_00417B00 is HLE in d3d8.cpp)
 extern "C" void __imp__sub_004182E0(X86Context& ctx, uint8_t* base);
 extern "C" void sub_004182E0(X86Context& ctx, uint8_t* base) {
     game::objlog::SetDrawHint("IMM_4182E0", ctx.ecx);
