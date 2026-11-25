@@ -108,6 +108,7 @@ const app::GameInfo app::kGame = {
     .save = game::Save,
     .init = game::Init,
     .loaded = game::Loaded,
+    .ui = app::DrawUi,
     .pad = game::Pad,
     .rumble = game::Rumble,
 };

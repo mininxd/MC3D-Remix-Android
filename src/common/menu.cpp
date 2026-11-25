@@ -240,8 +240,12 @@ bool SliderRow(const char* label, int& value, int min_v, int max_v, const char* 
     if (ImGui::IsItemFocused()) {
         FillItem();
         int step = 0;
-        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft)) step = -1;
-        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) || ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight)) step = 1;
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft) ||
+            ImGui::IsKeyPressed(ImGuiKey_GamepadLStickLeft))
+            step = -1;
+        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) || ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight) ||
+            ImGui::IsKeyPressed(ImGuiKey_GamepadLStickRight))
+            step = 1;
         if (step) {
             int next = std::clamp(value + step * 5, min_v, max_v);
             if (next != value) {
@@ -949,6 +953,8 @@ void DrawFooter(float em) {
     ImGui::PushStyleColor(ImGuiCol_Text, kDim);
     const char* hint = "";
     if (g_capture >= 0) hint = "Press a key or mouse button to bind, Escape cancels";
+    else if (g_page == 0 && game::Opt().dynamic_resolution)
+        hint = "Dynamic Resolution is ON (turn OFF to adjust Render Scale manually)";
     else if (g_page == kKeyboardPage && g_hovered_box >= 0) hint = "Right click or Delete clears the key";
     else if (g_page == kCheatsPage) hint = "A weapon replaces the one not in hand, gold names are held";
     ImGui::TextUnformatted(Ui(hint, false).c_str());
@@ -995,11 +1001,15 @@ void DragScroll(float em) {
     glide *= std::max(0.0f, 1.0f - kFriction * io.DeltaTime);
 }
 
+int g_open_frames = 0;
+
 void DrawPanel() {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     float em = ImGui::GetFontSize();
     ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(em * 50, em * 32), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(
+        ImVec2(std::min(em * 50, vp->WorkSize.x * 0.92f), std::min(em * 32, vp->WorkSize.y * 0.90f)),
+        ImGuiCond_Always);
     for (const auto& [col, color] : kPanelColors) ImGui::PushStyleColor(col, color);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
@@ -1171,6 +1181,21 @@ void OpenMenuPage(int page) {
     input::ReleaseCursor();
 }
 
+void DrawFpsOverlay(double fps) {
+    if (!game::Opt().fps_counter) return;
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    float em = ImGui::GetFontSize();
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + em * 0.7f, vp->WorkPos.y + em * 0.5f), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.55f);
+    constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                                        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs;
+    if (ImGui::Begin("##fps_hud", nullptr, kFlags)) {
+        ImGui::Text("%.0f FPS | %u%%", fps, dynres::Percent());
+    }
+    ImGui::End();
+}
+
 void DrawUi(double fps) {
     game::g_fps = float(fps);
     ImGuiIO& io = ImGui::GetIO();
@@ -1179,9 +1204,16 @@ void DrawUi(double fps) {
     io.KeyRepeatRate = 0.1f;  // held arrows step ten times a second, ImGui's twenty is too fast for settings
     // scale the font with the output height
     io.FontGlobalScale = std::max(1.0f, io.DisplaySize.y / 720.0f);
+    DrawFpsOverlay(fps);
     if (MenuOpen()) {
+        ++g_open_frames;
         PollCapture();
         DrawPanel();
+        if (g_open_frames > 2 && !Capturing() && ImGui::IsKeyReleased(ImGuiKey_GamepadFaceRight)) {
+            ToggleMenu();
+        }
+    } else {
+        g_open_frames = 0;
     }
 }
 

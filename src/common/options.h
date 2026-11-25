@@ -21,7 +21,7 @@ struct Options {
     uint32_t anti_aliasing = 0;  // 0 off, 1 FXAA, 2 SSAA
     bool hdr = false;
     uint32_t draw_distance = 1;
-    bool dynamic_resolution = false;
+    bool dynamic_resolution = true;
     uint32_t dynamic_target_fps = 60;
     uint32_t dynamic_min_percent = 40;
     uint32_t dynamic_max_percent = 100;

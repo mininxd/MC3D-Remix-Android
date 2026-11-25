@@ -112,9 +112,8 @@ namespace app {
 namespace {
 
 const char* kModes[] = {"fullscreen", "borderless", "windowed"};
-// the defaults a settings file was written under: 2 has the frame rate unlimited and vsync off, which a file from
-// before takes once, its player's own choices kept from then on
-constexpr int kDefaults = 2;
+// the defaults a settings file was written under: 3 enables dynamic resolution and sets 70% render scale once.
+constexpr int kDefaults = 3;
 
 std::filesystem::path File() { return ExeDir() / kGame.settings; }
 
@@ -137,12 +136,14 @@ toml::table Table() {
     return t;
 }
 
-// a phone renders the console's frame at about 720p unless the settings say otherwise
-constexpr uint32_t kFirstRunRenderPercent = 67;
+// a phone renders at 70% default render scale unless settings or dynamic resolution override it
+constexpr uint32_t kFirstRunRenderPercent = 70;
 
 void PhoneFrameDefaults(Settings& s) {
+    s.render_percent = kFirstRunRenderPercent;
     s.fps_cap = 0;
     s.vsync = false;
+    game::Opt().dynamic_resolution = true;
 }
 
 }  // namespace
@@ -178,11 +179,12 @@ void Load() {
     s.vsync = t["vsync"].value_or(s.vsync);
     s.aniso = t["anisotropic_filtering"].value_or(s.aniso);
     s.join_ip = t["join_ip"].value_or(s.join_ip);
-    if (t["defaults"].value_or(int64_t(0)) < kDefaults) PhoneFrameDefaults(s);
+    const bool migrate_defaults = t["defaults"].value_or(int64_t(0)) < kDefaults;
     for (const Option& o : kGame.options) {
         if (o.flag) *o.flag = t[o.key].value_or(*o.flag);
         else *o.value = t[o.key].value_or(*o.value);
     }
+    if (migrate_defaults) PhoneFrameDefaults(s);
     if (kGame.load) kGame.load(&t);
 }
 
