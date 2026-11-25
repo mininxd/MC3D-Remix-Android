@@ -1128,7 +1128,7 @@ private:
 
     // draws
     void EnsureVertexShader(const State& s, const Assembled& a, DrawShaders& sh);
-    void EnsurePixelShader(const PixelKey& pk, DrawShaders& sh);
+    void EnsurePixelShader(const PixelKey& pk, DrawShaders& sh, bool signed_src);
     bool BindStageTextures(const State& s, DrawTextures& stages);
     VkImageView BindTexture(const State& s, int stage, DrawTextures& stages);
     bool GlowComposite(const State& s, const DrawTextures& stages) const;
@@ -2462,7 +2462,7 @@ void VulkanBackend::UpgradeTargetSigned(Target& t) {
     vkGetPhysicalDeviceFormatProperties(pd_, kSignedFmt, &fp);
     constexpr VkFormatFeatureFlags kNeed =
         VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT |
-        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
     if ((fp.optimalTilingFeatures & kNeed) != kNeed) return;
 
     Image fresh;
@@ -2648,14 +2648,41 @@ void VulkanBackend::EnsureVertexShader(const State& s, const Assembled& a, DrawS
     shader_src_[sh.vkey] = sh.vh;
 }
 
-void VulkanBackend::EnsurePixelShader(const PixelKey& pk, DrawShaders& sh) {
-    if (auto it = shader_src_.find(sh.pkey ^ kPixelKeySalt); it != shader_src_.end()) {
+constexpr uint64_t kSignedPixelSalt = 0x5164E5B1E4D00001ull;
+
+void VulkanBackend::EnsurePixelShader(const PixelKey& pk, DrawShaders& sh, bool signed_src) {
+    uint64_t key = sh.pkey ^ kPixelKeySalt ^ (signed_src ? kSignedPixelSalt : 0ull);
+    if (auto it = shader_src_.find(key); it != shader_src_.end()) {
         sh.ph = it->second;
         sh.ps = modules_[sh.ph];
         return;
     }
-    sh.ps = Module(PixelHlsl(pk), "main", vkshader::Stage::Pixel, sh.ph);
-    shader_src_[sh.pkey ^ kPixelKeySalt] = sh.ph;
+    std::string hlsl = PixelHlsl(pk);
+    if (signed_src) {
+        // Xbox NV2A D3DBLENDOP_REVSUBTRACTSIGNED (0xF005) and ADDSIGNED (0xF006) reinterpret
+        // each 8-bit unsigned fragment output channel as a 2's complement signed byte
+        // (0xFF -> -1/255, 0x00 -> 0, 0x7F -> +127/255, 0x80 -> -128/255). With an RGBA16F
+        // target, negative outputs pass unclamped into Vulkan blending so MC3D's headlight
+        // cones add +1/255 on back faces (0xF005: dst - (-1/255)) and cancel -1/255 on front
+        // faces (0xF006: dst + (-1/255)).
+        constexpr char kRet[] = "return outc;";
+        size_t pos = hlsl.rfind(kRet);
+        if (pos != std::string::npos) {
+            hlsl.replace(pos, sizeof(kRet) - 1,
+                         "{ float4 _u = floor(saturate(outc) * 255.0 + 0.5); "
+                         "outc = (_u - step(float4(128.0, 128.0, 128.0, 128.0), _u) * 256.0) / 255.0; } return outc;");
+        }
+    }
+    sh.ps = Module(hlsl, "main", vkshader::Stage::Pixel, sh.ph);
+    if (signed_src && sh.ps) {
+        static bool logged_signed = false;
+        if (!logged_signed) {
+            logged_signed = true;
+            LOGR("[OK] vulkan: compiled 2s-complement signed-blend pixel shader (hash=%016llX)",
+                 (unsigned long long)sh.ph);
+        }
+    }
+    shader_src_[key] = sh.ph;
 }
 
 constexpr float kUpscaledMin = 1.01f;
@@ -2893,7 +2920,10 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
     if (rt && ds && (rt->w != ds->w || rt->h != ds->h)) ds = nullptr;
     if (!rt && !ds) return;
     if (rt && LatchCpuWrite(*rt)) UploadTarget(*rt, s.rt);
-    if (rt && SimpleState(s, kMBlendEnable) && IsSignedBlendOp(SimpleState(s, kMBlendOp))) UpgradeTargetSigned(*rt);
+    const bool signed_blend =
+        rt && SimpleState(s, kMBlendEnable) && IsSignedBlendOp(SimpleState(s, kMBlendOp));
+    if (signed_blend) UpgradeTargetSigned(*rt);
+    const bool signed_src = signed_blend && rt->img.fmt == VK_FORMAT_R16G16B16A16_SFLOAT;
     draw_rt_ = rt;
     draw_ds_ = ds;
 
@@ -2907,7 +2937,7 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
     if (!game::Opt().bloom && GlowComposite(s, stages)) return;
     PixelKey pk = MakePixelKey(s, stages.info);
     sh.pkey = Hash(&pk, sizeof(pk));
-    EnsurePixelShader(pk, sh);
+    EnsurePixelShader(pk, sh, signed_src);
     if (!sh.vs || !sh.ps) return;
 
     PsoKey k;
