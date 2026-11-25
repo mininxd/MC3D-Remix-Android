@@ -50,6 +50,18 @@ constexpr VkFormat kBgra = VK_FORMAT_B8G8R8A8_UNORM;
 constexpr uint32_t kSetsPerPool = 1024;
 static_assert(sizeof(DrawConstants) <= kUboRange);
 
+const char* kClearHlsl = R"(
+cbuffer B : register(b1) { float4 col; };
+struct O { float4 p : SV_Position; };
+O vs(uint id : SV_VertexID) {
+    O o;
+    float2 t = float2((id << 1) & 2, id & 2);
+    o.p = float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
+    return o;
+}
+float4 psmain(O i) : SV_Target { return col; }
+)";
+
 const char* kBlitHlsl = R"(
 cbuffer B : register(b1) { float4 uvrect; float4 opts; };
 Texture2D img : register(t0);
@@ -257,11 +269,14 @@ VkBlendOp BlendOp(uint32_t v) {
     switch (v) {
         case 0x800A: return VK_BLEND_OP_SUBTRACT;
         case 0x800B: return VK_BLEND_OP_REVERSE_SUBTRACT;
+        case 0xF005: return VK_BLEND_OP_REVERSE_SUBTRACT;  // D3DBLENDOP_REVSUBTRACTSIGNED
         case 0x8007: return VK_BLEND_OP_MIN;
         case 0x8008: return VK_BLEND_OP_MAX;
-        default: return VK_BLEND_OP_ADD;
+        default: return VK_BLEND_OP_ADD;  // includes 0x8006 ADD and 0xF006 ADDSIGNED
     }
 }
+
+bool IsSignedBlendOp(uint32_t v) { return v == 0xF005 || v == 0xF006; }
 
 // D3DCMP_NEVER 0x200 to ALWAYS 0x207: VkCompareOp has the same order, and the shaders take the same numbers
 uint32_t CmpIndex(uint32_t v) { return v >= 0x200 && v <= 0x207 ? v - 0x200 : 7; }
@@ -1091,7 +1106,8 @@ private:
 
     // shaders and pipelines
     VkShaderModule Module(const std::string& src, const char* entry, vkshader::Stage stage, uint64_t& hash);
-    VkPipeline FullScreenPipeline(const char* hlsl, const char* ps_entry, VkFormat color, VkFormat depth, bool over);
+    VkPipeline FullScreenPipeline(const char* hlsl, const char* ps_entry, VkFormat color, VkFormat depth, bool over,
+                                  uint8_t wmask = 0xF);
     VkPipeline EnsurePipeline(const PsoKey& k, VkShaderModule vs, VkShaderModule ps);
     VkSampler Sampler(const VkSamplerCreateInfo& ci);
     VkSampler StageSampler(const State& s, int i, const DrawTextures& stages, bool clamp);
@@ -1099,6 +1115,7 @@ private:
     // targets
     Target* FindTarget(const Surface& s, bool depth);
     Target* EnsureTarget(const Surface& s, bool depth);
+    void UpgradeTargetSigned(Target& t);
     void ReleaseTarget(std::unordered_map<uint64_t, Target>::iterator it);
     void UploadTarget(Target& t, const Surface& s);
     bool PixelImage(Image& im, const std::vector<uint8_t>& px, uint32_t pitch, uint32_t w, uint32_t h);
@@ -2150,8 +2167,9 @@ VkShaderModule VulkanBackend::Module(const std::string& src, const char* entry, 
 
 // a full screen pass: the triangle from SV_VertexID, solid, no culling; depth set: writes depth only
 VkPipeline VulkanBackend::FullScreenPipeline(const char* hlsl, const char* ps_entry, VkFormat color, VkFormat depth,
-                                             bool over) {
-    uint64_t key = Hash(hlsl, std::strlen(hlsl), uint64_t(color) << 32 | uint64_t(depth) << 1 | (over ? 1 : 0));
+                                             bool over, uint8_t wmask) {
+    uint64_t key = Hash(hlsl, std::strlen(hlsl),
+                        uint64_t(color) << 32 | uint64_t(depth) << 5 | uint64_t(wmask & 0xF) << 1 | (over ? 1 : 0));
     key = Hash(ps_entry, std::strlen(ps_entry), key);
     if (auto it = pipelines_.find(key); it != pipelines_.end()) return it->second;
     uint64_t hv, hp;
@@ -2182,7 +2200,7 @@ VkPipeline VulkanBackend::FullScreenPipeline(const char* hlsl, const char* ps_en
         ds.depthTestEnable = ds.depthWriteEnable = depth != VK_FORMAT_UNDEFINED;
         ds.depthCompareOp = VK_COMPARE_OP_ALWAYS;
         VkPipelineColorBlendAttachmentState ba{};
-        ba.colorWriteMask = 0xF;
+        ba.colorWriteMask = wmask & 0xF;
         if (over) {
             ba.blendEnable = VK_TRUE;
             ba.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
@@ -2434,6 +2452,39 @@ Target* VulkanBackend::EnsureTarget(const Surface& s, bool depth) {
     return &ref;
 }
 
+// Xbox signed blend ops (D3DBLENDOP_REVSUBTRACTSIGNED / ADDSIGNED) accumulate signed values across passes
+// (e.g. volumetric headlight front/back face cancellation). UNORM targets clamp negative intermediates to 0,
+// so promote the colour target to RGBA16F on first signed blend while preserving its current pixels.
+void VulkanBackend::UpgradeTargetSigned(Target& t) {
+    constexpr VkFormat kSignedFmt = VK_FORMAT_R16G16B16A16_SFLOAT;
+    if (t.depth || t.img.fmt == kSignedFmt) return;
+    VkFormatProperties fp{};
+    vkGetPhysicalDeviceFormatProperties(pd_, kSignedFmt, &fp);
+    constexpr VkFormatFeatureFlags kNeed =
+        VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT |
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+    if ((fp.optimalTilingFeatures & kNeed) != kNeed) return;
+
+    Image fresh;
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                              VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if (!CreateImage(fresh, kSignedFmt, t.w, t.h, 1, 1, 1, usage, VK_IMAGE_VIEW_TYPE_2D)) return;
+    if (t.drawn) {
+        float uv[4] = {0, 0, 1, 1};
+        Blit(fresh, {{0, 0}, {t.w, t.h}}, t.img, uv, {.alpha = true});
+    } else {
+        Transition(fresh, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkClearColorValue zero{};
+        VkImageSubresourceRange r{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdClearColorImage(Cb(), fresh.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &r);
+    }
+    EndRender();
+    Retire(t.img);
+    Retire(t.fb);
+    t.img = std::move(fresh);
+    LOGR("[OK] vulkan: upgraded target 0x%08X (%ux%u) to RGBA16F for signed blend ops", t.data, t.gw, t.gh);
+}
+
 // BGRA pixels into a new w x h image, left readable
 bool VulkanBackend::PixelImage(Image& im, const std::vector<uint8_t>& px, uint32_t pitch, uint32_t w, uint32_t h) {
     if (!CreateImage(im, kBgra, w, h, 1, 1, 1, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
@@ -2552,7 +2603,7 @@ bool VulkanBackend::Shrink(Image& src, uint32_t w, uint32_t h, Image& down, uint
 // the target as a guest sized BGRA copy source: itself, or shrunk into down
 Image* VulkanBackend::CopySource(Target& t, Image& down) {
     if (t.depth) return nullptr;
-    if (t.w != t.gw || t.h != t.gh) {
+    if (t.w != t.gw || t.h != t.gh || t.img.fmt != kBgra) {
         uint32_t taps = uint32_t(std::ceil(float(t.w) / t.gw - 1e-3f));
         return Shrink(t.img, t.gw, t.gh, down, std::max(taps, 1u)) ? &down : nullptr;
     }
@@ -2842,6 +2893,7 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
     if (rt && ds && (rt->w != ds->w || rt->h != ds->h)) ds = nullptr;
     if (!rt && !ds) return;
     if (rt && LatchCpuWrite(*rt)) UploadTarget(*rt, s.rt);
+    if (rt && SimpleState(s, kMBlendEnable) && IsSignedBlendOp(SimpleState(s, kMBlendOp))) UpgradeTargetSigned(*rt);
     draw_rt_ = rt;
     draw_ds_ = ds;
 
@@ -2969,6 +3021,29 @@ void VulkanBackend::ClearTarget(Target& t, const State& s, uint32_t count, const
     } else {
         // pixels the CPU wrote before this clear go in first, a later upload would paint over the clear
         if (LatchCpuWrite(t)) UploadTarget(t, s.rt);
+        // Xbox D3DCLEAR_TARGET_* bits (0x10=R, 0x20=G, 0x40=B, 0x80=A) map 1:1 to Vulkan RGBA write mask bits.
+        uint8_t wmask = uint8_t((flags >> 4) & 0xF);
+        if (!wmask) return;
+        if (wmask != 0xF) {
+            float c[4];
+            Color(color, c);
+            Alloc cb = Constants(c, sizeof(c));
+            VkPipeline pipe = FullScreenPipeline(kClearHlsl, "psmain", t.img.fmt, VK_FORMAT_UNDEFINED, false, wmask);
+            if (!pipe) return;
+            const VkImageView views[4] = {};
+            const VkSampler samplers[4] = {};
+            VkDescriptorSet set = Set(views, samplers);
+            BeginRender(&t.img, nullptr);
+            vkCmdBindPipeline(Cb(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+            BindSet(set, cb.off, cb.off);
+            SetViewport(0, 0, float(t.w), float(t.h));
+            for (const VkClearRect& r : rs) {
+                SetScissor(r.rect.offset.x, r.rect.offset.y, r.rect.offset.x + int32_t(r.rect.extent.width),
+                           r.rect.offset.y + int32_t(r.rect.extent.height));
+                vkCmdDraw(Cb(), 3, 1, 0, 0);
+            }
+            return;
+        }
         ca.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         Color(color, ca.clearValue.color.float32);
         BeginRender(&t.img, nullptr);
@@ -3031,9 +3106,28 @@ void VulkanBackend::Copy(const Surface& src, const Surface& dst, uint32_t count,
                            {int32_t(dx), int32_t(dy), 0},
                            {r - l, b - t, 1}});
     }
-    if (!regions.empty())
-        vkCmdCopyImage(Cb(), src_t->img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_t->img.image,
-                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, uint32_t(regions.size()), regions.data());
+    if (!regions.empty()) {
+        if (src_t->img.fmt == dst_t->img.fmt) {
+            vkCmdCopyImage(Cb(), src_t->img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_t->img.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, uint32_t(regions.size()), regions.data());
+        } else {
+            std::vector<VkImageBlit> blits;
+            blits.reserve(regions.size());
+            for (const VkImageCopy& r : regions) {
+                VkImageBlit b{};
+                b.srcSubresource = r.srcSubresource;
+                b.srcOffsets[0] = r.srcOffset;
+                b.srcOffsets[1] = {r.srcOffset.x + int32_t(r.extent.width), r.srcOffset.y + int32_t(r.extent.height), 1};
+                b.dstSubresource = r.dstSubresource;
+                b.dstOffsets[0] = r.dstOffset;
+                b.dstOffsets[1] = {r.dstOffset.x + int32_t(r.extent.width), r.dstOffset.y + int32_t(r.extent.height), 1};
+                blits.push_back(b);
+            }
+            vkCmdBlitImage(Cb(), src_t->img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_t->img.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, uint32_t(blits.size()), blits.data(),
+                           VK_FILTER_NEAREST);
+        }
+    }
     dst_t->drawn = true;
 }
 

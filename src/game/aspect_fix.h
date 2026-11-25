@@ -25,11 +25,14 @@ void OnSwap();
 // Returns true iff the active D3D8 render target is the main backbuffer (not an offscreen RT).
 bool IsMainBackbuffer();
 
-// Hook helpers invoked by aspect_hooks.cpp and render_draw_hooks.cpp.
+// Hook helpers invoked by aspect_hooks.cpp, render_draw_hooks.cpp, and d3d8.cpp.
 void AdjustOrthoArgs(X86Context& ctx);
 void AdjustSetWindowArgs(X86Context& ctx);
 void HandleQuadBlit(X86Context& ctx, uint8_t* base, GuestFunc orig);
 void HandleFontBlit(X86Context& ctx, uint8_t* base, GuestFunc orig);
+// Maps D3DRECT left/right X coords when inside ScopedMinimapClear on the main backbuffer.
+// Returns true and writes mapped int32_t[4]*count rects into out_rects if remapping applied.
+bool MapClearRectsIfMinimap(uint32_t count, const uint8_t* rects, uint32_t* out_rects, uint32_t max_rects);
 
 // RAII thread-local scope guards for classifying draw & viewport contexts.
 class ScopedFullScreenBypass {
@@ -54,6 +57,14 @@ public:
     ~ScopedMinimapSubViewport();
     ScopedMinimapSubViewport(const ScopedMinimapSubViewport&) = delete;
     ScopedMinimapSubViewport& operator=(const ScopedMinimapSubViewport&) = delete;
+};
+
+class ScopedMinimapClear {
+public:
+    ScopedMinimapClear();
+    ~ScopedMinimapClear();
+    ScopedMinimapClear(const ScopedMinimapClear&) = delete;
+    ScopedMinimapClear& operator=(const ScopedMinimapClear&) = delete;
 };
 
 class ScopedRefPixelAspect {

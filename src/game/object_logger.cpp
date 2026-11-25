@@ -87,6 +87,7 @@ uint64_t BuildFastDrawSignature(const gpu::State& s, const char* tag, const char
                  (uint64_t(s.simple[gpu::kMSrcBlend / 4u] & 0xFFFFu) << 16) |
                  (s.simple[gpu::kMDestBlend / 4u] & 0xFFFEu) |
                  (s.simple[gpu::kMAlphaTestEnable / 4u] & 1u));
+    h = Mix64(h, s.simple[gpu::kMBlendOp / 4u] & 0xFFFFu);
     return h;
 }
 

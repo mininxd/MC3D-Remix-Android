@@ -32,13 +32,6 @@ extern "C" void sub_000D3690(X86Context& ctx, uint8_t* base) {
     __imp__sub_000D3690(ctx, base);
 }
 
-// 3b. Flash menu renderer entry (Main Menu / Pause) -> prevent double-narrowing on ultrawide.
-extern "C" void __imp__sub_000D3A9C(X86Context& ctx, uint8_t* base);
-extern "C" void sub_000D3A9C(X86Context& ctx, uint8_t* base) {
-    game::ui_aspect_rules::ScopedFlashMenu guard;
-    __imp__sub_000D3A9C(ctx, base);
-}
-
 // 4. gfxViewport::Ortho -> pillarbox full-screen 2D UI ortho bounds when inside sub_000D3690.
 extern "C" void __imp__sub_002D4D30(X86Context& ctx, uint8_t* base);
 extern "C" void sub_002D4D30(X86Context& ctx, uint8_t* base) {
@@ -70,6 +63,19 @@ extern "C" void __imp__sub_000BA210(X86Context& ctx, uint8_t* base);
 extern "C" void sub_000BA210(X86Context& ctx, uint8_t* base) {
     game::aspect_fix::ScopedMinimapSubViewport guard;
     __imp__sub_000BA210(ctx, base);
+}
+
+// 6b. Minimap / radar renderers -> map alpha-only D3DDevice_Clear rect to ultrawide minimap bounds.
+extern "C" void __imp__sub_000C3660(X86Context& ctx, uint8_t* base);
+extern "C" void sub_000C3660(X86Context& ctx, uint8_t* base) {
+    game::aspect_fix::ScopedMinimapClear guard;
+    __imp__sub_000C3660(ctx, base);
+}
+
+extern "C" void __imp__sub_000C3E70(X86Context& ctx, uint8_t* base);
+extern "C" void sub_000C3E70(X86Context& ctx, uint8_t* base) {
+    game::aspect_fix::ScopedMinimapClear guard;
+    __imp__sub_000C3E70(ctx, base);
 }
 
 // 7. HUD sprite helpers that divide width by [0x004B4E88] -> prevent double horizontal squish.

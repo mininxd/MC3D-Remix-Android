@@ -30,6 +30,7 @@ constexpr float kAspectEps  = 0.005f;
 thread_local int tl_fs_bypass_depth  = 0;
 thread_local int tl_ui_ortho_depth   = 0;
 thread_local int tl_minimap_vp_depth = 0;
+thread_local int tl_minimap_clear_depth = 0;
 thread_local int tl_ref_par_depth    = 0;
 
 std::atomic<float> g_last_logged_aspect{0.0f};
@@ -287,6 +288,24 @@ void HandleFontBlit(X86Context& ctx, uint8_t* base, GuestFunc orig) {
     WriteGuestF32(pos_va, orig_pos_x);
 }
 
+bool MapClearRectsIfMinimap(uint32_t count, const uint8_t* rects, uint32_t* out_rects, uint32_t max_rects) {
+    if (tl_minimap_clear_depth <= 0 || !rects || !out_rects || count == 0u || count > max_rects) return false;
+    if (!IsMainBackbuffer()) return false;
+    const AspectMetrics m = ComputeMetrics();
+    if (!m.ultrawide_ui || m.guest_w == 0u) return false;
+
+    for (uint32_t i = 0u; i < count; ++i) {
+        int32_t r[4];
+        std::memcpy(r, rects + static_cast<size_t>(i) * sizeof(r), sizeof(r));
+        const int32_t l = std::max<int32_t>(0, MapXInt(r[0], m) - 1);
+        const int32_t ri = std::min<int32_t>(static_cast<int32_t>(m.guest_w), MapXInt(r[2], m) + 1);
+        r[0] = l;
+        r[2] = std::max<int32_t>(l, ri);
+        std::memcpy(out_rects + static_cast<size_t>(i) * 4u, r, sizeof(r));
+    }
+    return true;
+}
+
 // ============================================================================
 // RAII Scope Guards
 // ============================================================================
@@ -299,6 +318,9 @@ ScopedUiOrtho::~ScopedUiOrtho() { --tl_ui_ortho_depth; }
 
 ScopedMinimapSubViewport::ScopedMinimapSubViewport() { ++tl_minimap_vp_depth; }
 ScopedMinimapSubViewport::~ScopedMinimapSubViewport() { --tl_minimap_vp_depth; }
+
+ScopedMinimapClear::ScopedMinimapClear() { ++tl_minimap_clear_depth; }
+ScopedMinimapClear::~ScopedMinimapClear() { --tl_minimap_clear_depth; }
 
 ScopedRefPixelAspect::ScopedRefPixelAspect() {
     ++tl_ref_par_depth;

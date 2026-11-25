@@ -12,6 +12,7 @@
 #include "common/options.h"
 #include "core/diag.h"
 #include "d3d/gpu_frame.h"
+#include "game/aspect_fix.h"
 #include "gpu/backend.h"
 #include "gpu/texture.h"
 #include "gpu/vertex.h"
@@ -664,6 +665,10 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
 HLE_STDCALL(D3DDevice_Clear, 6) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     const uint8_t* rects = a[0] && a[1] ? static_cast<const uint8_t*>(HostPtr(a[1])) : nullptr;
+    uint32_t mapped_rects[16 * 4];
+    if (rects && game::aspect_fix::MapClearRectsIfMinimap(a[0], rects, mapped_rects, 16)) {
+        rects = reinterpret_cast<const uint8_t*>(mapped_rects);
+    }
     if (g_backend) g_backend->Clear(g_state, a[0], rects, a[2], a[3], ArgF(a, 4), a[5]);
     return 0;
 }
