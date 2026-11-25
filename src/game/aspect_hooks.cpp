@@ -1,4 +1,5 @@
 #include "game/aspect_fix.h"
+#include "game/ui_aspect_rules.h"
 
 #include <cstdint>
 
@@ -29,6 +30,13 @@ extern "C" void __imp__sub_000D3690(X86Context& ctx, uint8_t* base);
 extern "C" void sub_000D3690(X86Context& ctx, uint8_t* base) {
     game::aspect_fix::ScopedUiOrtho guard;
     __imp__sub_000D3690(ctx, base);
+}
+
+// 3b. Flash menu renderer entry (Main Menu / Pause) -> prevent double-narrowing on ultrawide.
+extern "C" void __imp__sub_000D3A9C(X86Context& ctx, uint8_t* base);
+extern "C" void sub_000D3A9C(X86Context& ctx, uint8_t* base) {
+    game::ui_aspect_rules::ScopedFlashMenu guard;
+    __imp__sub_000D3A9C(ctx, base);
 }
 
 // 4. gfxViewport::Ortho -> pillarbox full-screen 2D UI ortho bounds when inside sub_000D3690.

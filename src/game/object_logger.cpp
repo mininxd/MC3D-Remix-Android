@@ -26,13 +26,15 @@ namespace objlog {
 
 namespace {
 
-constexpr size_t kMaxLoggedLoads = 2048;
-constexpr size_t kMaxLoggedDraws = 4096;
-constexpr size_t kMaxLoggedEffects = 1024;
-constexpr size_t kMaxLoggedAnomalies = 2048;
+constexpr size_t kMaxLoggedLoads = 1024;
+constexpr size_t kMaxLoggedDraws = 1536;
+constexpr size_t kMaxLoggedEffects = 192;
+constexpr size_t kMaxLoggedAnomalies = 512;
+constexpr size_t kMaxTlFastSeen = 2048;
 
 thread_local const char* tl_draw_tag = nullptr;
 thread_local uint32_t tl_draw_obj_va = 0;
+thread_local std::unordered_set<uint64_t> tl_fast_seen;
 
 std::once_flag g_init_once;
 std::unordered_set<uint64_t> g_logged_loads;
@@ -58,19 +60,14 @@ uint64_t Mix64(uint64_t h, uint64_t v) {
     return h;
 }
 
-uint64_t BuildDrawSignature(const gpu::State& s, const char* tag, uint32_t obj_va,
-                            const VertexProbeInfo& vp, const char* eff_name) {
+uint64_t BuildFastDrawSignature(const gpu::State& s, const char* tag, const char* eff_name) {
     uint64_t h = 0xCBF29CE484222325ull;
-    h = Mix64(h, obj_va);
     h = Mix64(h, tag ? uint64_t(std::uintptr_t(tag)) : 0ull);
     h = Mix64(h, eff_name ? uint64_t(std::uintptr_t(eff_name)) : 0ull);
-    h = Mix64(h, s.vs_handle ? s.vs_handle : vp.effective_fvf);
+    h = Mix64(h, s.vs_handle);
     h = Mix64(h, s.vs ? s.vs->hash : 0ull);
     h = Mix64(h, s.ps ? s.ps->handle : 0ull);
     h = Mix64(h, s.ps ? s.ps->def[54] : 0ull);
-    h = Mix64(h, s.streams[0].vb);
-    h = Mix64(h, s.streams[0].stride);
-    h = Mix64(h, s.index_buffer);
     for (uint32_t i = 0; i < 4u; ++i) {
         h = Mix64(h, (uint64_t(s.textures[i]) << 32) | s.palettes[i]);
     }
@@ -90,8 +87,17 @@ uint64_t BuildDrawSignature(const gpu::State& s, const char* tag, uint32_t obj_v
                  (uint64_t(s.simple[gpu::kMSrcBlend / 4u] & 0xFFFFu) << 16) |
                  (s.simple[gpu::kMDestBlend / 4u] & 0xFFFEu) |
                  (s.simple[gpu::kMAlphaTestEnable / 4u] & 1u));
+    return h;
+}
+
+uint64_t FinalizeDrawSignature(uint64_t fast_sig, const gpu::State& s, const VertexProbeInfo& vp) {
+    uint64_t h = fast_sig;
+    if (!s.vs_handle && vp.effective_fvf) h = Mix64(h, vp.effective_fvf);
     if (vp.has_vcol) {
-        h = Mix64(h, vp.all_white_rgb ? 0xFFFFFFFFull : (vp.first_argb & 0x00F0F0F0ull));
+        // Bucket vertex color by semantic class rather than raw fade ticks so fading particles
+        // and taillights do not saturate the log cap or bloat object_logs.txt.
+        const uint64_t vclass = vp.all_white_rgb ? 1ull : (((vp.first_argb >> 24) == 0u) ? 2ull : 3ull);
+        h = Mix64(h, vclass);
     }
     return h;
 }
@@ -223,8 +229,13 @@ void LogDrawState(const gpu::State& s) {
     const char* tag = tl_draw_tag ? tl_draw_tag : "APPLY";
     const uint32_t obj_va = tl_draw_obj_va;
     const char* eff_name = ActiveEffectName();
+    const uint64_t fast_sig = BuildFastDrawSignature(s, tag, eff_name);
+
+    // Lock-free fast path: skip vertex-buffer probing and IoMutex on already-logged draw states.
+    if (tl_fast_seen.find(fast_sig) != tl_fast_seen.end()) return;
+
     const VertexProbeInfo vp = ResolveVertexProbe(s);
-    const uint64_t sig = BuildDrawSignature(s, tag, obj_va, vp, eff_name);
+    const uint64_t sig = FinalizeDrawSignature(fast_sig, s, vp);
 
     std::lock_guard<std::mutex> lk(detail::IoMutex());
     const bool under_cap = (g_logged_draws.size() < kMaxLoggedDraws);
@@ -241,6 +252,7 @@ void LogDrawState(const gpu::State& s) {
             already_logged_normal = false;
         }
     }
+    if (tl_fast_seen.size() < kMaxTlFastSeen) tl_fast_seen.insert(fast_sig);
     if (already_logged_normal) return;
 
     std::array<StageTexInspection, 4> stages{};

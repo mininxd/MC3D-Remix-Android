@@ -549,10 +549,7 @@ X86_FUNC(sub_003C2933) {
     ctx.esp += 12;
 }
 
-X86_FUNC(sub_003C36E9) {
-    ctx.eax = 0;
-    ctx.esp += 20;
-}
+// sub_003C36E9 (IDirectSound::CreateSoundStream) is implemented in src/game/dsound_stream_bridge.cpp
 
 // Fatal error interceptor: logs original guest error message to logcat & crash log
 X86_FUNC(sub_00019070) {
@@ -1211,13 +1208,11 @@ X86_EXTERN_FUNC(__imp__sub_0001751A);
 X86_FUNC(sub_0001751A) {
     std::lock_guard<std::recursive_mutex> lock(g_guest_io_mutex);
     uint32_t hFile = X86_MEM32(ctx.esp + 4);
-    uint32_t lpBuffer = X86_MEM32(ctx.esp + 8);
     uint32_t nBytes = X86_MEM32(ctx.esp + 12);
-    uint32_t lpBytesRead = X86_MEM32(ctx.esp + 16);
     __imp__sub_0001751A(ctx, base);
-    uint32_t bytesRead = lpBytesRead ? X86_MEM32(lpBytesRead) : 0;
-    LOGI("guest: sub_0001751A (ReadFile) completed, handle=0x%08X, req=%u, read=%u, success=%u",
-         hFile, nBytes, bytesRead, ctx.eax);
+    if (!ctx.eax) {
+        LOGW("guest: sub_0001751A (ReadFile) failed, handle=0x%08X, req=%u", hFile, nBytes);
+    }
 }
 
 // sub_002D2850: Direct3D initialization and CDevice configuration (XDK 5849)

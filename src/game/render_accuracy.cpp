@@ -1,5 +1,6 @@
 #include "game/render_accuracy.h"
 #include "game/render_accuracy_internal.h"
+#include "game/car_lights_fix.h"
 #include "game/d3d_guest_sync.h"
 #include "game/deferred_tss_guard.h"
 #include "game/effect_probe.h"
@@ -79,6 +80,8 @@ std::unordered_map<PsCloneKey, std::shared_ptr<gpu::PixelShader>, PsCloneHash> g
 // Bounded per-shape diagnostic deduplication (tracked separately so [FF] menus never crowd out Garage [PROG] shaders).
 std::unordered_set<uint64_t> g_logged_ff;
 std::unordered_set<uint64_t> g_logged_prog;
+std::atomic<bool> g_logged_ff_full{false};
+std::atomic<bool> g_logged_prog_full{false};
 uint32_t g_last_s_tex[4] = {};
 
 inline bool UsesTextureArg(uint32_t arg) {
@@ -115,41 +118,54 @@ bool IsP8Format(const gpu::TextureDesc& d) {
 }
 
 // Pulls latest deferred RS/TSS from guest RAM so fixes operate on post-game state.
+// Uses one contiguous page-commitment check per block instead of 136 per-dword checks.
 void PullDeferredFromGuest(gpu::State& s) {
-    for (uint32_t st = 0; st < 4; ++st) {
-        for (uint32_t slot = 0; slot < kDeferredTssSlots; ++slot) {
-            uint32_t ea = addr::kD3dDeferredTss + st * 0x80u + slot * 4u;
-            if (CanAccessGuest(ea, 4)) s.tss[st][slot] = kernel::R32(ea);
+    if (CanAccessGuest(addr::kD3dDeferredTss, 4u * 0x80u)) {
+        const uint32_t* tss_base = static_cast<const uint32_t*>(kernel::HostPtr(addr::kD3dDeferredTss));
+        for (uint32_t st = 0; st < 4u; ++st) {
+            const uint32_t* row = tss_base + st * 32u;
+            std::memcpy(s.tss[st].data(), row, kDeferredTssSlots * sizeof(uint32_t));
+            s.tss[st][gpu::kTssTexCoordIndex] = row[gpu::kTssTexCoordIndex];
         }
-        uint32_t tci_ea = addr::kD3dDeferredTss + st * 0x80u + gpu::kTssTexCoordIndex * 4u;
-        if (CanAccessGuest(tci_ea, 4)) s.tss[st][gpu::kTssTexCoordIndex] = kernel::R32(tci_ea);
     }
-    for (uint32_t rs = gpu::kRsDeferredFirst; rs <= 135; ++rs) {
-        uint32_t ea = addr::kD3dRenderState + rs * 4u;
-        if (CanAccessGuest(ea, 4)) s.rs[rs] = kernel::R32(ea);
+    constexpr uint32_t kRsCount = 136u - gpu::kRsDeferredFirst;
+    const uint32_t rs_va = addr::kD3dRenderState + gpu::kRsDeferredFirst * 4u;
+    if (CanAccessGuest(rs_va, kRsCount * 4u)) {
+        const uint32_t* rs_base = static_cast<const uint32_t*>(kernel::HostPtr(rs_va));
+        std::memcpy(&s.rs[gpu::kRsDeferredFirst], rs_base, kRsCount * sizeof(uint32_t));
     }
 }
 
 void SyncStageTexturesAndPalettes(gpu::State& s, std::array<gpu::TextureDesc, 4>& tex_descs,
                                   std::array<bool, 4>& tex_ok) {
     const uint32_t pDev = SafeR32(addr::kD3dDevicePtr);
-    for (uint32_t st = 0; st < 4; ++st) {
-        const uint32_t dev_tex = pDev ? SafeR32(pDev + addr::kDevTextures + st * 4u) : 0;
-        const uint32_t dev_pal = pDev ? SafeR32(pDev + addr::kDevPalettes + st * 4u) : 0;
-        const uint32_t mc_pal  = SafeR32(addr::kMcPalettesShadow + st * 4u);
+    const uint32_t* dev_tex_arr = (pDev && CanAccessGuest(pDev + addr::kDevTextures, 16u))
+        ? static_cast<const uint32_t*>(kernel::HostPtr(pDev + addr::kDevTextures)) : nullptr;
+    const uint32_t* dev_pal_arr = (pDev && CanAccessGuest(pDev + addr::kDevPalettes, 16u))
+        ? static_cast<const uint32_t*>(kernel::HostPtr(pDev + addr::kDevPalettes)) : nullptr;
+    const uint32_t* mc_pal_arr = CanAccessGuest(addr::kMcPalettesShadow, 16u)
+        ? static_cast<const uint32_t*>(kernel::HostPtr(addr::kMcPalettesShadow)) : nullptr;
 
-        {
+    for (uint32_t st = 0; st < 4u; ++st) {
+        const uint32_t dev_tex = dev_tex_arr ? dev_tex_arr[st] : 0u;
+        const uint32_t dev_pal = dev_pal_arr ? dev_pal_arr[st] : 0u;
+        const uint32_t mc_pal  = mc_pal_arr ? mc_pal_arr[st] : 0u;
+
+        // ApplyRenderAccuracy already holds d3d::Lock(); update recovery cache only on change.
+        if (dev_tex != g_last_dev_tex[st] || s.textures[st] != g_last_s_tex[st] ||
+            dev_pal != g_last_dev_pal[st] || (s.textures[st] == 0u && dev_tex != 0u) ||
+            (s.palettes[st] == 0u && dev_pal != 0u)) {
             std::lock_guard<std::mutex> lk(g_cache_mu);
             const bool dev_changed = (dev_tex != g_last_dev_tex[st]);
-            const bool d3d_stale = (s.textures[st] != dev_tex) && (s.textures[st] == g_last_s_tex[st] || s.textures[st] == 0);
-            if ((dev_changed && d3d_stale && dev_tex != s.textures[st]) || (s.textures[st] == 0 && dev_tex != 0)) {
+            const bool d3d_stale = (s.textures[st] != dev_tex) && (s.textures[st] == g_last_s_tex[st] || s.textures[st] == 0u);
+            if ((dev_changed && d3d_stale && dev_tex != s.textures[st]) || (s.textures[st] == 0u && dev_tex != 0u)) {
                 s.textures[st] = dev_tex;
                 ++g_tex_recoveries;
             }
             g_last_dev_tex[st] = dev_tex;
             g_last_s_tex[st] = s.textures[st];
 
-            if ((dev_pal != g_last_dev_pal[st] && dev_pal != s.palettes[st]) || (s.palettes[st] == 0 && dev_pal != 0)) {
+            if ((dev_pal != g_last_dev_pal[st] && dev_pal != s.palettes[st]) || (s.palettes[st] == 0u && dev_pal != 0u)) {
                 s.palettes[st] = dev_pal;
                 ++g_pal_recoveries;
             }
@@ -396,13 +412,18 @@ void LogUniqueDrawState(const gpu::State& s, const std::array<gpu::TextureDesc, 
     if (g_swap_count.load(std::memory_order_relaxed) < 5) return;
 
     if (s.ps) {
+        if (g_logged_prog_full.load(std::memory_order_relaxed)) return;
         const uint32_t read_mask = ScanCombinerTexRegisterMask(s.ps->def);
         uint64_t sig = (uint64_t(s.ps->handle) << 32) ^ s.ps->def[54] ^ (uint64_t(read_mask) << 20);
         for (int i = 0; i < 4; ++i) {
             sig ^= (uint64_t(tex_ok[i] ? tex_descs[i].format : 0xFFu) << (24 + i * 8));
         }
         std::lock_guard<std::mutex> lk(g_cache_mu);
-        if (g_logged_prog.size() >= kMaxDiagProg || !g_logged_prog.insert(sig).second) return;
+        if (g_logged_prog.size() >= kMaxDiagProg) {
+            g_logged_prog_full.store(true, std::memory_order_relaxed);
+            return;
+        }
+        if (!g_logged_prog.insert(sig).second) return;
         LOGR("[INFO] render_accuracy[PROG] ps=%08X modes=%05X readMask=%X tex=(%08X:%s,%08X:%s,%08X:%s,%08X:%s) pal=(%08X,%08X)",
              s.ps->handle, s.ps->def[54], read_mask,
              s.textures[0], tex_ok[0] ? gpu::Format(tex_descs[0].format).name : "NONE",
@@ -411,6 +432,7 @@ void LogUniqueDrawState(const gpu::State& s, const std::array<gpu::TextureDesc, 
              s.textures[3], tex_ok[3] ? gpu::Format(tex_descs[3].format).name : "NONE",
              s.palettes[0], s.palettes[1]);
     } else {
+        if (g_logged_ff_full.load(std::memory_order_relaxed)) return;
         uint64_t sig = uint64_t(s.tss[0][gpu::kTssColorOp]) |
                        (uint64_t(s.tss[1][gpu::kTssColorOp]) << 8) |
                        (uint64_t(s.tss[2][gpu::kTssColorOp]) << 16) |
@@ -419,7 +441,11 @@ void LogUniqueDrawState(const gpu::State& s, const std::array<gpu::TextureDesc, 
             sig ^= (uint64_t(tex_ok[i] ? tex_descs[i].format : 0xFFu) << (32 + i * 8));
         }
         std::lock_guard<std::mutex> lk(g_cache_mu);
-        if (g_logged_ff.size() >= kMaxDiagFf || !g_logged_ff.insert(sig).second) return;
+        if (g_logged_ff.size() >= kMaxDiagFf) {
+            g_logged_ff_full.store(true, std::memory_order_relaxed);
+            return;
+        }
+        if (!g_logged_ff.insert(sig).second) return;
         LOGR("[INFO] render_accuracy[FF] cop=(%u,%u,%u) a1=(%u,%u,%u) a2=(%u,%u,%u) tex=(%08X:%s,%08X:%s) pal=%08X",
              s.tss[0][gpu::kTssColorOp], s.tss[1][gpu::kTssColorOp], s.tss[2][gpu::kTssColorOp],
              s.tss[0][gpu::kTssColorArg1], s.tss[1][gpu::kTssColorArg1], s.tss[2][gpu::kTssColorArg1],
@@ -498,6 +524,8 @@ void ApplyRenderAccuracy() {
     } else {
         SyncFixedFunctionStages(s, tex_ok);
     }
+
+    game::car_lights_fix::Apply(s);
 
     LogUniqueDrawState(s, tex_descs, tex_ok);
     game::objlog::LogDrawState(s);

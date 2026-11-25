@@ -655,7 +655,7 @@ uint32_t Apply(X86Context& ctx, uint8_t* base, uint32_t token) {
     }
     ApplyBlockToDevice(ctx, base, *blk);
     const uint64_t n = ++g_applied_count;
-    if (n <= 8u || (n % 5000u) == 0u) {
+    if (n <= 4u) {
         LOGR("[INFO] stateblock_hle: ApplyStateBlock #%llu tok=%08X ps=%d(%08X) vs=%d(%08X)",
              static_cast<unsigned long long>(n), token,
              blk->has_ps ? 1 : 0, blk->ps ? blk->ps->handle : 0u,

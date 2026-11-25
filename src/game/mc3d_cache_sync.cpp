@@ -1,6 +1,7 @@
 #include "game/mc3d_cache_sync.h"
 
 #include <cstdint>
+#include <cstring>
 #include <mutex>
 
 #include "game/d3d_guest_sync.h"
@@ -27,10 +28,12 @@ constexpr uint32_t kMcTssStageBytes = 0x80u;
 }  // namespace
 
 void SyncAndInvalidateAll() {
-    // 1. Force MC3D to miss texture, palette, PS, and VS shadow comparisons.
-    for (uint32_t i = 0; i < 4u; ++i) {
-        render_accuracy::SafeW32(render_accuracy::addr::kMcTexturesShadow + i * 4u, 0xFFFFFFFFu);
-        render_accuracy::SafeW32(render_accuracy::addr::kMcPalettesShadow + i * 4u, 0xFFFFFFFFu);
+    // 1. Force MC3D to miss texture, palette, PS, and VS shadow comparisons (single contiguous checks).
+    if (safe_mem::CanAccess(render_accuracy::addr::kMcTexturesShadow, 16u)) {
+        std::memset(kernel::HostPtr(render_accuracy::addr::kMcTexturesShadow), 0xFF, 16u);
+    }
+    if (safe_mem::CanAccess(render_accuracy::addr::kMcPalettesShadow, 16u)) {
+        std::memset(kernel::HostPtr(render_accuracy::addr::kMcPalettesShadow), 0xFF, 16u);
     }
     render_accuracy::SafeW32(render_accuracy::addr::kMcPsShadow, 0xFFFFFFFFu);
     render_accuracy::SafeW32(render_accuracy::addr::kMcVsShadow, 0xFFFFFFFFu);
@@ -49,11 +52,9 @@ void SyncAndInvalidateAll() {
         std::lock_guard<std::recursive_mutex> lock(d3d::Lock());
         gpu::State& s = d3d::State();
         d3d_sync::PullGuestDeferredToHost(s);
+        uint32_t* dst = static_cast<uint32_t*>(kernel::HostPtr(kMcTssShadowBase));
         for (uint32_t st = 0; st < 4u; ++st) {
-            const uint32_t stage_va = kMcTssShadowBase + st * kMcTssStageBytes;
-            for (uint32_t slot = 0; slot < gpu::kTssCount; ++slot) {
-                kernel::W32(stage_va + slot * 4u, s.tss[st][slot]);
-            }
+            std::memcpy(dst + st * 32u, s.tss[st].data(), gpu::kTssCount * sizeof(uint32_t));
         }
     }
 }

@@ -448,12 +448,12 @@ void Start() {
     audio::StartOutput(Render);
     // for a title that never calls DirectSoundDoWork: its callbacks come from here instead
     StartHostThread("dsound", [](X86Context& ctx) {
-        constexpr int64_t kPumpMs = 250;
+        constexpr int64_t kPumpMs = 12;
         for (;;) {
             std::vector<Done> done;
             {
                 std::unique_lock<std::recursive_mutex> lock(g_lock);
-                g_done_cv.wait_for(lock, std::chrono::milliseconds(50));
+                g_done_cv.wait_for(lock, std::chrono::milliseconds(8));
                 if (NowMs() - g_pumped < kPumpMs) continue;
                 done.assign(g_done.begin(), g_done.end());
                 g_done.clear();

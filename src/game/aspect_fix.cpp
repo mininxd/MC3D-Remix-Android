@@ -14,6 +14,7 @@
 #include "cpu/x86_ops.h"
 #include "game/guest_mem_safe.h"
 #include "game/render_accuracy_internal.h"
+#include "game/ui_aspect_rules.h"
 #include "image_symbols.h"
 #include "kernel/kernel.h"
 
@@ -77,7 +78,7 @@ AspectMetrics ComputeMetrics() {
 
     if (host_a > ui_ref + kAspectEps) {
         m.ultrawide_ui = true;
-        m.ui_sx = ui_ref / host_a;
+        m.ui_sx = ui_aspect_rules::AdjustScaleX(ui_ref / host_a, true);
         m.ui_x_pad = static_cast<float>(m.guest_w) * (1.0f - m.ui_sx) * 0.5f;
     }
     return m;
@@ -218,19 +219,10 @@ void HandleQuadBlit(X86Context& ctx, uint8_t* base, GuestFunc orig) {
         const int32_t sx1 = static_cast<int32_t>(saved_x1);
         const int32_t sy1 = static_cast<int32_t>(saved_y1);
 
-        // Preserve untextured full-screen fades (sub_0001F510 / sub_0001F890) edge-to-edge.
-        const bool covers_screen =
-            sx0 <= 0 && sy0 <= 0 &&
-            sx1 >= static_cast<int32_t>(m.guest_w) &&
-            sy1 >= static_cast<int32_t>(m.guest_h);
-        if (covers_screen) {
-            const uint32_t dev = safe_mem::Read32(render_accuracy::addr::kD3dDevicePtr, 0u);
-            const uint32_t dev_tex0 = dev ? safe_mem::Read32(dev + render_accuracy::addr::kDevTextures, 0u) : 0u;
-            const uint32_t mc_tex0  = safe_mem::Read32(render_accuracy::addr::kMcTexturesShadow, 0u);
-            if (dev_tex0 == 0u && mc_tex0 == 0u) {
-                orig(ctx, base);
-                return;
-            }
+        // Preserve full-screen fades and menu backdrop covers edge-to-edge.
+        if (ui_aspect_rules::ShouldKeepFullScreenQuad(sx0, sy0, sx1, sy1, m.guest_w, m.guest_h)) {
+            orig(ctx, base);
+            return;
         }
 
         const int32_t nx0 = MapXInt(sx0, m);

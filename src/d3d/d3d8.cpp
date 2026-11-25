@@ -1281,9 +1281,12 @@ void ApplyImmediateMethod(uint32_t m, uint32_t v) {
         a[last] = f;
         a[2] = 0;
         a[3] = 1;
-    } else if (m >= kMVertexData4UB && m < kMVertexData4UBEnd) {  // 4 bytes
+    } else if (m >= kMVertexData4UB && m < kMVertexData4UBEnd) {  // 4 bytes (Xbox D3DCOLOR 0xAARRGGBB -> RGBA float4)
         a += (m - kMVertexData4UB) / 4 * 4;
-        for (int c = 0; c < 4; c++) a[c] = (v >> c * 8 & 0xFF) / 255.0f;
+        a[2] = (v & 0xFF) / 255.0f;
+        a[1] = (v >> 8 & 0xFF) / 255.0f;
+        a[0] = (v >> 16 & 0xFF) / 255.0f;
+        a[3] = (v >> 24 & 0xFF) / 255.0f;
     } else if (m >= kMVertexData4F && m < kMVertexData4FEnd) {  // 4 floats
         uint32_t component = (m - kMVertexData4F) / 4 & 3;
         a += (m - kMVertexData4F) / 16 * 4;
