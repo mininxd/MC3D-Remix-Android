@@ -231,6 +231,43 @@ int OptionRow(const char* label, const char* value) {
     return step;
 }
 
+// label left, interactive slider right, aligned with OptionRow
+bool SliderRow(const char* label, int& value, int min_v, int max_v, const char* preview) {
+    RowBox box = MeasureRow();
+    ImGui::PushID(label);
+    bool changed = false;
+    ImGui::Selectable("##row", false, ImGuiSelectableFlags_AllowOverlap, ImVec2(box.row_w, box.row_h));
+    if (ImGui::IsItemFocused()) {
+        FillItem();
+        int step = 0;
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft)) step = -1;
+        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) || ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight)) step = 1;
+        if (step) {
+            int next = std::clamp(value + step * 5, min_v, max_v);
+            if (next != value) {
+                value = next;
+                changed = true;
+            }
+        }
+    }
+    RowLabel(box, label);
+    ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
+    float block_x = box.row_x + box.row_w - box.block_w;
+    ImGui::SetCursorPos(ImVec2(block_x, box.row_y));
+    ImGui::SetNextItemWidth(box.block_w);
+    if (ImGui::SliderInt("##slider", &value, min_v, max_v, "", ImGuiSliderFlags_AlwaysClamp)) {
+        changed = true;
+    }
+    float pad = (box.block_w - ImGui::CalcTextSize(preview).x) * 0.5f;
+    ImGui::SetCursorPos(ImVec2(block_x + std::max(pad, 0.0f), box.row_y));
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(preview);
+    ImGui::PopItemFlag();
+    ImGui::PopID();
+    EndRow(box);
+    return changed;
+}
+
 const char* OnOff(bool on) { return on ? "ON" : "OFF"; }
 
 void Flip(bool& on, int step) {
@@ -431,6 +468,10 @@ constexpr uint32_t kDynamicTargets[] = {30, 45, 60, 90, 120};
 
 // a resolution as percent of the screen's and its pixels
 void PercentText(uint32_t percent, char (&text)[64]) {
+    if (percent == 0) {
+        std::snprintf(text, sizeof(text), "0%% (MIN)");
+        return;
+    }
     Mode out = Output();
     std::snprintf(text, sizeof(text), "%u%% (%ux%u)", percent, out.width * percent / 100, out.height * percent / 100);
 }
@@ -440,8 +481,8 @@ bool StepDisplayRow(int id, int step, Settings& s, char (&text)[64]) {
     game::Options& o = game::Opt();
     switch (id) {
         case kRenderResolution: {
-            // 20% to 200% in steps of 5; greyed while the dynamic resolution has it, which it shows as it is now
-            if (step) s.render_percent = uint32_t(StepRange(int(s.render_percent), 20, 200, 5, step));
+            // 0% to 125% in steps of 5; greyed while the dynamic resolution has it, which it shows as it is now
+            if (step) s.render_percent = uint32_t(StepRange(int(s.render_percent), 0, 125, 5, step));
             PercentText(o.dynamic_resolution ? dynres::Percent() : s.render_percent, text);
             return true;
         }
@@ -803,8 +844,23 @@ void PollCapture() {
 bool CaptureFree() { return g_capture < 0 && ImGui::GetFrameCount() > g_capture_done + 1; }
 
 void ValueRow(const Row& r) {
-    int step = OptionRow(r.label, Ui(RowText(r.id, 0)).c_str());
-    if (step) RowText(r.id, step);
+    bool enabled = rows::Enabled(r);
+    if (!enabled) ImGui::BeginDisabled();
+    if (r.id == kRenderResolution) {
+        Settings& s = Get();
+        const game::Options& o = game::Opt();
+        int pct = int(std::clamp<uint32_t>(o.dynamic_resolution ? dynres::Percent() : s.render_percent, 0u, 125u));
+        char text[64];
+        PercentText(uint32_t(pct), text);
+        if (SliderRow(r.label, pct, 0, 125, text) && !o.dynamic_resolution) {
+            s.render_percent = uint32_t(pct);
+            Changed();
+        }
+    } else {
+        int step = OptionRow(r.label, Ui(RowText(r.id, 0)).c_str());
+        if (step) RowText(r.id, step);
+    }
+    if (!enabled) ImGui::EndDisabled();
 }
 
 void KeyRow(const Row& r) {
@@ -918,6 +974,10 @@ void DragScroll(float em) {
         dragging = false;
         glide = 0;
     }
+    if (ImGui::IsAnyItemActive() && !dragging) {
+        glide = 0;
+        return;
+    }
     if (ImGui::IsMouseDown(0) && inside) {
         if (!dragging && std::fabs(ImGui::GetMouseDragDelta(0).y) > em * 0.5f) dragging = true;
         if (!dragging) return;
@@ -949,12 +1009,27 @@ void DrawPanel() {
                                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoTitleBar;
     if (ImGui::Begin("##settings", nullptr, kFlags)) {
         const char* title = "CHEATS";
-        if (g_page == 0) title = "GRAPHICS OPTIONS";
+        if (g_page == 0) title = "GRAPHICS";
         else if (g_page == kTouchPage) title = "TOUCH CONTROLS";
         else if (g_page == kGeneralPage) title = "GENERAL";
         else if (g_page == kKeyboardPage) title = "MOUSE & KEYBOARD";
         else if (g_page == kCreditsPage) title = "CREDITS";
         DrawTitle(title);
+        if (g_page == 0 || g_page == kCheatsPage) {
+            float gap = ImGui::GetStyle().ItemSpacing.x;
+            float tw = em * 9.0f;
+            float start_x = ImGui::GetCursorPosX() + (ImGui::GetContentRegionAvail().x - (tw * 2.0f + gap)) * 0.5f;
+            ImGui::SetCursorPosX(std::max(start_x, ImGui::GetStyle().WindowPadding.x));
+            auto draw_tab = [&](const char* label, int page_id) {
+                bool active = (g_page == page_id);
+                if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_Header));
+                if (ImGui::Button(Ui(label).c_str(), ImVec2(tw, 0))) g_page = page_id;
+                if (active) ImGui::PopStyleColor();
+            };
+            draw_tab("GRAPHICS", 0);
+            ImGui::SameLine();
+            draw_tab("CHEATS", kCheatsPage);
+        }
         ImGui::Separator();
         float footer = ImGui::GetTextLineHeightWithSpacing() + ImGui::GetFrameHeightWithSpacing() + em;
         // a scrollbar a thumb can take, not the desktop's thin one
