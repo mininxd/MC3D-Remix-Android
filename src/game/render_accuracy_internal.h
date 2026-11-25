@@ -42,7 +42,10 @@ uint32_t SafeR32(uint32_t va, uint32_t fallback = 0);
 uint16_t SafeR16(uint32_t va, uint16_t fallback = 0);
 bool SafeW32(uint32_t va, uint32_t value);
 
-// Tracks PS_TEXTUREMODES set explicitly via SetRenderState vs SetPixelShader.
+// Installs safe kernel compatibility exports (e.g., ordinal 76 IoQueryVolumeInformation).
+void EnsureKernelCompatHooks();
+
+// Tracks state transitions & shadow synchronization.
 void NotifyPixelShaderSet(uint32_t ps_handle);
 void NotifyPaletteBound(uint32_t stage, uint32_t pal_va);
 void InvalidateMc3dStateShadows();

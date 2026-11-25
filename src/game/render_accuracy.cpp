@@ -34,7 +34,8 @@ namespace {
 
 constexpr uint32_t kPushGuardSentinel = 0xFEEDBABEu;
 constexpr uint32_t kDeferredTssSlots = 22;  // slots 0..21 synced by d3d8.cpp SyncDeferred()
-constexpr uint32_t kMaxDiagUnique = 48;
+constexpr uint32_t kMaxDiagFf   = 48;
+constexpr uint32_t kMaxDiagProg = 64;
 
 // D3D8 TSS enums / values matching Xbox XDK 5849 & shaders.cpp.
 constexpr uint32_t kTopDisable     = 1;
@@ -76,8 +77,10 @@ struct PsCloneHash {
 };
 std::unordered_map<PsCloneKey, std::shared_ptr<gpu::PixelShader>, PsCloneHash> g_ps_clones;
 
-// Bounded per-shape diagnostic deduplication.
-std::unordered_set<uint64_t> g_logged_shapes;
+// Bounded per-shape diagnostic deduplication (tracked separately so [FF] menus never crowd out Garage [PROG] shaders).
+std::unordered_set<uint64_t> g_logged_ff;
+std::unordered_set<uint64_t> g_logged_prog;
+uint32_t g_last_s_tex[4] = {};
 
 // Contiguous scratch ring for HLE DrawIndexedVerticesUP execution.
 constexpr uint32_t kDiupRingBytes = 4u << 20;
@@ -152,23 +155,20 @@ void SyncStageTexturesAndPalettes(gpu::State& s, std::array<gpu::TextureDesc, 4>
 
         {
             std::lock_guard<std::mutex> lk(g_cache_mu);
-            if (dev_tex != g_last_dev_tex[st]) {
-                s.textures[st] = dev_tex;
-                g_last_dev_tex[st] = dev_tex;
-                ++g_tex_recoveries;
-            } else if (s.textures[st] == 0 && dev_tex != 0) {
+            const bool dev_changed = (dev_tex != g_last_dev_tex[st]);
+            const bool d3d_stale = (s.textures[st] != dev_tex) && (s.textures[st] == g_last_s_tex[st] || s.textures[st] == 0);
+            if ((dev_changed && d3d_stale && dev_tex != s.textures[st]) || (s.textures[st] == 0 && dev_tex != 0)) {
                 s.textures[st] = dev_tex;
                 ++g_tex_recoveries;
             }
+            g_last_dev_tex[st] = dev_tex;
+            g_last_s_tex[st] = s.textures[st];
 
-            if (dev_pal != g_last_dev_pal[st]) {
-                s.palettes[st] = dev_pal;
-                g_last_dev_pal[st] = dev_pal;
-                ++g_pal_recoveries;
-            } else if (s.palettes[st] == 0 && dev_pal != 0) {
+            if ((dev_pal != g_last_dev_pal[st] && dev_pal != s.palettes[st]) || (s.palettes[st] == 0 && dev_pal != 0)) {
                 s.palettes[st] = dev_pal;
                 ++g_pal_recoveries;
             }
+            g_last_dev_pal[st] = dev_pal;
         }
 
         tex_ok[st] = TryDescribeTexture(s.textures[st], tex_descs[st]);
@@ -300,111 +300,143 @@ bool StageReadsTexture(const gpu::State& s, uint32_t st) {
     return false;
 }
 
+// Rewrites a color or alpha op slot when TEXTURE is unbound so binary blends
+// (MODULATE, ADD, etc.) pass through the non-texture operand cleanly instead
+// of squaring CURRENT*CURRENT or sampling constant white (1,1,1,1).
+bool RepairUnboundStageOp(gpu::State& s, uint32_t st, uint32_t op_slot,
+                          uint32_t a1_slot, uint32_t a2_slot, uint32_t a0_slot,
+                          uint32_t tex_fallback) {
+    const uint32_t op = s.tss[st][op_slot];
+    if (op <= kTopDisable) return false;
+
+    const uint32_t a1 = s.tss[st][a1_slot];
+    const uint32_t a2 = s.tss[st][a2_slot];
+    const uint32_t a0 = s.tss[st][a0_slot];
+    bool changed = false;
+
+    if (op == kTopSelectArg1) {
+        if (UsesTextureArg(a1)) {
+            WriteTss(s, st, a1_slot, ReplaceTextureArg(a1, tex_fallback));
+            changed = true;
+        }
+    } else if (op == kTopSelectArg2) {
+        if (UsesTextureArg(a2)) {
+            WriteTss(s, st, a2_slot, ReplaceTextureArg(a2, tex_fallback));
+            changed = true;
+        }
+    } else {
+        const bool t1 = UsesTextureArg(a1);
+        const bool t2 = UsesTextureArg(a2);
+        if (t1 && !t2) {
+            WriteTss(s, st, op_slot, kTopSelectArg2);
+            changed = true;
+        } else if (t2 && !t1) {
+            WriteTss(s, st, op_slot, kTopSelectArg1);
+            changed = true;
+        } else if (t1 && t2) {
+            WriteTss(s, st, op_slot, kTopSelectArg1);
+            WriteTss(s, st, a1_slot, ReplaceTextureArg(a1, tex_fallback));
+            changed = true;
+        }
+        if (UsesTextureArg(a0)) {
+            WriteTss(s, st, a0_slot, ReplaceTextureArg(a0, tex_fallback));
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+bool IsStagePassThrough(const gpu::State& s, uint32_t st) {
+    auto is_cur_pass = [&](uint32_t op, uint32_t a1, uint32_t a2) {
+        if (op == kTopDisable) return true;
+        if (op == kTopSelectArg1 && a1 == kTaCurrent) return true;
+        if (op == kTopSelectArg2 && a2 == kTaCurrent) return true;
+        return false;
+    };
+    return is_cur_pass(s.tss[st][gpu::kTssColorOp], s.tss[st][gpu::kTssColorArg1], s.tss[st][gpu::kTssColorArg2]) &&
+           is_cur_pass(s.tss[st][gpu::kTssAlphaOp], s.tss[st][gpu::kTssAlphaArg1], s.tss[st][gpu::kTssAlphaArg2]);
+}
+
 // Prevents fixed-function [FF] unbound texture stages (kTexNone -> CONST(1,1,1,1)) from
-// overwriting textured Stage 0 output or diffuse vertex shading with solid white.
+// overwriting textured Stage 0 output or diffuse vertex shading with solid white or cur*cur.
 void SyncFixedFunctionStages(gpu::State& s, const std::array<bool, 4>& tex_ok) {
-    // Stage 0 with no bound texture: replace SELECTARG1(TEXTURE) with DIFFUSE so
-    // vertex colors propagate instead of constant white (1,1,1,1).
     if (!tex_ok[0]) {
-        uint32_t cop0 = s.tss[0][gpu::kTssColorOp];
-        if (cop0 == kTopSelectArg1 && UsesTextureArg(s.tss[0][gpu::kTssColorArg1])) {
-            WriteTss(s, 0, gpu::kTssColorArg1, ReplaceTextureArg(s.tss[0][gpu::kTssColorArg1], kTaDiffuse));
-            ++g_ff_repairs;
-        } else if (cop0 == kTopSelectArg2 && UsesTextureArg(s.tss[0][gpu::kTssColorArg2])) {
-            WriteTss(s, 0, gpu::kTssColorArg2, ReplaceTextureArg(s.tss[0][gpu::kTssColorArg2], kTaDiffuse));
+        if (RepairUnboundStageOp(s, 0, gpu::kTssColorOp, gpu::kTssColorArg1, gpu::kTssColorArg2,
+                                 gpu::kTssColorArg0, kTaDiffuse)) {
             ++g_ff_repairs;
         }
-        uint32_t aop0 = s.tss[0][gpu::kTssAlphaOp];
-        if (aop0 == kTopSelectArg1 && UsesTextureArg(s.tss[0][gpu::kTssAlphaArg1])) {
-            WriteTss(s, 0, gpu::kTssAlphaArg1, ReplaceTextureArg(s.tss[0][gpu::kTssAlphaArg1], kTaDiffuse));
-            ++g_ff_repairs;
-        } else if (aop0 == kTopSelectArg2 && UsesTextureArg(s.tss[0][gpu::kTssAlphaArg2])) {
-            WriteTss(s, 0, gpu::kTssAlphaArg2, ReplaceTextureArg(s.tss[0][gpu::kTssAlphaArg2], kTaDiffuse));
+        if (RepairUnboundStageOp(s, 0, gpu::kTssAlphaOp, gpu::kTssAlphaArg1, gpu::kTssAlphaArg2,
+                                 gpu::kTssAlphaArg0, kTaDiffuse)) {
             ++g_ff_repairs;
         }
     }
 
-    // Stages 1..3: Xbox NV2A fixed-function treats unbound TEXTURE stages as disabled/pass-through
-    // instead of replacing CURRENT with white (1,1,1,1) as MakePixelKey/TexFetch does.
+    uint32_t active_stages = 1;
     for (uint32_t st = 1; st < 4; ++st) {
-        const uint32_t cop = s.tss[st][gpu::kTssColorOp];
-        if (cop <= kTopDisable) break;  // D3D8 stops stage chain at first ColorOp == DISABLE
-        if (tex_ok[st]) continue;
-
-        const bool any_later_tex = [&] {
-            for (uint32_t k = st + 1; k < 4; ++k) {
-                if (s.tss[k][gpu::kTssColorOp] <= kTopDisable) break;
-                if (tex_ok[k] || !StageReadsTexture(s, k)) return true;
+        if (s.tss[st][gpu::kTssColorOp] <= kTopDisable) break;
+        active_stages = st + 1;
+        if (!tex_ok[st]) {
+            if (RepairUnboundStageOp(s, st, gpu::kTssColorOp, gpu::kTssColorArg1, gpu::kTssColorArg2,
+                                     gpu::kTssColorArg0, kTaCurrent)) {
+                ++g_ff_repairs;
             }
-            return false;
-        }();
+            if (RepairUnboundStageOp(s, st, gpu::kTssAlphaOp, gpu::kTssAlphaArg1, gpu::kTssAlphaArg2,
+                                     gpu::kTssAlphaArg0, kTaCurrent)) {
+                ++g_ff_repairs;
+            }
+        }
+    }
 
-        if (!any_later_tex && StageReadsTexture(s, st)) {
+    for (uint32_t st = 1; st < active_stages; ++st) {
+        bool rest_have_work = false;
+        for (uint32_t k = st; k < active_stages; ++k) {
+            if (!IsStagePassThrough(s, k)) {
+                rest_have_work = true;
+                break;
+            }
+        }
+        if (!rest_have_work) {
             WriteTss(s, st, gpu::kTssColorOp, kTopDisable);
             WriteTss(s, st, gpu::kTssAlphaOp, kTopDisable);
             ++g_ff_repairs;
             break;
-        }
-
-        if (UsesTextureArg(s.tss[st][gpu::kTssColorArg1])) {
-            WriteTss(s, st, gpu::kTssColorArg1, ReplaceTextureArg(s.tss[st][gpu::kTssColorArg1], kTaCurrent));
-            ++g_ff_repairs;
-        }
-        if (UsesTextureArg(s.tss[st][gpu::kTssColorArg2])) {
-            WriteTss(s, st, gpu::kTssColorArg2, ReplaceTextureArg(s.tss[st][gpu::kTssColorArg2], kTaCurrent));
-            ++g_ff_repairs;
-        }
-        if (UsesTextureArg(s.tss[st][gpu::kTssColorArg0])) {
-            WriteTss(s, st, gpu::kTssColorArg0, ReplaceTextureArg(s.tss[st][gpu::kTssColorArg0], kTaCurrent));
-            ++g_ff_repairs;
-        }
-        if (UsesTextureArg(s.tss[st][gpu::kTssAlphaArg1])) {
-            WriteTss(s, st, gpu::kTssAlphaArg1, ReplaceTextureArg(s.tss[st][gpu::kTssAlphaArg1], kTaCurrent));
-            ++g_ff_repairs;
-        }
-        if (UsesTextureArg(s.tss[st][gpu::kTssAlphaArg2])) {
-            WriteTss(s, st, gpu::kTssAlphaArg2, ReplaceTextureArg(s.tss[st][gpu::kTssAlphaArg2], kTaCurrent));
-            ++g_ff_repairs;
-        }
-        if (UsesTextureArg(s.tss[st][gpu::kTssAlphaArg0])) {
-            WriteTss(s, st, gpu::kTssAlphaArg0, ReplaceTextureArg(s.tss[st][gpu::kTssAlphaArg0], kTaCurrent));
-            ++g_ff_repairs;
         }
     }
 }
 
 void LogUniqueDrawState(const gpu::State& s, const std::array<gpu::TextureDesc, 4>& tex_descs,
                         const std::array<bool, 4>& tex_ok) {
-    if (g_swap_count.load(std::memory_order_relaxed) < 5) return;  // skip earliest splash frames
-    uint64_t sig = s.ps ? (uint64_t(s.ps->handle) << 32) ^ s.ps->def[54]
-                        : (uint64_t(s.tss[0][gpu::kTssColorOp]) |
-                           (uint64_t(s.tss[1][gpu::kTssColorOp]) << 8) |
-                           (uint64_t(s.tss[2][gpu::kTssColorOp]) << 16) |
-                           (uint64_t(s.tss[0][gpu::kTssColorArg1]) << 24));
-    for (int i = 0; i < 4; ++i) {
-        sig ^= (uint64_t(tex_ok[i] ? tex_descs[i].format : 0xFFu) << (32 + i * 8));
-        if (s.textures[i] == 0 && ((s.ps && ((ScanCombinerTexRegisterMask(s.ps->def) >> i) & 1u)) ||
-                                   (!s.ps && StageReadsTexture(s, uint32_t(i))))) {
-            sig ^= (1ull << (56 + i));
-        }
-    }
-
-    std::lock_guard<std::mutex> lk(g_cache_mu);
-    if (g_logged_shapes.size() >= kMaxDiagUnique || !g_logged_shapes.insert(sig).second) return;
+    if (g_swap_count.load(std::memory_order_relaxed) < 5) return;
 
     if (s.ps) {
+        const uint32_t read_mask = ScanCombinerTexRegisterMask(s.ps->def);
+        uint64_t sig = (uint64_t(s.ps->handle) << 32) ^ s.ps->def[54] ^ (uint64_t(read_mask) << 20);
+        for (int i = 0; i < 4; ++i) {
+            sig ^= (uint64_t(tex_ok[i] ? tex_descs[i].format : 0xFFu) << (24 + i * 8));
+        }
+        std::lock_guard<std::mutex> lk(g_cache_mu);
+        if (g_logged_prog.size() >= kMaxDiagProg || !g_logged_prog.insert(sig).second) return;
         LOGR("render_accuracy[PROG] ps=%08X modes=%05X readMask=%X tex=(%08X:%s,%08X:%s,%08X:%s,%08X:%s) pal=(%08X,%08X)",
-             s.ps->handle, s.ps->def[54], ScanCombinerTexRegisterMask(s.ps->def),
+             s.ps->handle, s.ps->def[54], read_mask,
              s.textures[0], tex_ok[0] ? gpu::Format(tex_descs[0].format).name : "NONE",
              s.textures[1], tex_ok[1] ? gpu::Format(tex_descs[1].format).name : "NONE",
              s.textures[2], tex_ok[2] ? gpu::Format(tex_descs[2].format).name : "NONE",
              s.textures[3], tex_ok[3] ? gpu::Format(tex_descs[3].format).name : "NONE",
              s.palettes[0], s.palettes[1]);
     } else {
-        LOGR("render_accuracy[FF] cop=(%u,%u,%u,%u) arg1=(%u,%u,%u) tex=(%08X:%s,%08X:%s) pal=%08X",
-             s.tss[0][gpu::kTssColorOp], s.tss[1][gpu::kTssColorOp],
-             s.tss[2][gpu::kTssColorOp], s.tss[3][gpu::kTssColorOp],
+        uint64_t sig = uint64_t(s.tss[0][gpu::kTssColorOp]) |
+                       (uint64_t(s.tss[1][gpu::kTssColorOp]) << 8) |
+                       (uint64_t(s.tss[2][gpu::kTssColorOp]) << 16) |
+                       (uint64_t(s.tss[0][gpu::kTssColorArg1]) << 24);
+        for (int i = 0; i < 2; ++i) {
+            sig ^= (uint64_t(tex_ok[i] ? tex_descs[i].format : 0xFFu) << (32 + i * 8));
+        }
+        std::lock_guard<std::mutex> lk(g_cache_mu);
+        if (g_logged_ff.size() >= kMaxDiagFf || !g_logged_ff.insert(sig).second) return;
+        LOGR("render_accuracy[FF] cop=(%u,%u,%u) a1=(%u,%u,%u) a2=(%u,%u,%u) tex=(%08X:%s,%08X:%s) pal=%08X",
+             s.tss[0][gpu::kTssColorOp], s.tss[1][gpu::kTssColorOp], s.tss[2][gpu::kTssColorOp],
              s.tss[0][gpu::kTssColorArg1], s.tss[1][gpu::kTssColorArg1], s.tss[2][gpu::kTssColorArg1],
+             s.tss[0][gpu::kTssColorArg2], s.tss[1][gpu::kTssColorArg2], s.tss[2][gpu::kTssColorArg2],
              s.textures[0], tex_ok[0] ? gpu::Format(tex_descs[0].format).name : "NONE",
              s.textures[1], tex_ok[1] ? gpu::Format(tex_descs[1].format).name : "NONE",
              s.palettes[0]);
@@ -655,9 +687,56 @@ void OnSwapDiagnostics() {
     }
 }
 
+void EnsureKernelCompatHooks() {
+    static std::once_flag k_once;
+    std::call_once(k_once, [] {
+        // Override ordinal 76 (IoQueryVolumeInformation) with proper XDK argument order:
+        // NTSTATUS IoQueryVolumeInformation(PFILE_OBJECT FileObj, ULONG FsInfoClass, ULONG Len, PVOID Out, PULONG RetLen)
+        kernel::RegisterExport(76, "IoQueryVolumeInformation", [](X86Context& ctx, uint8_t*) {
+            const uint32_t cls = SafeR32(ctx.esp + 8u);
+            const uint32_t len = SafeR32(ctx.esp + 12u);
+            const uint32_t out = SafeR32(ctx.esp + 16u);
+            const uint32_t ret_len = SafeR32(ctx.esp + 20u);
+            uint32_t written = 0;
+            uint32_t status = 0;
+
+            if (out && len && CanAccessGuest(out, len)) {
+                std::memset(kernel::HostPtr(out), 0, len);
+                if (cls == 5 /* FileFsAttributeInformation */ && len >= 16) {
+                    kernel::W32(out + 0, 0);
+                    kernel::W32(out + 4, 42);
+                    kernel::W32(out + 8, 4);
+                    kernel::W32(out + 12, 0x58544146u);  // "FATX"
+                    written = 16;
+                } else if (cls == 1 /* FileFsVolumeInformation */ && len >= 16) {
+                    kernel::W32(out + 8, 0x12345678u);
+                    written = 16;
+                } else if (cls == 3 /* FileFsSizeInformation */ && len >= 24) {
+                    kernel::W32(out + 0, 0x00100000u);
+                    kernel::W32(out + 8, 0x00080000u);
+                    kernel::W32(out + 16, 32u);
+                    kernel::W32(out + 20, 512u);
+                    written = 24;
+                } else if (cls == 4 /* FileFsDeviceInformation */ && len >= 8) {
+                    kernel::W32(out + 0, 7u);
+                    written = 8;
+                } else {
+                    status = 0xC000000Du;
+                }
+            } else {
+                status = 0xC000000Du;
+            }
+            if (ret_len) SafeW32(ret_len, written);
+            kernel::Return(ctx, status, 5);
+        });
+        LOGR("render_accuracy: installed fixed IoQueryVolumeInformation (ordinal 76) export");
+    });
+}
+
 void InitRenderAccuracy() {
     std::call_once(g_init_once, [] {
         g_initialized.store(true, std::memory_order_release);
+        EnsureKernelCompatHooks();
         LOGR("render_accuracy: initialized (MC3DR Xbox D3D8/NV2A HLE+Combiner Accuracy Engine)");
     });
 }

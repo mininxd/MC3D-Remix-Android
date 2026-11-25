@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "cpu/x86_context.h"
+#include "cpu/x86_ops.h"
 #include "xdk/hle.h"
 
 // Helpers generating clean strong wrappers around generated X86_WEAK_FUNC symbols.
@@ -150,22 +151,39 @@ WRAP_POST(sub_0004EB10)
 WRAP_POST(sub_0004EBDD)
 WRAP_POST(sub_0004ED67)
 WRAP_POST(sub_002D17E0)
-WRAP_POST(sub_002D25C0)
-WRAP_POST(sub_002D25CA)
-WRAP_POST(sub_002D2768)
-WRAP_POST(sub_002D3130)
-WRAP_POST(sub_00336320)
-WRAP_POST(sub_001C23E0)
-WRAP_POST(sub_000E4F30)
-WRAP_POST(sub_001B9A60)
-WRAP_POST(sub_0004FDC0)
-WRAP_POST(sub_000DCF70)
-WRAP_POST(sub_0003BF50)
-WRAP_POST(sub_00093C80)
-WRAP_POST(sub_00093D32)
-WRAP_POST(sub_000E2B90)
-WRAP_POST(sub_000E4340)
-WRAP_POST(sub_000E45C0)
-WRAP_POST(sub_0003C610)
-WRAP_POST(sub_000E5230)
-WRAP_POST(sub_002D21D0)
+
+// ============================================================================
+// 6. XAPILIB File Size Compatibility Fix (avoids broken game.cpp ord 76)
+// ============================================================================
+
+// sub_00017A60 = GetFileSize(HANDLE hFile), stdcall (ret 0x04).
+// Uses NtQueryInformationFile (via sub_00017A22 GetFileSizeEx) instead of
+// IoQueryVolumeInformation (ordinal 76) whose args are swapped in game.cpp.
+extern "C" void sub_00017A22(X86Context& ctx, uint8_t* base);
+extern "C" void sub_00017A60(X86Context& ctx, uint8_t* base) {
+    game::render_accuracy::EnsureKernelCompatHooks();
+    const uint32_t hFile = game::render_accuracy::SafeR32(ctx.esp + 4u);
+    const uint32_t saved_ebp = ctx.ebp;
+    const uint32_t saved_ebx = ctx.ebx;
+    const uint32_t saved_esi = ctx.esi;
+    const uint32_t saved_edi = ctx.edi;
+
+    ctx.esp -= 8u;
+    const uint32_t out_size_va = ctx.esp;
+    game::render_accuracy::SafeW32(out_size_va, 0u);
+    game::render_accuracy::SafeW32(out_size_va + 4u, 0u);
+
+    X86_PUSH32(out_size_va);
+    X86_PUSH32(hFile);
+    X86_PUSH32(0u);
+    sub_00017A22(ctx, base);  // stdcall ret 0x08
+
+    const uint32_t result = (ctx.eax != 0) ? game::render_accuracy::SafeR32(out_size_va) : 0xFFFFFFFFu;
+    ctx.esp += 8u;
+    ctx.eax = result;
+    ctx.ebp = saved_ebp;
+    ctx.ebx = saved_ebx;
+    ctx.esi = saved_esi;
+    ctx.edi = saved_edi;
+    ctx.esp += 8u;  // ret 0x04
+}
