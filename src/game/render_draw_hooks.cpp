@@ -1,5 +1,6 @@
 #include "game/render_accuracy.h"
 #include "game/render_accuracy_internal.h"
+#include "game/object_logger.h"
 
 #include <cstdint>
 #include <cstring>
@@ -99,14 +100,23 @@ extern "C" void sub_002D2990(X86Context& ctx, uint8_t* base) {
 // 3. All MC3D Indexed & User-Pointer Draw Dispatchers
 // ============================================================================
 
-WRAP_PRE(sub_000E74A0)
-WRAP_PRE(sub_000E74E0)
+#define WRAP_DRAW_OBJ(name)                                                   \
+    extern "C" void __imp__##name(X86Context& ctx, uint8_t* base);            \
+    extern "C" void name(X86Context& ctx, uint8_t* base) {                    \
+        game::objlog::SetDrawHint(#name, ctx.ecx);                            \
+        game::render_accuracy::ApplyRenderAccuracy();                         \
+        __imp__##name(ctx, base);                                             \
+        game::objlog::ClearDrawHint();                                        \
+    }
+
+WRAP_DRAW_OBJ(sub_000E74A0)
+WRAP_DRAW_OBJ(sub_000E74E0)
 WRAP_POST(sub_000E3650)
-WRAP_PRE(sub_00051410)
-WRAP_PRE(sub_000988A0)
+WRAP_DRAW_OBJ(sub_00051410)
+WRAP_DRAW_OBJ(sub_000988A0)
 WRAP_POST(sub_002D17C0)
-WRAP_PRE(sub_002D6830)
-WRAP_PRE(sub_002D6A18)
+WRAP_DRAW_OBJ(sub_002D6830)
+WRAP_DRAW_OBJ(sub_002D6A18)
 
 // ============================================================================
 // 4. All MC3D Pushbuffer EndPush Callers (10/10) + Immediate Mode Begin/End
@@ -150,7 +160,12 @@ WRAP_POST(sub_00032E30)
 WRAP_POST(sub_0004EB10)
 WRAP_POST(sub_0004EBDD)
 WRAP_POST(sub_0004ED67)
-WRAP_POST(sub_002D17E0)
+extern "C" void __imp__sub_002D17E0(X86Context& ctx, uint8_t* base);
+extern "C" void sub_002D17E0(X86Context& ctx, uint8_t* base) {
+    __imp__sub_002D17E0(ctx, base);
+    game::render_accuracy::ApplyRenderAccuracy();
+    game::render_accuracy::OnSwapDiagnostics();
+}
 
 // ============================================================================
 // 6. XAPILIB File Size Compatibility Fix (avoids broken game.cpp ord 76)

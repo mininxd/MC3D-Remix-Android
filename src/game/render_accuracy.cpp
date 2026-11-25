@@ -1,5 +1,6 @@
 #include "game/render_accuracy.h"
 #include "game/render_accuracy_internal.h"
+#include "game/object_logger.h"
 
 #include <algorithm>
 #include <array>
@@ -347,6 +348,8 @@ bool RepairUnboundStageOp(gpu::State& s, uint32_t st, uint32_t op_slot,
 }
 
 bool IsStagePassThrough(const gpu::State& s, uint32_t st) {
+    // Preserve stages writing into D3DTA_TEMP (5) so downstream stages reading TEMP do not receive (0,0,0,0).
+    if (s.tss[st][gpu::kTssColorOp] > kTopDisable && s.tss[st][gpu::kTssResultArg] == 5u) return false;
     auto is_cur_pass = [&](uint32_t op, uint32_t a1, uint32_t a2) {
         if (op == kTopDisable) return true;
         if (op == kTopSelectArg1 && a1 == kTaCurrent) return true;
@@ -671,9 +674,15 @@ void ApplyRenderAccuracy() {
     }
 
     LogUniqueDrawState(s, tex_descs, tex_ok);
+    game::objlog::LogDrawState(s);
+}
+
+uint32_t GetCombinerTexReadMask(const uint32_t* def) {
+    return def ? ScanCombinerTexRegisterMask(def) : 0u;
 }
 
 void OnSwapDiagnostics() {
+    game::objlog::OnSwapSummary();
     const uint64_t f = ++g_swap_count;
     if (f == 1 || (f % 300u) == 0u) {
         LOGR("render_accuracy: swap=%llu apply=%llu ffFix=%llu psFix=%llu texFix=%llu palFix=%llu push=%llu",
@@ -737,6 +746,7 @@ void InitRenderAccuracy() {
     std::call_once(g_init_once, [] {
         g_initialized.store(true, std::memory_order_release);
         EnsureKernelCompatHooks();
+        game::objlog::Init();
         LOGR("render_accuracy: initialized (MC3DR Xbox D3D8/NV2A HLE+Combiner Accuracy Engine)");
     });
 }

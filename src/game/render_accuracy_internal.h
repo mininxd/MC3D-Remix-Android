@@ -54,6 +54,7 @@ void InvalidateMc3dStateShadows();
 void RecordPushSpanBegin(uint32_t begin_va, uint32_t max_dwords);
 void FlushCapturedPushSpan(X86Context& ctx, uint8_t* base, uint32_t explicit_end, const char* tag);
 void OnSwapDiagnostics();
+uint32_t GetCombinerTexReadMask(const uint32_t* def);
 
 }  // namespace render_accuracy
 }  // namespace game
