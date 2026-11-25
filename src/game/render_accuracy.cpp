@@ -1,5 +1,6 @@
 #include "game/render_accuracy.h"
 #include "game/render_accuracy_internal.h"
+#include "game/d3d_guest_sync.h"
 #include "game/deferred_tss_guard.h"
 #include "game/object_logger.h"
 
@@ -526,6 +527,8 @@ bool SafeW32(uint32_t va, uint32_t value) {
 }
 
 void NotifyPixelShaderSet(uint32_t /*ps_handle*/) {
+    std::lock_guard<std::recursive_mutex> lock(d3d::Lock());
+    d3d_sync::MirrorHostStateToGuest(d3d::State());
 }
 
 void NotifyPaletteBound(uint32_t stage, uint32_t pal_va) {
@@ -536,12 +539,13 @@ void NotifyPaletteBound(uint32_t stage, uint32_t pal_va) {
 }
 
 void InvalidateMc3dStateShadows() {
-    // Force MC3D to miss shadow comparisons and issue D3D SetTexture/SetPalette/SetPS next draw.
+    // Force MC3D to miss shadow comparisons and issue D3D SetTexture/SetPalette/SetPS/SetVS next draw.
     for (uint32_t i = 0; i < 4; ++i) {
         SafeW32(addr::kMcTexturesShadow + i * 4u, 0xFFFFFFFFu);
         SafeW32(addr::kMcPalettesShadow + i * 4u, 0xFFFFFFFFu);
     }
     SafeW32(addr::kMcPsShadow, 0xFFFFFFFFu);
+    SafeW32(addr::kMcVsShadow, 0xFFFFFFFFu);
 }
 
 void RecordPushSpanBegin(uint32_t begin_va, uint32_t max_dwords) {
@@ -668,6 +672,7 @@ void ApplyRenderAccuracy() {
     gpu::State& s = d3d::State();
 
     PullDeferredFromGuest(s);
+    d3d_sync::MirrorHostStateToGuest(s);
 
     std::array<gpu::TextureDesc, 4> tex_descs{};
     std::array<bool, 4> tex_ok{};

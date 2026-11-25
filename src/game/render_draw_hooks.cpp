@@ -1,7 +1,9 @@
 #include "game/render_accuracy.h"
 #include "game/render_accuracy_internal.h"
 #include "game/deferred_tss_guard.h"
+#include "game/guest_mem_safe.h"
 #include "game/object_logger.h"
+#include "game/stateblock_hle.h"
 
 #include <cstdint>
 #include <cstring>
@@ -64,13 +66,7 @@ extern "C" void sub_00416390(X86Context& ctx, uint8_t* base) {
     game::render_accuracy::RecordPushSpanBegin(ctx.eax, req);
 }
 
-// D3DDevice_ApplyStateBlock(token) & deferred restore helpers
-extern "C" void __imp__sub_00416DFF(X86Context& ctx, uint8_t* base);
-extern "C" void sub_00416DFF(X86Context& ctx, uint8_t* base) {
-    __imp__sub_00416DFF(ctx, base);
-    game::render_accuracy::InvalidateMc3dStateShadows();
-}
-
+// D3DDevice_ApplyStateBlock (sub_00416DFF) and other StateBlock APIs live in stateblock_hooks.cpp.
 WRAP_POST(sub_00418060)
 WRAP_POST(sub_00417F40)
 WRAP_POST(sub_00414830)
@@ -155,18 +151,33 @@ extern "C" void sub_002D1810(X86Context& ctx, uint8_t* base) {
     game::render_accuracy::InvalidateMc3dStateShadows();
 }
 
-WRAP_POST(sub_0037F096)
+// ID3DXEffect state assignment applier: forwards light touches during StateBlock recording.
+extern "C" void __imp__sub_0037F096(X86Context& ctx, uint8_t* base);
+extern "C" void sub_0037F096(X86Context& ctx, uint8_t* base) {
+    const bool recording = game::stateblock::IsRecording();
+    if (recording && game::safe_mem::CanAccess(ctx.ecx, 0x20u)) {
+        const uint32_t st_type = game::safe_mem::Read32(ctx.ecx + 0x04u, 0u);
+        if ((st_type >> 24) == 3u) {
+            const uint32_t light_idx = game::safe_mem::Read32(ctx.ecx + 0x08u, 0xFFu);
+            const uint32_t flags = game::safe_mem::Read32(ctx.ecx + 0x18u, 0u);
+            const bool is_enable = ((st_type & 0x00FFFFFFu) == 0x0Du);
+            const bool is_set = ((flags & 0x04u) != 0u);
+            game::stateblock::RecordLightTouch(light_idx, is_set, is_enable);
+        }
+    }
+    __imp__sub_0037F096(ctx, base);
+    if (!recording) {
+        game::render_accuracy::InvalidateMc3dStateShadows();
+    }
+}
+
 WRAP_POST(sub_0037F975)
 WRAP_POST(sub_0037FBF6)
 WRAP_POST(sub_00032E30)
 WRAP_POST(sub_0004EB10)
 WRAP_POST(sub_0004EBDD)
 WRAP_POST(sub_0004ED67)
-extern "C" void __imp__sub_002D17E0(X86Context& ctx, uint8_t* base);
-extern "C" void sub_002D17E0(X86Context& ctx, uint8_t* base) {
-    __imp__sub_002D17E0(ctx, base);
-    game::render_accuracy::OnSwapDiagnostics();
-}
+WRAP_POST(sub_002D17E0)
 
 // ============================================================================
 // 6. XAPILIB File Size Compatibility Fix (avoids broken game.cpp ord 76)
