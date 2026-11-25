@@ -9,6 +9,8 @@
 #include <string>
 #include <unordered_set>
 
+#include "core/log.h"
+#include "game/effect_probe.h"
 #include "game/guest_mem_safe.h"
 #include "game/log_severity.h"
 #include "game/object_anomaly.h"
@@ -16,6 +18,7 @@
 #include "game/render_accuracy_internal.h"
 #include "game/rt_tracker.h"
 #include "game/texel_inspector.h"
+#include "game/vk_format_probe.h"
 #include "gpu/texture.h"
 
 namespace game {
@@ -25,6 +28,7 @@ namespace {
 
 constexpr size_t kMaxLoggedLoads = 2048;
 constexpr size_t kMaxLoggedDraws = 4096;
+constexpr size_t kMaxLoggedEffects = 1024;
 constexpr size_t kMaxLoggedAnomalies = 2048;
 
 thread_local const char* tl_draw_tag = nullptr;
@@ -33,6 +37,7 @@ thread_local uint32_t tl_draw_obj_va = 0;
 std::once_flag g_init_once;
 std::unordered_set<uint64_t> g_logged_loads;
 std::unordered_set<uint64_t> g_logged_draws;
+std::unordered_set<uint64_t> g_logged_effects;
 std::unordered_set<uint64_t> g_logged_anomalies;
 
 std::atomic<uint64_t> g_total_draws{0};
@@ -42,7 +47,7 @@ std::atomic<uint64_t> g_warn_draws{0};
 std::atomic<uint64_t> g_error_draws{0};
 std::atomic<uint64_t> g_danger_draws{0};
 std::atomic<uint64_t> g_swap_frames{0};
-std::array<std::atomic<uint64_t>, 15> g_anomaly_counts{};
+std::array<std::atomic<uint64_t>, 24> g_anomaly_counts{};
 uint64_t g_prev_ok = 0;
 uint64_t g_prev_warn = 0;
 uint64_t g_prev_error = 0;
@@ -53,11 +58,13 @@ uint64_t Mix64(uint64_t h, uint64_t v) {
     return h;
 }
 
-uint64_t BuildDrawSignature(const gpu::State& s, const char* tag, uint32_t obj_va) {
+uint64_t BuildDrawSignature(const gpu::State& s, const char* tag, uint32_t obj_va,
+                            const VertexProbeInfo& vp, const char* eff_name) {
     uint64_t h = 0xCBF29CE484222325ull;
     h = Mix64(h, obj_va);
     h = Mix64(h, tag ? uint64_t(std::uintptr_t(tag)) : 0ull);
-    h = Mix64(h, s.vs_handle);
+    h = Mix64(h, eff_name ? uint64_t(std::uintptr_t(eff_name)) : 0ull);
+    h = Mix64(h, s.vs_handle ? s.vs_handle : vp.effective_fvf);
     h = Mix64(h, s.vs ? s.vs->hash : 0ull);
     h = Mix64(h, s.ps ? s.ps->handle : 0ull);
     h = Mix64(h, s.ps ? s.ps->def[54] : 0ull);
@@ -75,11 +82,17 @@ uint64_t BuildDrawSignature(const gpu::State& s, const char* tag, uint32_t obj_v
                          s.tss[i][gpu::kTssResultArg]);
         }
         h = Mix64(h, (uint64_t(s.rs[gpu::kRsLighting]) << 16) | s.light_enable);
+        h = Mix64(h, s.rs[gpu::kRsFogEnable] & 1u);
     } else {
         h = Mix64(h, s.rs[gpu::kRsPsTextureModes]);
     }
-    h = Mix64(h, (uint64_t(s.simple[gpu::kMBlendEnable / 4u]) << 8) |
+    h = Mix64(h, (uint64_t(s.simple[gpu::kMBlendEnable / 4u] & 1u) << 32) |
+                 (uint64_t(s.simple[gpu::kMSrcBlend / 4u] & 0xFFFFu) << 16) |
+                 (s.simple[gpu::kMDestBlend / 4u] & 0xFFFEu) |
                  (s.simple[gpu::kMAlphaTestEnable / 4u] & 1u));
+    if (vp.has_vcol) {
+        h = Mix64(h, vp.all_white_rgb ? 0xFFFFFFFFull : (vp.first_argb & 0x00F0F0F0ull));
+    }
     return h;
 }
 
@@ -124,8 +137,12 @@ std::string FormatTexStages(const std::array<StageTexInspection, 4>& st, uint32_
 
 void Init() {
     std::call_once(g_init_once, [] {
+        const std::string vk_line = FormatVkProbeLine();
+        const logfmt::Severity vk_lv = IsBgra8VertexSupported() ? logfmt::Severity::Info : logfmt::Severity::Danger;
         std::lock_guard<std::mutex> lk(detail::IoMutex());
         detail::EnsureOpenLocked();
+        detail::WriteLineLocked(vk_lv, true, "%s", vk_line.c_str());
+        LOGR("[%s] %s", IsBgra8VertexSupported() ? "INFO" : "DANGER", vk_line.c_str());
     });
 }
 
@@ -205,55 +222,62 @@ void LogDrawState(const gpu::State& s) {
 
     const char* tag = tl_draw_tag ? tl_draw_tag : "APPLY";
     const uint32_t obj_va = tl_draw_obj_va;
-    const uint64_t sig = BuildDrawSignature(s, tag, obj_va);
+    const char* eff_name = ActiveEffectName();
+    const VertexProbeInfo vp = ResolveVertexProbe(s);
+    const uint64_t sig = BuildDrawSignature(s, tag, obj_va, vp, eff_name);
 
     std::lock_guard<std::mutex> lk(detail::IoMutex());
     const bool under_cap = (g_logged_draws.size() < kMaxLoggedDraws);
+    const bool track_effect = (eff_name != nullptr && g_logged_effects.size() < kMaxLoggedEffects);
+    bool already_logged_normal = false;
     if (under_cap) {
-        if (!detail::InsertBoundedLocked(g_logged_draws, sig, kMaxLoggedDraws)) return;
+        already_logged_normal = !detail::InsertBoundedLocked(g_logged_draws, sig, kMaxLoggedDraws);
     } else {
-        if (g_logged_draws.find(sig) != g_logged_draws.end()) return;
-        if (g_logged_anomalies.find(sig) != g_logged_anomalies.end()) return;
+        already_logged_normal = (g_logged_draws.find(sig) != g_logged_draws.end()) ||
+                                (g_logged_anomalies.find(sig) != g_logged_anomalies.end());
     }
+    if (track_effect) {
+        if (detail::InsertBoundedLocked(g_logged_effects, sig, kMaxLoggedEffects)) {
+            already_logged_normal = false;
+        }
+    }
+    if (already_logged_normal) return;
 
     std::array<StageTexInspection, 4> stages{};
     for (uint32_t i = 0; i < 4u; ++i) stages[i] = InspectStageTexture(s, i);
 
     const uint32_t ps_mask = s.ps ? game::render_accuracy::GetCombinerTexReadMask(s.ps->def) : 0u;
-    const AnomalyReport anom = AnalyzeDrawAnomalies(s, stages, ps_mask);
+    const AnomalyReport anom = AnalyzeDrawAnomalies(s, stages, ps_mask, vp, eff_name);
     const logfmt::Severity sev = logfmt::ClassifyAnomalyFlags(anom.flags);
     RecordAnomalyCounters(anom.flags, sev);
-    if (!under_cap) {
+    if (!under_cap && !(eff_name != nullptr && g_logged_effects.find(sig) != g_logged_effects.end())) {
         if (anom.flags == kAnomNone || !detail::InsertBoundedLocked(g_logged_anomalies, sig, kMaxLoggedAnomalies)) return;
     }
 
     const std::string model_name = detail::LookupModelLocked(obj_va, s.streams[0].vb, s.index_buffer);
     const std::string tex_desc = FormatTexStages(stages, anom.read_tex_mask);
-    const bool flush_now = (sev == logfmt::Severity::Error || sev == logfmt::Severity::Danger);
+    const std::string blend_eff = FormatBlendAndEffectSuffix(s, vp, eff_name);
+    const bool flush_now = (sev == logfmt::Severity::Error || sev == logfmt::Severity::Danger || eff_name != nullptr);
 
     if (s.ps) {
         detail::WriteLineLocked(
             sev, flush_now,
             "[%s] tag=%s obj=0x%08X%s%s vs=0x%08X(%s,r=0x%X) vb0=0x%08X(s=%u) ib=0x%08X "
-            "ps=0x%08X(modes=0x%05X,mask=0x%X) blend=%u/%u/%u alpha=%u%s ANOMALY=[%s]",
+            "ps=0x%08X(modes=0x%05X,mask=0x%X)%s%s ANOMALY=[%s]",
             anom.is_3d ? "OBJ3D" : "UI2D", tag, obj_va,
             model_name.empty() ? "" : " name=", model_name.empty() ? "" : model_name.c_str(),
-            s.vs_handle, anom.vs_prog ? "prog" : "fvf", anom.vs_regs_mask,
+            anom.eff_vs_handle, anom.vs_prog ? "prog" : "fvf", anom.vs_regs_mask,
             s.streams[0].vb, s.streams[0].stride, s.index_buffer,
             s.ps->handle, s.rs[gpu::kRsPsTextureModes], ps_mask,
-            s.simple[gpu::kMBlendEnable / 4u] & 1u,
-            s.simple[gpu::kMSrcBlend / 4u] & 0xFFu,
-            s.simple[gpu::kMDestBlend / 4u] & 0xFFu,
-            s.simple[gpu::kMAlphaTestEnable / 4u] & 1u,
-            tex_desc.c_str(), anom.summary.c_str());
+            blend_eff.c_str(), tex_desc.c_str(), anom.summary.c_str());
     } else {
         detail::WriteLineLocked(
             sev, flush_now,
             "[%s] tag=%s obj=0x%08X%s%s vs=0x%08X(%s,r=0x%X) vb0=0x%08X(s=%u) ib=0x%08X "
-            "FF cop=(%u,%u,%u,%u) a1=(%u,%u,%u) a2=(%u,%u,%u) aop=(%u,%u,%u) res=(%u,%u) tfa=0x%08X lit=%u(%u) blend=%u%s ANOMALY=[%s]",
+            "FF cop=(%u,%u,%u,%u) a1=(%u,%u,%u) a2=(%u,%u,%u) aop=(%u,%u,%u) res=(%u,%u) tfa=0x%08X lit=%u(%u)%s%s ANOMALY=[%s]",
             anom.is_3d ? "OBJ3D" : "UI2D", tag, obj_va,
             model_name.empty() ? "" : " name=", model_name.empty() ? "" : model_name.c_str(),
-            s.vs_handle, anom.vs_prog ? "prog" : "fvf", anom.vs_regs_mask,
+            anom.eff_vs_handle, anom.vs_prog ? "prog" : "fvf", anom.vs_regs_mask,
             s.streams[0].vb, s.streams[0].stride, s.index_buffer,
             s.tss[0][gpu::kTssColorOp], s.tss[1][gpu::kTssColorOp],
             s.tss[2][gpu::kTssColorOp], s.tss[3][gpu::kTssColorOp],
@@ -263,8 +287,7 @@ void LogDrawState(const gpu::State& s) {
             s.tss[0][gpu::kTssResultArg], s.tss[1][gpu::kTssResultArg],
             s.rs[gpu::kRsTextureFactor],
             s.rs[gpu::kRsLighting] & 1u, s.light_enable,
-            s.simple[gpu::kMBlendEnable / 4u] & 1u,
-            tex_desc.c_str(), anom.summary.c_str());
+            blend_eff.c_str(), tex_desc.c_str(), anom.summary.c_str());
     }
 }
 
@@ -295,8 +318,10 @@ void OnSwapSummary() {
     detail::WriteLineLocked(
         sum_lv, true,
         "[SUMMARY] swap=%llu draws=%llu ok=%llu(+%llu) warn=%llu(+%llu) error=%llu(+%llu) danger=%llu(+%llu) "
-        "uniqueDraws=%zu uniqueAnom=%zu badDraws=%llu rtTracked=%u modelsReg=%zu texReg=%zu "
-        "counts=[progUnbound=%llu mode0=%llu ffUnbound=%llu texBlack=%llu texWhite=%llu p8NoPal=%llu tempUninit=%llu lit0=%llu tf0=%llu sel2Drop=%llu uiBlack=%llu]",
+        "uniqueDraws=%zu uniqueEff=%zu uniqueAnom=%zu badDraws=%llu rtTracked=%u modelsReg=%zu texReg=%zu "
+        "counts=[progUnbound=%llu mode0=%llu ffUnbound=%llu texBlack=%llu texWhite=%llu p8NoPal=%llu "
+        "tempUninit=%llu lit0=%llu tf0=%llu sel2Drop=%llu uiBlack=%llu wMaskNoB=%llu wEffLost=%llu "
+        "addFog=%llu rsDesync=%llu vkBgra=%llu effWhtV=%llu]",
         static_cast<unsigned long long>(f),
         static_cast<unsigned long long>(g_total_draws.load()),
         static_cast<unsigned long long>(ok_n),
@@ -308,6 +333,7 @@ void OnSwapSummary() {
         static_cast<unsigned long long>(danger_n),
         static_cast<unsigned long long>(d_dng),
         g_logged_draws.size(),
+        g_logged_effects.size(),
         g_logged_anomalies.size(),
         static_cast<unsigned long long>(g_anomalous_draws.load()),
         rt_tracker::TrackedTargetCount(),
@@ -323,7 +349,13 @@ void OnSwapSummary() {
         static_cast<unsigned long long>(g_anomaly_counts[9].load()),
         static_cast<unsigned long long>(g_anomaly_counts[12].load()),
         static_cast<unsigned long long>(g_anomaly_counts[13].load()),
-        static_cast<unsigned long long>(g_anomaly_counts[14].load()));
+        static_cast<unsigned long long>(g_anomaly_counts[14].load()),
+        static_cast<unsigned long long>(g_anomaly_counts[15].load()),
+        static_cast<unsigned long long>(g_anomaly_counts[16].load()),
+        static_cast<unsigned long long>(g_anomaly_counts[17].load()),
+        static_cast<unsigned long long>(g_anomaly_counts[18].load()),
+        static_cast<unsigned long long>(g_anomaly_counts[19].load()),
+        static_cast<unsigned long long>(g_anomaly_counts[20].load()));
 }
 
 }  // namespace objlog

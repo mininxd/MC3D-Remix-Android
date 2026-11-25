@@ -35,7 +35,9 @@ TexSampleClass ClassifyP8WithPalette(const gpu::TextureDesc& d, uint32_t span,
     bool any_accessible = false;
     bool all_transparent = true;
     bool all_rgb_zero = true;
-    bool all_white = true;
+    bool all_white_opaque = true;
+    bool any_colored_visible = false;
+    bool any_non_opaque = false;
     bool all_equal = true;
     uint32_t first_bgra = 0u;
     bool have_first = false;
@@ -50,6 +52,8 @@ TexSampleClass ClassifyP8WithPalette(const gpu::TextureDesc& d, uint32_t span,
         for (uint32_t b = 0; b < 4u; ++b) {
             const uint32_t idx = (packed >> (b * 8u)) & 0xFFu;
             const uint32_t bgra = pal[idx];
+            const uint32_t alpha = (bgra >> 24u) & 0xFFu;
+            const uint32_t rgb = bgra & 0x00FFFFFFu;
             if (!have_first) {
                 first_bgra = bgra;
                 out_sample = bgra;
@@ -57,11 +61,15 @@ TexSampleClass ClassifyP8WithPalette(const gpu::TextureDesc& d, uint32_t span,
             } else if (bgra != first_bgra) {
                 all_equal = false;
             }
-            if ((bgra & 0xFF000000u) != 0u) all_transparent = false;
-            if ((bgra & 0x00FFFFFFu) != 0u) all_rgb_zero = false;
-            if ((bgra & 0x00FFFFFFu) != 0x00FFFFFFu) all_white = false;
+            if (alpha != 0u) {
+                all_transparent = false;
+                if (rgb != 0x00FFFFFFu) any_colored_visible = true;
+            }
+            if (alpha != 0xFFu) any_non_opaque = true;
+            if (rgb != 0u) all_rgb_zero = false;
+            if (bgra != 0xFFFFFFFFu) all_white_opaque = false;
         }
-        if (!all_equal && !all_transparent && !all_rgb_zero && !all_white) {
+        if (!all_equal && !all_transparent && !all_rgb_zero && !all_white_opaque && any_colored_visible) {
             return TexSampleClass::Varied;
         }
     }
@@ -69,7 +77,8 @@ TexSampleClass ClassifyP8WithPalette(const gpu::TextureDesc& d, uint32_t span,
     if (!any_accessible) return TexSampleClass::OutOfRam;
     if (all_transparent) return TexSampleClass::TransparentZero;
     if (all_rgb_zero) return TexSampleClass::ZeroBlack;
-    if (all_white) return TexSampleClass::SolidWhite;
+    if (all_white_opaque) return TexSampleClass::SolidWhite;
+    if (!any_colored_visible && any_non_opaque) return TexSampleClass::WhiteRgbAlphaMask;
     if (all_equal) return TexSampleClass::SolidConst;
     return TexSampleClass::Varied;
 }
@@ -94,11 +103,17 @@ TexSampleClass ClassifyTexelPayload(const gpu::TextureDesc& d, const gpu::Format
     if (span < stride_elem) return TexSampleClass::Unknown;
     const uint32_t num_elems = span / stride_elem;
 
+    const bool is_a8 = (d.format == 0x19u || d.format == 0x1Fu);
+    const bool is_argb32 = (d.format == 0x06u || d.format == 0x12u);
+    const bool is_dxt_alpha = (d.format == 0x0Eu || d.format == 0x0Fu);
+
     bool any_accessible = false;
     bool all_zero = true;
     bool all_transparent = true;
     bool all_ff = true;
-    bool all_rgb_zero = (fi.bits == 32 && !fi.compressed);
+    bool all_rgb_zero = is_argb32 || (d.format == 0x3Au || d.format == 0x3Fu);
+    bool all_white_alpha_mask = (is_a8 || is_argb32 || is_dxt_alpha);
+    bool any_alpha_non_ff = false;
     bool all_equal = true;
     uint32_t first_dwords[4] = {};
     bool have_first = false;
@@ -116,15 +131,27 @@ TexSampleClass ClassifyTexelPayload(const gpu::TextureDesc& d, const gpu::Format
             if (cur[i] != 0u) all_zero = false;
             if (cur[i] != 0xFFFFFFFFu) all_ff = false;
         }
+        bool block_transparent = false;
         if (fi.compressed) {
-            if (!IsCompressedBlockTransparent(d.format, cur[0], nwords > 1u ? cur[1] : 0u)) {
-                all_transparent = false;
-            }
+            block_transparent = IsCompressedBlockTransparent(d.format, cur[0], nwords > 1u ? cur[1] : 0u);
         } else {
-            if (!IsUncompressedDwordTransparent(d.format, cur[0])) {
-                all_transparent = false;
+            block_transparent = IsUncompressedDwordTransparent(d.format, cur[0]);
+        }
+        if (!block_transparent) all_transparent = false;
+
+        if (all_white_alpha_mask) {
+            if (is_a8) {
+                if (cur[0] != 0xFFFFFFFFu) any_alpha_non_ff = true;
+            } else if (is_argb32) {
+                if ((cur[0] >> 24u) != 0xFFu) any_alpha_non_ff = true;
+                if (!block_transparent && (cur[0] & 0x00FFFFFFu) != 0x00FFFFFFu) all_white_alpha_mask = false;
+            } else if (is_dxt_alpha && nwords >= 3u) {
+                if (d.format == 0x0Eu && (cur[0] != 0xFFFFFFFFu || cur[1] != 0xFFFFFFFFu)) any_alpha_non_ff = true;
+                if (d.format == 0x0Fu && (cur[0] & 0xFFFFu) != 0xFFFFu) any_alpha_non_ff = true;
+                if (!block_transparent && cur[2] != 0xFFFFFFFFu) all_white_alpha_mask = false;
             }
         }
+
         if (!have_first) {
             for (uint32_t i = 0; i < nwords; ++i) first_dwords[i] = cur[i];
             have_first = true;
@@ -138,7 +165,7 @@ TexSampleClass ClassifyTexelPayload(const gpu::TextureDesc& d, const gpu::Format
             }
         }
         if (all_rgb_zero && (cur[0] & 0x00FFFFFFu) != 0u) all_rgb_zero = false;
-        if (!all_equal && !all_zero && !all_transparent && !all_ff && !all_rgb_zero) {
+        if (!all_equal && !all_zero && !all_transparent && !all_ff && !all_rgb_zero && !all_white_alpha_mask) {
             return TexSampleClass::Varied;
         }
     }
@@ -148,6 +175,7 @@ TexSampleClass ClassifyTexelPayload(const gpu::TextureDesc& d, const gpu::Format
     if (all_zero) return TexSampleClass::ZeroBlack;
     if (all_rgb_zero) return TexSampleClass::AlphaZeroBlack;
     if (all_ff) return TexSampleClass::SolidWhite;
+    if (all_white_alpha_mask && any_alpha_non_ff) return TexSampleClass::WhiteRgbAlphaMask;
     if (all_equal) return TexSampleClass::SolidConst;
     return TexSampleClass::Varied;
 }
@@ -210,6 +238,7 @@ const char* SampleClassName(TexSampleClass c) {
         case TexSampleClass::ZeroBlack: return "ZERO_BLACK";
         case TexSampleClass::AlphaZeroBlack: return "RGB0_BLACK";
         case TexSampleClass::SolidWhite: return "SOLID_WHITE";
+        case TexSampleClass::WhiteRgbAlphaMask: return "WHITE_ALPHA_MASK";
         case TexSampleClass::SolidConst: return "CONST";
         case TexSampleClass::Varied: return "VARIED";
         case TexSampleClass::Unknown: return "UNK";

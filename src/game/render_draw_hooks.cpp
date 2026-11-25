@@ -91,22 +91,11 @@ WRAP_DRAW_OBJ(sub_000E74E0)
 WRAP_POST(sub_000E3650)
 WRAP_DRAW_OBJ(sub_00051410)
 WRAP_DRAW_OBJ(sub_000988A0)
-WRAP_DRAW_OBJ(sub_002D6830)
-WRAP_DRAW_OBJ(sub_002D6A18)
+WRAP_DRAW_OBJ(sub_002D6A18)  // sub_002D6830 & sub_002D5E40 live in effect_hooks.cpp.
 
 // ============================================================================
-// 4. All MC3D Pushbuffer EndPush Callers (10/10) + RenderTarget Wrappers
+// 4. MC3D Pushbuffer EndPush Callers + RenderTarget Wrappers
 // ============================================================================
-
-// Immediate-mode End: applies accuracy once right before d3d8.cpp's sub_004163B0 draws.
-extern "C" void __imp__sub_002D5E40(X86Context& ctx, uint8_t* base);
-extern "C" void sub_002D5E40(X86Context& ctx, uint8_t* base) {
-    game::render_accuracy::ScopedGuestTssGuard tss_guard;
-    game::objlog::SetDrawHint("sub_002D5E40", 0u);
-    game::render_accuracy::ApplyRenderAccuracy();
-    __imp__sub_002D5E40(ctx, base);
-    game::objlog::ClearDrawHint();
-}
 
 WRAP_PUSH_CALLER(sub_00041480)
 WRAP_PUSH_CALLER(sub_00041BA0)

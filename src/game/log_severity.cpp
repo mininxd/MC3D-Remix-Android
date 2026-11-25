@@ -15,7 +15,8 @@ const auto g_start_time = std::chrono::steady_clock::now();
 constexpr uint32_t kDangerMask =
     objlog::kAnomBadVsNoRegs |
     objlog::kAnomTexBadOrOor |
-    objlog::kAnomAlphaKillAll;
+    objlog::kAnomAlphaKillAll |
+    objlog::kAnomVkBgraVertexUnsupported;
 
 constexpr uint32_t kErrorMask =
     objlog::kAnomProgUnboundTex |
@@ -24,7 +25,10 @@ constexpr uint32_t kErrorMask =
     objlog::kAnomTexZeroBlack |
     objlog::kAnomP8NoPal |
     objlog::kAnomFfTempUnwritten |
-    objlog::kAnomFfSelectDropsTex;
+    objlog::kAnomFfSelectDropsTex |
+    objlog::kAnomWhiteMaskNoBlend |
+    objlog::kAnomWhiteEffectColorLost |
+    objlog::kAnomSimpleRsDesync;
 
 }  // namespace
 

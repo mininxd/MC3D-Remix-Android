@@ -32,14 +32,6 @@ void HandleQuadBlit(X86Context& ctx, uint8_t* base, GuestFunc orig);
 void HandleFontBlit(X86Context& ctx, uint8_t* base, GuestFunc orig);
 
 // RAII thread-local scope guards for classifying draw & viewport contexts.
-class ScopedFmvBlit {
-public:
-    ScopedFmvBlit();
-    ~ScopedFmvBlit();
-    ScopedFmvBlit(const ScopedFmvBlit&) = delete;
-    ScopedFmvBlit& operator=(const ScopedFmvBlit&) = delete;
-};
-
 class ScopedFullScreenBypass {
 public:
     ScopedFullScreenBypass();

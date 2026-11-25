@@ -7,7 +7,7 @@
 // Thin strong wrappers overriding generated X86_WEAK_FUNC symbols for:
 //  - True ultrawide HOR+ 3D cameras (pixel aspect ratio sync)
 //  - Un-stretched 2D GUI / HUD / Flash / minimap rendering
-//  - Exact 16:9 Bink FMV playback over black pillarbox/letterbox margins
+//  - Native pass-through Bink FMV playback (bypassing 2D HUD pillarbox mapping)
 //  - Fullscreen fade and post-FX preservation
 
 // 1. Display mode setup -> sync MC3D pixel aspect ratio [0x004B4E88] to host Aspect().
@@ -38,16 +38,16 @@ extern "C" void sub_002D4D30(X86Context& ctx, uint8_t* base) {
     __imp__sub_002D4D30(ctx, base);
 }
 
-// 5. Bink FMV renderer (intro, story, tutorial, reward videos) -> exact 16:9.
+// 5. Bink FMV renderer (intro, story, tutorial, reward videos) -> native pass-through.
 extern "C" void __imp__sub_0015AF30(X86Context& ctx, uint8_t* base);
 extern "C" void sub_0015AF30(X86Context& ctx, uint8_t* base) {
-    game::aspect_fix::ScopedFmvBlit guard;
+    game::aspect_fix::ScopedFullScreenBypass guard;
     __imp__sub_0015AF30(ctx, base);
 }
 
 extern "C" void __imp__sub_00363950(X86Context& ctx, uint8_t* base);
 extern "C" void sub_00363950(X86Context& ctx, uint8_t* base) {
-    game::aspect_fix::ScopedFmvBlit guard;
+    game::aspect_fix::ScopedFullScreenBypass guard;
     __imp__sub_00363950(ctx, base);
 }
 

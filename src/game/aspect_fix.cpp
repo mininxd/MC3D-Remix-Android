@@ -17,9 +17,6 @@
 #include "image_symbols.h"
 #include "kernel/kernel.h"
 
-// XDK D3DDevice_Clear (HLE_STDCALL 6 args) for black pillarbox/letterbox FMV margins.
-extern "C" void sub_004156A0(X86Context& ctx, uint8_t* base);
-
 namespace game {
 namespace aspect_fix {
 
@@ -28,16 +25,13 @@ namespace {
 constexpr float kAspect16x9 = 16.0f / 9.0f;
 constexpr float kAspect4x3  = 4.0f / 3.0f;
 constexpr float kAspectEps  = 0.005f;
-constexpr uint32_t kD3dClearTarget = 0x000000F0u;  // Xbox D3DCLEAR_TARGET (ARGB)
 
-thread_local int tl_fmv_depth        = 0;
 thread_local int tl_fs_bypass_depth  = 0;
 thread_local int tl_ui_ortho_depth   = 0;
 thread_local int tl_minimap_vp_depth = 0;
 thread_local int tl_ref_par_depth    = 0;
 
 std::atomic<float> g_last_logged_aspect{0.0f};
-std::atomic<bool>  g_logged_fmv{false};
 std::atomic<bool>  g_logged_ui_ortho{false};
 
 struct AspectMetrics {
@@ -99,64 +93,6 @@ int16_t ClampI16(int32_t v) {
     return static_cast<int16_t>(std::clamp(v, kMin, kMax));
 }
 
-void ComputeFmv16x9Rect(const AspectMetrics& m, int32_t& x0, int32_t& y0, int32_t& x1, int32_t& y1) {
-    const int32_t gw = static_cast<int32_t>(m.guest_w);
-    const int32_t gh = static_cast<int32_t>(m.guest_h);
-    if (m.host_aspect > kAspect16x9 + kAspectEps) {
-        const int32_t w169 = std::clamp<int32_t>(
-            static_cast<int32_t>(std::lround(static_cast<float>(gw) * (kAspect16x9 / m.host_aspect))),
-            1, gw);
-        x0 = (gw - w169) / 2;
-        x1 = x0 + w169;
-        y0 = 0;
-        y1 = gh;
-    } else if (m.host_aspect < kAspect16x9 - kAspectEps) {
-        const int32_t h169 = std::clamp<int32_t>(
-            static_cast<int32_t>(std::lround(static_cast<float>(gh) * (m.host_aspect / kAspect16x9))),
-            1, gh);
-        x0 = 0;
-        x1 = gw;
-        y0 = (gh - h169) / 2;
-        y1 = y0 + h169;
-    } else {
-        x0 = 0;
-        y0 = 0;
-        x1 = gw;
-        y1 = gh;
-    }
-}
-
-void ClearFullBackbufferBlack(X86Context& ctx, uint8_t* base, uint32_t gw, uint32_t gh) {
-    if (gw == 0u || gh == 0u) return;
-    const uint32_t saved_eax = ctx.eax;
-    const uint32_t saved_ecx = ctx.ecx;
-    const uint32_t saved_edx = ctx.edx;
-    const uint32_t saved_esp = ctx.esp;
-
-    ctx.esp -= 16u;
-    const uint32_t rect_va = ctx.esp;
-    if (safe_mem::CanAccess(rect_va, 16u)) {
-        kernel::W32(rect_va + 0u, 0u);
-        kernel::W32(rect_va + 4u, 0u);
-        kernel::W32(rect_va + 8u, gw);
-        kernel::W32(rect_va + 12u, gh);
-
-        X86_PUSH32(0u);              // Stencil
-        X86_PUSH32(0x3F800000u);     // Z = 1.0f
-        X86_PUSH32(0xFF000000u);     // Color = opaque black
-        X86_PUSH32(kD3dClearTarget); // Xbox D3DCLEAR_TARGET (0xF0)
-        X86_PUSH32(rect_va);         // pRects = full backbuffer
-        X86_PUSH32(1u);              // Count = 1
-        X86_PUSH32(0u);              // dummy return address
-        sub_004156A0(ctx, base);     // stdcall ret 0x18 (pops 28 bytes)
-    }
-
-    ctx.esp = saved_esp;
-    ctx.eax = saved_eax;
-    ctx.ecx = saved_ecx;
-    ctx.edx = saved_edx;
-}
-
 // Updates the global 2D ortho viewport ([0x00558B90]) projection X scale/offset on aspect change.
 void RefreshGlobalUiOrtho(const AspectMetrics& m) {
     const uint32_t vp = safe_mem::Read32(addr::kGlobalUiViewport, 0u);
@@ -208,11 +144,9 @@ void OnSwap() {
     if (std::fabs(prev - m.host_aspect) > 0.002f) {
         g_last_logged_aspect.store(m.host_aspect, std::memory_order_relaxed);
         RefreshGlobalUiOrtho(m);
-        int32_t fx0 = 0, fy0 = 0, fx1 = 0, fy1 = 0;
-        ComputeFmv16x9Rect(m, fx0, fy0, fx1, fy1);
-        LOGR("[OK] aspect_fix: guest=%ux%u hostAspect=%.4f 3dPAR=%.4f uiRef=%.4f uiScaleX=%.4f uiPadX=%.1f fmv16x9=(%d,%d)-(%d,%d)",
+        LOGR("[OK] aspect_fix: guest=%ux%u hostAspect=%.4f 3dPAR=%.4f uiRef=%.4f uiScaleX=%.4f uiPadX=%.1f fmv=native",
              m.guest_w, m.guest_h, m.host_aspect, m.host_par, m.ui_ref_aspect,
-             m.ui_sx, m.ui_x_pad, fx0, fy0, fx1, fy1);
+             m.ui_sx, m.ui_x_pad);
     }
 }
 
@@ -277,35 +211,6 @@ void HandleQuadBlit(X86Context& ctx, uint8_t* base, GuestFunc orig) {
     const uint32_t saved_y0 = kernel::R32(arg_base + 4u);
     const uint32_t saved_x1 = kernel::R32(arg_base + 8u);
     const uint32_t saved_y1 = kernel::R32(arg_base + 12u);
-
-    if (tl_fmv_depth > 0) {
-        int32_t fx0 = 0, fy0 = 0, fx1 = 0, fy1 = 0;
-        ComputeFmv16x9Rect(m, fx0, fy0, fx1, fy1);
-
-        // Always clear full backbuffer to black so pillarbox/letterbox bars stay clean.
-        if (fx0 > 0 || fy0 > 0 || fx1 < static_cast<int32_t>(m.guest_w) ||
-            fy1 < static_cast<int32_t>(m.guest_h)) {
-            ClearFullBackbufferBlack(ctx, base, m.guest_w, m.guest_h);
-        }
-
-        kernel::W32(arg_base + 0u, static_cast<uint32_t>(fx0));
-        kernel::W32(arg_base + 4u, static_cast<uint32_t>(fy0));
-        kernel::W32(arg_base + 8u, static_cast<uint32_t>(fx1));
-        kernel::W32(arg_base + 12u, static_cast<uint32_t>(fy1));
-
-        if (!g_logged_fmv.exchange(true, std::memory_order_relaxed)) {
-            LOGR("[OK] aspect_fix: FMV 16:9 blit active — rect=(%d,%d)-(%d,%d) in %ux%u (hostAspect=%.4f)",
-                 fx0, fy0, fx1, fy1, m.guest_w, m.guest_h, m.host_aspect);
-        }
-
-        orig(ctx, base);
-
-        kernel::W32(arg_base + 0u, saved_x0);
-        kernel::W32(arg_base + 4u, saved_y0);
-        kernel::W32(arg_base + 8u, saved_x1);
-        kernel::W32(arg_base + 12u, saved_y1);
-        return;
-    }
 
     if (tl_fs_bypass_depth <= 0 && m.ultrawide_ui) {
         const int32_t sx0 = static_cast<int32_t>(saved_x0);
@@ -393,9 +298,6 @@ void HandleFontBlit(X86Context& ctx, uint8_t* base, GuestFunc orig) {
 // ============================================================================
 // RAII Scope Guards
 // ============================================================================
-
-ScopedFmvBlit::ScopedFmvBlit() { ++tl_fmv_depth; }
-ScopedFmvBlit::~ScopedFmvBlit() { --tl_fmv_depth; }
 
 ScopedFullScreenBypass::ScopedFullScreenBypass() { ++tl_fs_bypass_depth; }
 ScopedFullScreenBypass::~ScopedFullScreenBypass() { --tl_fs_bypass_depth; }

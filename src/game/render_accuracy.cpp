@@ -2,6 +2,7 @@
 #include "game/render_accuracy_internal.h"
 #include "game/d3d_guest_sync.h"
 #include "game/deferred_tss_guard.h"
+#include "game/effect_probe.h"
 #include "game/mc3d_cache_sync.h"
 #include "game/object_logger.h"
 #include "game/rt_tracker.h"
@@ -485,6 +486,7 @@ void ApplyRenderAccuracy() {
 
     rt_tracker::RecordActiveTargets(s);
     PullDeferredFromGuest(s);
+    game::objlog::CapturePreSyncSimpleDesync(s);
     d3d_sync::MirrorHostStateToGuest(s);
 
     std::array<gpu::TextureDesc, 4> tex_descs{};

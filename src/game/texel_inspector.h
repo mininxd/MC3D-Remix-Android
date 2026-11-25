@@ -17,6 +17,7 @@ enum class TexSampleClass : uint8_t {
     ZeroBlack,
     AlphaZeroBlack,
     SolidWhite,
+    WhiteRgbAlphaMask,
     SolidConst,
     Varied,
     Unknown,

@@ -1,5 +1,6 @@
 #include "game/object_anomaly.h"
 
+#include "game/vk_format_probe.h"
 #include "gpu/vertex.h"
 
 namespace game {
@@ -10,6 +11,7 @@ namespace {
 constexpr uint32_t kTopDisable     = 1u;
 constexpr uint32_t kTopSelectArg1  = 2u;
 constexpr uint32_t kTopSelectArg2  = 3u;
+constexpr uint32_t kTopModulate    = 4u;
 constexpr uint32_t kTaMask         = 0x0Fu;
 constexpr uint32_t kTaDiffuse      = 0u;
 constexpr uint32_t kTaTexture      = 2u;
@@ -21,21 +23,26 @@ void AppendTag(std::string& dst, const char* tag) {
     dst += tag;
 }
 
-uint16_t CollectInputRegMask(const gpu::State& s, bool& out_vs_prog, bool& out_xyzrhw) {
-    out_vs_prog = (s.vs_handle & 1u) != 0 && s.vs && !s.vs->program.empty();
-    out_xyzrhw = !(s.vs_handle & 1u) && ((s.vs_handle & 0x0Eu) == 0x04u);
+uint16_t CollectInputRegMask(const gpu::State& s, uint32_t eff_vs,
+                              bool& out_vs_prog, bool& out_xyzrhw, bool& out_bgra_vcol) {
+    out_vs_prog = (eff_vs & 1u) != 0 && s.vs && !s.vs->program.empty();
+    out_xyzrhw = !(eff_vs & 1u) && ((eff_vs & 0x0Eu) == 0x04u);
+    out_bgra_vcol = false;
 
     const gpu::VertexShader* active_vs = s.vs.get();
     gpu::VertexShader fvf_vs{};
-    if (!active_vs && s.vs_handle != 0 && !(s.vs_handle & 1u)) {
-        gpu::FvfInputs(s.vs_handle, fvf_vs);
+    if (!active_vs && eff_vs != 0 && !(eff_vs & 1u)) {
+        gpu::FvfInputs(eff_vs, fvf_vs);
         active_vs = &fvf_vs;
     }
 
     uint16_t mask = 0;
     if (active_vs) {
         for (int r = 0; r < 16; ++r) {
-            if (active_vs->inputs[r].stream >= 0) mask |= static_cast<uint16_t>(1u << r);
+            if (active_vs->inputs[r].stream >= 0) {
+                mask |= static_cast<uint16_t>(1u << r);
+                if (active_vs->inputs[r].type == 0x40u) out_bgra_vcol = true;
+            }
         }
     }
     return mask;
@@ -76,16 +83,34 @@ uint32_t ComputeFfReadMask(const gpu::State& s, bool& out_temp_unwritten) {
 }  // namespace
 
 AnomalyReport AnalyzeDrawAnomalies(const gpu::State& s, const std::array<StageTexInspection, 4>& stages,
-                                   uint32_t ps_read_mask) {
+                                   uint32_t ps_read_mask, const VertexProbeInfo& vp, const char* eff_name) {
     AnomalyReport rep{};
+    rep.eff_vs_handle = (s.vs_handle != 0u) ? s.vs_handle : vp.effective_fvf;
     bool xyzrhw = false;
-    rep.vs_regs_mask = CollectInputRegMask(s, rep.vs_prog, xyzrhw);
+    bool has_bgra_vcol = false;
+    rep.vs_regs_mask = CollectInputRegMask(s, rep.eff_vs_handle, rep.vs_prog, xyzrhw, has_bgra_vcol);
     rep.is_3d = !xyzrhw;
+    if (vp.has_vcol) has_bgra_vcol = true;
 
-    if ((s.vs_handle != 0 || s.vs != nullptr) && rep.vs_regs_mask == 0) {
+    if ((rep.eff_vs_handle != 0 || s.vs != nullptr) && rep.vs_regs_mask == 0) {
         rep.flags |= kAnomBadVsNoRegs;
         AppendTag(rep.summary, "BAD_VS_NO_REGS");
     }
+
+    if (has_bgra_vcol && !IsBgra8VertexSupported()) {
+        rep.flags |= kAnomVkBgraVertexUnsupported;
+        AppendTag(rep.summary, "VK_BGRA_VB_UNSUPPORTED");
+    }
+
+    std::string desync_detail;
+    if (ConsumeSimpleRsDesync(desync_detail)) {
+        rep.flags |= kAnomSimpleRsDesync;
+        AppendTag(rep.summary, ("SIMPLE_RS_DESYNC(" + desync_detail + ")").c_str());
+    }
+
+    const bool blend_on = (s.simple[gpu::kMBlendEnable / 4u] & 1u) != 0u;
+    const bool atest_on = (s.simple[gpu::kMAlphaTestEnable / 4u] & 1u) != 0u;
+    const uint32_t dst_blend = s.simple[gpu::kMDestBlend / 4u];
 
     if (s.ps != nullptr) {
         rep.read_tex_mask = ps_read_mask;
@@ -109,7 +134,6 @@ AnomalyReport AnalyzeDrawAnomalies(const gpu::State& s, const std::array<StageTe
             rep.flags |= kAnomFfTempUnwritten;
             AppendTag(rep.summary, "FF_TEMP_UNWRITTEN");
         }
-        const bool blend_on = (s.simple[gpu::kMBlendEnable / 4u] & 1u) != 0u;
         const bool stage0_writes_temp = (s.tss[0][gpu::kTssResultArg] == kTaTemp);
         for (uint32_t st = 0; st < 4u; ++st) {
             if ((rep.read_tex_mask & (1u << st)) && !stages[st].bound_va) {
@@ -161,6 +185,12 @@ AnomalyReport AnalyzeDrawAnomalies(const gpu::State& s, const std::array<StageTe
                 rep.flags |= kAnomTexSolidWhite;
                 AppendTag(rep.summary, "TEX_SOLID_WHITE");
                 break;
+            case TexSampleClass::WhiteRgbAlphaMask:
+                if (st == 0u && !blend_on && (!atest_on || eff_name != nullptr)) {
+                    rep.flags |= kAnomWhiteMaskNoBlend;
+                    AppendTag(rep.summary, "WHITE_MASK_NO_BLEND");
+                }
+                break;
             case TexSampleClass::SolidConst:
                 rep.flags |= kAnomTexConst;
                 AppendTag(rep.summary, "TEX_SOLID_CONST");
@@ -177,12 +207,45 @@ AnomalyReport AnalyzeDrawAnomalies(const gpu::State& s, const std::array<StageTe
         }
     }
 
-    if (!rep.vs_prog && rep.is_3d && s.rs[gpu::kRsLighting] != 0u && s.light_enable == 0u) {
+    if (!rep.vs_prog && rep.is_3d && (s.rs[gpu::kRsLighting] & 1u) != 0u && s.light_enable == 0u) {
         if ((s.tss[0][gpu::kTssColorArg1] & kTaMask) == kTaDiffuse ||
             (s.tss[0][gpu::kTssColorArg2] & kTaMask) == kTaDiffuse) {
             rep.flags |= kAnomLitNoLights;
             AppendTag(rep.summary, "LIT_NO_ACTIVE_LIGHTS");
         }
+    }
+
+    const bool st0_white_mask = (rep.read_tex_mask & 1u) != 0u &&
+                                stages[0].sample_class == TexSampleClass::WhiteRgbAlphaMask;
+    if (!s.ps && (eff_name != nullptr || st0_white_mask)) {
+        const uint32_t cop0 = s.tss[0][gpu::kTssColorOp];
+        const uint32_t ca1  = s.tss[0][gpu::kTssColorArg1] & kTaMask;
+        const uint32_t ca2  = s.tss[0][gpu::kTssColorArg2] & kTaMask;
+        if (eff_name != nullptr && st0_white_mask &&
+            ((cop0 == kTopSelectArg1 && ca1 == kTaTexture) || (cop0 == kTopSelectArg2 && ca2 == kTaTexture))) {
+            rep.flags |= kAnomWhiteEffectColorLost;
+            AppendTag(rep.summary, "WHITE_EFF_UNMODULATED");
+        } else if (eff_name != nullptr && cop0 >= kTopModulate &&
+                   (ca1 == kTaDiffuse || ca2 == kTaDiffuse) && (rep.vs_regs_mask & (1u << 3)) == 0u) {
+            rep.flags |= kAnomWhiteEffectColorLost;
+            AppendTag(rep.summary, "WHITE_EFF_NO_VCOL");
+        }
+        // In FixedVertexHlsl, Lighting=1 without vertex normals (v2) drops vertex diffuse (v3)!
+        if (!rep.vs_prog && rep.is_3d && (s.rs[gpu::kRsLighting] & 1u) != 0u &&
+            (rep.vs_regs_mask & (1u << 3)) != 0u && (rep.vs_regs_mask & (1u << 2)) == 0u) {
+            rep.flags |= kAnomWhiteEffectColorLost;
+            AppendTag(rep.summary, "WHITE_EFF_LIT_DROPS_VCOL");
+        }
+    }
+
+    if (eff_name != nullptr && vp.has_vcol && vp.all_white_rgb) {
+        rep.flags |= kAnomEffectAllWhiteVcol;
+        AppendTag(rep.summary, "EFF_ALL_WHITE_VCOL");
+    }
+
+    if (blend_on && dst_blend == 1u && (s.rs[gpu::kRsFogEnable] & 1u) != 0u && eff_name != nullptr) {
+        rep.flags |= kAnomAdditiveWithFog;
+        AppendTag(rep.summary, "ADDITIVE_WITH_FOG");
     }
 
     if (s.simple[gpu::kMAlphaTestEnable / 4u] != 0u) {
