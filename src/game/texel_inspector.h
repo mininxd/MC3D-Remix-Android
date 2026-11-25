@@ -11,6 +11,7 @@ namespace objlog {
 enum class TexSampleClass : uint8_t {
     Unbound,
     RenderTarget,
+    TransparentZero,
     InvalidDesc,
     OutOfRam,
     ZeroBlack,

@@ -1,5 +1,6 @@
 #include "game/render_accuracy.h"
 #include "game/render_accuracy_internal.h"
+#include "game/aspect_fix.h"
 #include "game/deferred_tss_guard.h"
 #include "game/guest_mem_safe.h"
 #include "game/object_logger.h"
@@ -67,6 +68,7 @@ WRAP_POST(sub_0041DF10)
 extern "C" void __imp__sub_002D2990(X86Context& ctx, uint8_t* base);
 extern "C" void sub_002D2990(X86Context& ctx, uint8_t* base) {
     __imp__sub_002D2990(ctx, base);
+    game::aspect_fix::OnSwap();
     game::render_accuracy::OnSwapDiagnostics();
 }
 
@@ -111,10 +113,21 @@ WRAP_PUSH_CALLER(sub_00041BA0)
 WRAP_PUSH_CALLER(sub_000E37D0)
 WRAP_PUSH_CALLER(sub_00332810)
 WRAP_PUSH_CALLER(sub_002D18E0)
-WRAP_PUSH_CALLER(sub_002D1B50)
 WRAP_PUSH_CALLER(sub_002D1D50)
-WRAP_PUSH_CALLER(sub_002D1F00)
 WRAP_PUSH_CALLER(sub_002D1FC6)
+
+// 2D sprite/FMV quad blitter & bitmap font renderer: push guard + aspect/16:9 FMV mapping.
+extern "C" void __imp__sub_002D1B50(X86Context& ctx, uint8_t* base);
+extern "C" void sub_002D1B50(X86Context& ctx, uint8_t* base) {
+    game::push_hle::ScopedPushCallerGuard push_guard("sub_002D1B50");
+    game::aspect_fix::HandleQuadBlit(ctx, base, __imp__sub_002D1B50);
+}
+
+extern "C" void __imp__sub_002D1F00(X86Context& ctx, uint8_t* base);
+extern "C" void sub_002D1F00(X86Context& ctx, uint8_t* base) {
+    game::push_hle::ScopedPushCallerGuard push_guard("sub_002D1F00");
+    game::aspect_fix::HandleFontBlit(ctx, base, __imp__sub_002D1F00);
+}
 
 // Track GPU render targets bound via MC3D's SetRenderTarget wrappers (even if only cleared).
 WRAP_RT_BIND(sub_000E40A0)

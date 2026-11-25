@@ -13,6 +13,7 @@ namespace rt_tracker {
 void RecordTargetData(uint32_t data_va);
 void RecordActiveTargets(const gpu::State& s);
 bool IsKnownRenderTarget(uint32_t data_va);
+uint32_t TrackedTargetCount();
 
 }  // namespace rt_tracker
 }  // namespace game

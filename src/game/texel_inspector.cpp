@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "game/guest_mem_safe.h"
+#include "game/p8_palette_probe.h"
 #include "game/rt_tracker.h"
 #include "gpu/texture.h"
 #include "kernel/memory.h"
@@ -14,7 +15,67 @@ namespace objlog {
 
 namespace {
 
-TexSampleClass ClassifyTexelPayload(const gpu::TextureDesc& d, const gpu::FormatInfo& fi, uint32_t& out_sample) {
+constexpr uint32_t kProbeCount = 25u;
+
+// Generates 25 well-distributed element-aligned offsets across [0, span - elem] so sparse
+// UI icons, font sheets, and DXT5 decals sample interior artwork instead of only margins.
+uint32_t ComputeProbeOffset(uint32_t idx, uint32_t num_elems, uint32_t elem_bytes) {
+    if (num_elems <= 1u) return 0u;
+    // Mix interior fractions (avoiding pure power-of-2 corners) across the full buffer.
+    const uint64_t num = uint64_t(idx) * 2u + 1u;
+    const uint64_t elem_idx = (num * uint64_t(num_elems - 1u)) / (uint64_t(kProbeCount) * 2u);
+    return static_cast<uint32_t>(std::min<uint64_t>(elem_idx, num_elems - 1u)) * elem_bytes;
+}
+
+TexSampleClass ClassifyP8WithPalette(const gpu::TextureDesc& d, uint32_t span,
+                                     const std::array<uint32_t, 256>& pal, uint32_t& out_sample) {
+    const uint32_t num_dwords = span / 4u;
+    if (num_dwords == 0u) return TexSampleClass::Unknown;
+
+    bool any_accessible = false;
+    bool all_transparent = true;
+    bool all_rgb_zero = true;
+    bool all_white = true;
+    bool all_equal = true;
+    uint32_t first_bgra = 0u;
+    bool have_first = false;
+
+    for (uint32_t i = 0; i < kProbeCount; ++i) {
+        const uint32_t off = ComputeProbeOffset(i, num_dwords, 4u);
+        const uint32_t va = d.data + off;
+        if (!safe_mem::CanAccess(va, 4u)) continue;
+        any_accessible = true;
+        const uint32_t packed = safe_mem::Read32(va, 0u);
+
+        for (uint32_t b = 0; b < 4u; ++b) {
+            const uint32_t idx = (packed >> (b * 8u)) & 0xFFu;
+            const uint32_t bgra = pal[idx];
+            if (!have_first) {
+                first_bgra = bgra;
+                out_sample = bgra;
+                have_first = true;
+            } else if (bgra != first_bgra) {
+                all_equal = false;
+            }
+            if ((bgra & 0xFF000000u) != 0u) all_transparent = false;
+            if ((bgra & 0x00FFFFFFu) != 0u) all_rgb_zero = false;
+            if ((bgra & 0x00FFFFFFu) != 0x00FFFFFFu) all_white = false;
+        }
+        if (!all_equal && !all_transparent && !all_rgb_zero && !all_white) {
+            return TexSampleClass::Varied;
+        }
+    }
+
+    if (!any_accessible) return TexSampleClass::OutOfRam;
+    if (all_transparent) return TexSampleClass::TransparentZero;
+    if (all_rgb_zero) return TexSampleClass::ZeroBlack;
+    if (all_white) return TexSampleClass::SolidWhite;
+    if (all_equal) return TexSampleClass::SolidConst;
+    return TexSampleClass::Varied;
+}
+
+TexSampleClass ClassifyTexelPayload(const gpu::TextureDesc& d, const gpu::FormatInfo& fi,
+                                    uint32_t pal_va, uint32_t& out_sample) {
     out_sample = 0;
     if (!d.data || d.width == 0 || d.height == 0) return TexSampleClass::OutOfRam;
 
@@ -22,26 +83,28 @@ TexSampleClass ClassifyTexelPayload(const gpu::TextureDesc& d, const gpu::Format
     if (span == 0) span = std::max<uint32_t>(4u, d.width * d.height);
     span = std::min<uint32_t>(span, 16u << 20);
 
+    if (d.format == 0x0Bu && pal_va != 0u) {
+        std::array<uint32_t, 256> pal{};
+        if (ReadXboxPalette(pal_va, pal)) {
+            return ClassifyP8WithPalette(d, span, pal, out_sample);
+        }
+    }
+
     const uint32_t stride_elem = fi.compressed ? ((fi.bits <= 4) ? 8u : 16u) : std::max<uint32_t>(4u, fi.bits / 8u);
     if (span < stride_elem) return TexSampleClass::Unknown;
-
-    const std::array<uint32_t, 5> offsets = {
-        0u,
-        (span / 4u) & ~3u,
-        (span / 2u) & ~3u,
-        ((span * 3u) / 4u) & ~3u,
-        (span - stride_elem) & ~3u,
-    };
+    const uint32_t num_elems = span / stride_elem;
 
     bool any_accessible = false;
     bool all_zero = true;
+    bool all_transparent = true;
     bool all_ff = true;
     bool all_rgb_zero = (fi.bits == 32 && !fi.compressed);
     bool all_equal = true;
     uint32_t first_dwords[4] = {};
     bool have_first = false;
 
-    for (uint32_t off : offsets) {
+    for (uint32_t p = 0; p < kProbeCount; ++p) {
+        const uint32_t off = ComputeProbeOffset(p, num_elems, stride_elem);
         const uint32_t va = d.data + off;
         if (!safe_mem::CanAccess(va, stride_elem)) continue;
         any_accessible = true;
@@ -52,6 +115,15 @@ TexSampleClass ClassifyTexelPayload(const gpu::TextureDesc& d, const gpu::Format
             cur[i] = safe_mem::Read32(va + i * 4u, 0);
             if (cur[i] != 0u) all_zero = false;
             if (cur[i] != 0xFFFFFFFFu) all_ff = false;
+        }
+        if (fi.compressed) {
+            if (!IsCompressedBlockTransparent(d.format, cur[0], nwords > 1u ? cur[1] : 0u)) {
+                all_transparent = false;
+            }
+        } else {
+            if (!IsUncompressedDwordTransparent(d.format, cur[0])) {
+                all_transparent = false;
+            }
         }
         if (!have_first) {
             for (uint32_t i = 0; i < nwords; ++i) first_dwords[i] = cur[i];
@@ -66,9 +138,13 @@ TexSampleClass ClassifyTexelPayload(const gpu::TextureDesc& d, const gpu::Format
             }
         }
         if (all_rgb_zero && (cur[0] & 0x00FFFFFFu) != 0u) all_rgb_zero = false;
+        if (!all_equal && !all_zero && !all_transparent && !all_ff && !all_rgb_zero) {
+            return TexSampleClass::Varied;
+        }
     }
 
     if (!any_accessible) return TexSampleClass::OutOfRam;
+    if (all_transparent) return TexSampleClass::TransparentZero;
     if (all_zero) return TexSampleClass::ZeroBlack;
     if (all_rgb_zero) return TexSampleClass::AlphaZeroBlack;
     if (all_ff) return TexSampleClass::SolidWhite;
@@ -120,7 +196,7 @@ StageTexInspection InspectStageTexture(const gpu::State& s, uint32_t stage) {
         return out;
     }
 
-    out.sample_class = ClassifyTexelPayload(d, fi, out.sample_dword);
+    out.sample_class = ClassifyTexelPayload(d, fi, out.pal_va, out.sample_dword);
     return out;
 }
 
@@ -128,6 +204,7 @@ const char* SampleClassName(TexSampleClass c) {
     switch (c) {
         case TexSampleClass::Unbound: return "UNBOUND";
         case TexSampleClass::RenderTarget: return "RT";
+        case TexSampleClass::TransparentZero: return "TRANSPARENT";
         case TexSampleClass::InvalidDesc: return "BAD_DESC";
         case TexSampleClass::OutOfRam: return "OUT_OF_RAM";
         case TexSampleClass::ZeroBlack: return "ZERO_BLACK";

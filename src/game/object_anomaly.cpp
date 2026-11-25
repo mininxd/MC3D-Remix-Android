@@ -109,6 +109,8 @@ AnomalyReport AnalyzeDrawAnomalies(const gpu::State& s, const std::array<StageTe
             rep.flags |= kAnomFfTempUnwritten;
             AppendTag(rep.summary, "FF_TEMP_UNWRITTEN");
         }
+        const bool blend_on = (s.simple[gpu::kMBlendEnable / 4u] & 1u) != 0u;
+        const bool stage0_writes_temp = (s.tss[0][gpu::kTssResultArg] == kTaTemp);
         for (uint32_t st = 0; st < 4u; ++st) {
             if ((rep.read_tex_mask & (1u << st)) && !stages[st].bound_va) {
                 rep.flags |= kAnomFfUnboundTex;
@@ -122,7 +124,10 @@ AnomalyReport AnalyzeDrawAnomalies(const gpu::State& s, const std::array<StageTe
                 rep.flags |= kAnomFfSelectDropsTex;
                 AppendTag(rep.summary, "FF_SELARG2_DROPS_TEX");
             }
-            if ((cop == 4u || cop == 5u || cop == 6u) &&
+            // Only flag zero TFACTOR RGB on opaque non-TEMP-preserved stages (alpha-blended
+            // shadows and TEMP-preserved optional night-glow stages intentionally use RGB=0).
+            if (!blend_on && !(stage0_writes_temp && st > 0u) &&
+                (cop == 4u || cop == 5u || cop == 6u) &&
                 (a1 == kTaTfactor || a2 == kTaTfactor) &&
                 (s.rs[gpu::kRsTextureFactor] & 0x00FFFFFFu) == 0u) {
                 rep.flags |= kAnomFfTfactorBlack;
@@ -132,7 +137,8 @@ AnomalyReport AnalyzeDrawAnomalies(const gpu::State& s, const std::array<StageTe
     }
 
     for (uint32_t st = 0; st < 4u; ++st) {
-        if (!(rep.read_tex_mask & (1u << st)) && !stages[st].bound_va) continue;
+        // Only audit texture stages that the active pixel shader / FF combiner actually samples.
+        if (!(rep.read_tex_mask & (1u << st))) continue;
         const StageTexInspection& t = stages[st];
         if (!t.bound_va) continue;
 
@@ -143,8 +149,13 @@ AnomalyReport AnalyzeDrawAnomalies(const gpu::State& s, const std::array<StageTe
         switch (t.sample_class) {
             case TexSampleClass::ZeroBlack:
             case TexSampleClass::AlphaZeroBlack:
-                rep.flags |= kAnomTexZeroBlack;
-                AppendTag(rep.summary, "TEX_ZERO_BLACK");
+                if (!rep.is_3d) {
+                    rep.flags |= kAnomUiBlackFrame;
+                    AppendTag(rep.summary, "UI_BLACK_FRAME");
+                } else {
+                    rep.flags |= kAnomTexZeroBlack;
+                    AppendTag(rep.summary, "TEX_ZERO_BLACK");
+                }
                 break;
             case TexSampleClass::SolidWhite:
                 rep.flags |= kAnomTexSolidWhite;
@@ -159,6 +170,8 @@ AnomalyReport AnalyzeDrawAnomalies(const gpu::State& s, const std::array<StageTe
                 rep.flags |= kAnomTexBadOrOor;
                 AppendTag(rep.summary, "TEX_BAD_OR_OOR");
                 break;
+            case TexSampleClass::RenderTarget:
+            case TexSampleClass::TransparentZero:
             default:
                 break;
         }

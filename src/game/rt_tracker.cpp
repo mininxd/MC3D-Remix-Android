@@ -41,5 +41,9 @@ bool IsKnownRenderTarget(uint32_t data_va) {
     return g_known_targets.find(data_va) != g_known_targets.end();
 }
 
+uint32_t TrackedTargetCount() {
+    return g_count.load(std::memory_order_acquire);
+}
+
 }  // namespace rt_tracker
 }  // namespace game

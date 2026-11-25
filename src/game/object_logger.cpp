@@ -14,6 +14,7 @@
 #include "game/object_anomaly.h"
 #include "game/object_logger_io.h"
 #include "game/render_accuracy_internal.h"
+#include "game/rt_tracker.h"
 #include "game/texel_inspector.h"
 #include "gpu/texture.h"
 
@@ -41,7 +42,11 @@ std::atomic<uint64_t> g_warn_draws{0};
 std::atomic<uint64_t> g_error_draws{0};
 std::atomic<uint64_t> g_danger_draws{0};
 std::atomic<uint64_t> g_swap_frames{0};
-std::array<std::atomic<uint64_t>, 14> g_anomaly_counts{};
+std::array<std::atomic<uint64_t>, 15> g_anomaly_counts{};
+uint64_t g_prev_ok = 0;
+uint64_t g_prev_warn = 0;
+uint64_t g_prev_error = 0;
+uint64_t g_prev_danger = 0;
 
 uint64_t Mix64(uint64_t h, uint64_t v) {
     h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
@@ -269,25 +274,43 @@ void OnSwapSummary() {
     if (f != 1u && (f % 180u) != 0u) return;
 
     std::lock_guard<std::mutex> lk(detail::IoMutex());
-    const uint64_t danger_n = g_danger_draws.load();
+    const uint64_t ok_n = g_ok_draws.load();
+    const uint64_t warn_n = g_warn_draws.load();
     const uint64_t error_n = g_error_draws.load();
+    const uint64_t danger_n = g_danger_draws.load();
+    const uint64_t d_ok = ok_n - g_prev_ok;
+    const uint64_t d_warn = warn_n - g_prev_warn;
+    const uint64_t d_err = error_n - g_prev_error;
+    const uint64_t d_dng = danger_n - g_prev_danger;
+    g_prev_ok = ok_n;
+    g_prev_warn = warn_n;
+    g_prev_error = error_n;
+    g_prev_danger = danger_n;
+
+    // Reflect current window health in [SUMMARY] severity so early intro fades do not
+    // pin every later gameplay summary to [ERROR].
     const logfmt::Severity sum_lv =
-        (danger_n > 0u) ? logfmt::Severity::Danger :
-        (error_n > 0u)  ? logfmt::Severity::Error  : logfmt::Severity::Info;
+        (d_dng > 0u) ? logfmt::Severity::Danger :
+        (d_err > 0u) ? logfmt::Severity::Error  : logfmt::Severity::Info;
     detail::WriteLineLocked(
         sum_lv, true,
-        "[SUMMARY] swap=%llu draws=%llu ok=%llu warn=%llu error=%llu danger=%llu "
-        "uniqueDraws=%zu uniqueAnom=%zu badDraws=%llu modelsReg=%zu texReg=%zu "
-        "counts=[progUnbound=%llu mode0=%llu ffUnbound=%llu texBlack=%llu texWhite=%llu p8NoPal=%llu tempUninit=%llu lit0=%llu tf0=%llu sel2Drop=%llu]",
+        "[SUMMARY] swap=%llu draws=%llu ok=%llu(+%llu) warn=%llu(+%llu) error=%llu(+%llu) danger=%llu(+%llu) "
+        "uniqueDraws=%zu uniqueAnom=%zu badDraws=%llu rtTracked=%u modelsReg=%zu texReg=%zu "
+        "counts=[progUnbound=%llu mode0=%llu ffUnbound=%llu texBlack=%llu texWhite=%llu p8NoPal=%llu tempUninit=%llu lit0=%llu tf0=%llu sel2Drop=%llu uiBlack=%llu]",
         static_cast<unsigned long long>(f),
         static_cast<unsigned long long>(g_total_draws.load()),
-        static_cast<unsigned long long>(g_ok_draws.load()),
-        static_cast<unsigned long long>(g_warn_draws.load()),
+        static_cast<unsigned long long>(ok_n),
+        static_cast<unsigned long long>(d_ok),
+        static_cast<unsigned long long>(warn_n),
+        static_cast<unsigned long long>(d_warn),
         static_cast<unsigned long long>(error_n),
+        static_cast<unsigned long long>(d_err),
         static_cast<unsigned long long>(danger_n),
+        static_cast<unsigned long long>(d_dng),
         g_logged_draws.size(),
         g_logged_anomalies.size(),
         static_cast<unsigned long long>(g_anomalous_draws.load()),
+        rt_tracker::TrackedTargetCount(),
         detail::RegisteredModelCountLocked(),
         detail::RegisteredTextureCountLocked(),
         static_cast<unsigned long long>(g_anomaly_counts[0].load()),
@@ -299,7 +322,8 @@ void OnSwapSummary() {
         static_cast<unsigned long long>(g_anomaly_counts[8].load()),
         static_cast<unsigned long long>(g_anomaly_counts[9].load()),
         static_cast<unsigned long long>(g_anomaly_counts[12].load()),
-        static_cast<unsigned long long>(g_anomaly_counts[13].load()));
+        static_cast<unsigned long long>(g_anomaly_counts[13].load()),
+        static_cast<unsigned long long>(g_anomaly_counts[14].load()));
 }
 
 }  // namespace objlog

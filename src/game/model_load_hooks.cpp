@@ -15,7 +15,10 @@
 namespace {
 
 uint32_t ProbeGfxD3dTex(uint32_t gfx_tex_va) {
-    if (!gfx_tex_va || !game::safe_mem::CanAccess(gfx_tex_va, 0x24u)) return 0;
+    if (!gfx_tex_va || !game::safe_mem::CanAccess(gfx_tex_va, 20u)) return 0;
+    gpu::TextureDesc direct_desc{};
+    if (gpu::Describe(gfx_tex_va, direct_desc) && direct_desc.data) return gfx_tex_va;
+    if (!game::safe_mem::CanAccess(gfx_tex_va, 0x24u)) return 0;
     for (uint32_t off : {0x08u, 0x04u, 0x0Cu, 0x10u, 0x14u, 0x18u, 0x1Cu}) {
         const uint32_t cand = game::safe_mem::Read32(gfx_tex_va + off, 0);
         gpu::TextureDesc desc{};
@@ -80,13 +83,9 @@ extern "C" void sub_004182E0(X86Context& ctx, uint8_t* base) {
     game::objlog::ClearDrawHint();
 }
 
-// MC3 material/pass committers updating deferred TSS (0x4228E0+) and shadow state (0x5594A4+)
-extern "C" void __imp__sub_000E2B90(X86Context& ctx, uint8_t* base);
-extern "C" void sub_000E2B90(X86Context& ctx, uint8_t* base) {
-    __imp__sub_000E2B90(ctx, base);
-    game::render_accuracy::InvalidateMc3dStateShadows();
-}
-
+// MC3 material/pass committers updating deferred TSS (0x4228E0+) and shadow state (0x5594A4+).
+// Note: sub_000E2B90 updates MC3D's own RS/TSS caches natively on every draw, so wiping
+// all 166 RS cache entries there is unnecessary; keep post-sync on infrequent material commits.
 extern "C" void __imp__sub_000E4340(X86Context& ctx, uint8_t* base);
 extern "C" void sub_000E4340(X86Context& ctx, uint8_t* base) {
     __imp__sub_000E4340(ctx, base);
