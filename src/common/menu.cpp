@@ -68,22 +68,22 @@ Settings DefaultSettings();  // native/main.cpp: a phone's first run, unlimited 
 namespace {
 
 constexpr uint32_t kAnisoValues[] = {0, 2, 4, 8, 16};
-const char* const kAnisoNames[] = {"GAME DEFAULT", "2x", "4x", "8x", "16x"};
+const char* const kAnisoNames[] = {"Off", "2x", "4x", "8x", "16x"};
 constexpr uint32_t kDistances[] = {1, 2, 4, 8};
-const char* const kDistanceNames[] = {"GAME DEFAULT", "2x", "4x", "8x"};
+const char* const kDistanceNames[] = {"Default", "2x", "4x", "8x"};
 constexpr uint32_t kAntiAliasings[] = {0, 1, 2};
-const char* const kAntiAliasingNames[] = {"OFF", "FXAA", "SSAA 2X"};
+const char* const kAntiAliasingNames[] = {"Off", "FXAA", "SSAA 2x"};
 constexpr uint32_t kFmvScales[] = {0, 1};
-const char* const kFmvScaleNames[] = {"FILL", "4:3"};
+const char* const kFmvScaleNames[] = {"Fill", "4:3"};
 constexpr uint32_t kScreenFilters[] = {0, 1, 2, 3, 4, 5, 6, 7, 8};
-const char* const kScreenFilterNames[] = {"OFF",  "CRT LIGHT", "CRT STRONG",   "SHARPEN", "VIBRANT",
-                                          "NOIR", "SEPIA",     "NIGHT VISION", "VHS"};
+const char* const kScreenFilterNames[] = {"Off",  "CRT Light", "CRT Strong",   "Sharpen", "Vibrant",
+                                          "Noir", "Sepia",     "Night Vision", "VHS"};
 constexpr uint32_t kAudioOutputs[] = {audio::kOutputAuto, audio::kOutputMono, audio::kOutputStereo,
                                       audio::kOutputSurround};
 const char* const kAudioOutputNames[] = {"AUTOMATIC", "MONO", "2.0 STEREO", "5.1 SURROUND"};
 const char* const kLanguageNames[] = {"ENGLISH", "FRENCH", "GERMAN", "ITALIAN", "SPANISH",
                                       "INDONESIAN"};  // as game::kLanguages
-constexpr uint32_t kFpsCaps[] = {30, 60, 75, 90, 120, 144, 165, 240, 360, kFpsCapRefresh, 0};
+constexpr uint32_t kFpsCaps[] = {30, 60, 90, 120, 144};
 
 int StepIndex(int index, int step, int count) {
     if (count <= 0) return 0;
@@ -121,10 +121,20 @@ int StepRange(int value, int lo, int hi, int inc, int step) {
     return lo + inc * StepIndex((std::clamp(value, lo, hi) - lo) / inc, step, count);
 }
 
-const char* OnOff(bool on) { return on ? "ON" : "OFF"; }
+const char* OnOff(bool on) { return on ? "On" : "Off"; }
 
 void Flip(bool& on, int step) {
     if (step) on = !on;
+}
+
+uint32_t NormalizedMaxFps(uint32_t fps_cap) {
+    return fps_cap >= 30u ? fps_cap : 60u;
+}
+
+void SyncDynamicResolutionBounds(game::Options& o, uint32_t fps_cap) {
+    o.dynamic_min_percent = 30;
+    o.dynamic_max_percent = 90;
+    o.dynamic_target_fps = NormalizedMaxFps(fps_cap);
 }
 
 // applies and saves
@@ -144,30 +154,22 @@ enum RowId { kRenderResolution, kMaxFps, kVsync, kFpsCounter, kAniso, kReloadBlu
 using rows::Kind;
 using rows::Row;
 
-// native options rows without HDR
-constexpr Row kGraphicsRows[] = {
-    {Kind::Heading, -1, "DISPLAY"},
-    {Kind::Value, kRenderResolution, "RENDER RESOLUTION"},
-    {Kind::Value, kFov, "FIELD OF VIEW"},
-    {Kind::Value, kViewmodelFov, "VIEWMODEL FIELD OF VIEW"},
-    {Kind::Value, kFmvScale, "FMV SCALE"},
-    {Kind::Value, kScreenFilter, "SCREEN FILTER"},
-    {Kind::Heading, -1, "PERFORMANCE"},
-    {Kind::Value, kVsync, "VERTICAL SYNC"},
-    {Kind::Value, kMaxFps, "MAX FRAME RATE"},
-    {Kind::Value, kFpsCounter, "FPS COUNTER"},
-    {Kind::Value, kDynamicRes, "DYNAMIC RESOLUTION"},
-    {Kind::Value, kDynamicTarget, "TARGET FRAME RATE"},
-    {Kind::Value, kDynamicMin, "MIN RESOLUTION"},
-    {Kind::Value, kDynamicMax, "MAX RESOLUTION"},
-    {Kind::Value, kDynamicHold, "HOLD BEFORE RAISING"},
-    {Kind::Heading, -1, "QUALITY"},
-    {Kind::Value, kAniso, "ANISOTROPIC FILTERING"},
-    {Kind::Value, kDrawDistance, "DRAW DISTANCE"},
-    {Kind::Value, kReloadBlur, "RELOAD BLUR"},
-    {Kind::Value, kBloom, "BLOOM"},
-    {Kind::Value, kFog, "FOG"},
-    {Kind::Value, kAntiAliasing, "ANTI-ALIASING"},
+// native Display Options rows (concise Audio Options style)
+constexpr Row kDisplayRows[] = {
+    {Kind::Value, kRenderResolution, "Render Scale"},
+    {Kind::Value, kDynamicRes, "Dynamic Resolution"},
+    {Kind::Value, kMaxFps, "Max FPS"},
+    {Kind::Value, kScreenFilter, "Screen Filter"},
+    {Kind::Value, kVsync, "VSync"},
+    {Kind::Value, kFmvScale, "FMV Scale"},
+};
+
+// native Quality Options rows
+constexpr Row kQualityRows[] = {
+    {Kind::Value, kAntiAliasing, "Anti Aliasing"},
+    {Kind::Value, kBloom, "Bloom"},
+    {Kind::Value, kAniso, "Anisotropic Filtering"},
+    {Kind::Value, kFog, "Fog"},
 };
 
 constexpr Row kTouchRows[] = {
@@ -301,9 +303,14 @@ bool StepDisplayRow(int id, int step, Settings& s, char (&text)[64]) {
     game::Options& o = game::Opt();
     switch (id) {
         case kRenderResolution: {
-            // 0% to 125% in steps of 5; greyed while the dynamic resolution has it, which it shows as it is now
-            if (step) s.render_percent = uint32_t(StepRange(int(s.render_percent), 0, 125, 5, step));
-            PercentText(o.dynamic_resolution ? dynres::Percent() : s.render_percent, text);
+            // 25 to 125 in steps of 5 (default 75); adjusting switches Dynamic Resolution off cleanly
+            if (step) {
+                if (o.dynamic_resolution) o.dynamic_resolution = false;
+                s.render_percent = uint32_t(StepRange(int(s.render_percent), 25, 125, 5, step));
+            }
+            const uint32_t shown = o.dynamic_resolution ? dynres::Percent()
+                                                        : std::clamp(s.render_percent, 25u, 125u);
+            std::snprintf(text, sizeof(text), "%u", shown);
             return true;
         }
         case kDynamicTarget:
@@ -343,10 +350,13 @@ bool StepDisplayRow(int id, int step, Settings& s, char (&text)[64]) {
             FovText(o.viewmodel_fov, text);
             return true;
         case kMaxFps: {
-            uint32_t cap = kFpsCaps[StepTable(kFpsCaps, s.fps_cap, step)];
-            if (cap == kFpsCapRefresh) std::snprintf(text, sizeof(text), "REFRESH RATE");
-            else if (cap) std::snprintf(text, sizeof(text), "%u", cap);
-            else std::snprintf(text, sizeof(text), "UNLIMITED (DEFAULT)");
+            uint32_t current = NormalizedMaxFps(s.fps_cap);
+            uint32_t cap = kFpsCaps[StepTable(kFpsCaps, current, step)];
+            if (step) {
+                s.fps_cap = cap;
+                o.dynamic_target_fps = cap;
+            }
+            std::snprintf(text, sizeof(text), "%u", cap);
             return true;
         }
         default:
@@ -493,6 +503,9 @@ std::string RowText(int id, int step, Settings& s = Get()) {
     char text[64] = "";
     if (bool* on = ToggleFlag(s, id)) {
         Flip(*on, step);
+        if (step && id == kDynamicRes && *on) {
+            SyncDynamicResolutionBounds(game::Opt(), s.fps_cap);
+        }
         std::snprintf(text, sizeof(text), "%s", OnOff(*on));
     } else if (!StepDisplayRow(id, step, s, text) && !StepGraphicsRow(id, step, s, text)) {
         StepInputRow(id, step, text);
@@ -588,8 +601,12 @@ const rows::Row* rows::Page(int page, size_t* count) {
         *count = std::size(kGeneralRows);
         return kGeneralRows;
     }
-    *count = std::size(kGraphicsRows);
-    return kGraphicsRows;
+    if (page == rows::kQualityPage) {
+        *count = std::size(kQualityRows);
+        return kQualityRows;
+    }
+    *count = std::size(kDisplayRows);
+    return kDisplayRows;
 }
 
 const rows::Row* rows::Controller(size_t* count) {
@@ -610,13 +627,12 @@ std::string rows::Value(const Row& row, int step) {
 
 void rows::Defaults(int page) { RestoreDefaults(page); }
 
-bool rows::Restorable(int page) { return page == 0 || page == kKeyboardPage; }
+bool rows::Restorable(int page) { return page == rows::kDisplayPage || page == rows::kQualityPage || page == kKeyboardPage; }
 
 bool rows::Enabled(const Row& row) {
     if (row.kind != Kind::Value) return true;
     bool dynamic = game::Opt().dynamic_resolution;
     switch (row.id) {
-        case kRenderResolution: return !dynamic;
         case kDynamicTarget:
         case kDynamicMin:
         case kDynamicMax:

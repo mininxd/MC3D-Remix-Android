@@ -49,15 +49,23 @@ void Change(uint32_t to, bool up, clock::time_point now) {
     Restart(now + kSettle);
 }
 
+constexpr uint32_t kDynamicMinPercent = 30;
+constexpr uint32_t kDynamicMaxPercent = 90;
+
+uint32_t TargetFps() {
+    const uint32_t cap = app::Get().fps_cap;
+    if (cap >= 30u) return cap;
+    return std::max(game::Opt().dynamic_target_fps, 60u);
+}
+
 }  // namespace
 
 uint32_t Percent() {
     const game::Options& o = game::Opt();
-    uint32_t base = app::Get().render_percent;
+    uint32_t base = std::clamp(app::Get().render_percent, 25u, 125u);
     if (!o.dynamic_resolution) return base;
-    uint32_t lo = std::min(o.dynamic_min_percent, o.dynamic_max_percent), hi = o.dynamic_max_percent;
     uint32_t p = g_percent;
-    return std::clamp(p ? p : base, lo, hi);
+    return std::clamp(p ? p : base, kDynamicMinPercent, kDynamicMaxPercent);
 }
 
 void Frame() {
@@ -85,8 +93,8 @@ void Frame() {
     if (el < kWindow) return;
     float fps = float(g_frames) / std::chrono::duration<float>(el).count();
     Restart(now);
-    float target = float(std::max(o.dynamic_target_fps, 1u));
-    uint32_t lo = std::min(o.dynamic_min_percent, o.dynamic_max_percent), hi = o.dynamic_max_percent;
+    float target = float(TargetFps());
+    uint32_t lo = kDynamicMinPercent, hi = kDynamicMaxPercent;
     if (fps < target * kLow) {
         if (p <= lo) return;
         // the cost goes with the pixels, the square of the percent

@@ -136,14 +136,18 @@ toml::table Table() {
     return t;
 }
 
-// a phone renders at 70% default render scale unless settings or dynamic resolution override it
-constexpr uint32_t kFirstRunRenderPercent = 70;
+// a phone renders at 75% default render scale unless settings or dynamic resolution override it
+constexpr uint32_t kFirstRunRenderPercent = 75;
 
 void PhoneFrameDefaults(Settings& s) {
     s.render_percent = kFirstRunRenderPercent;
-    s.fps_cap = 0;
+    s.fps_cap = 60;
     s.vsync = false;
-    game::Opt().dynamic_resolution = true;
+    game::Options& o = game::Opt();
+    o.dynamic_resolution = true;
+    o.dynamic_min_percent = 30;
+    o.dynamic_max_percent = 90;
+    o.dynamic_target_fps = s.fps_cap;
 }
 
 }  // namespace

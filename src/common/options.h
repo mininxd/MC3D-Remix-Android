@@ -23,8 +23,8 @@ struct Options {
     uint32_t draw_distance = 1;
     bool dynamic_resolution = true;
     uint32_t dynamic_target_fps = 60;
-    uint32_t dynamic_min_percent = 40;
-    uint32_t dynamic_max_percent = 100;
+    uint32_t dynamic_min_percent = 30;
+    uint32_t dynamic_max_percent = 90;
     uint32_t dynamic_hold = 5;
     float mouse_sensitivity = 1.0f;
     float touch_sensitivity = 1.0f;

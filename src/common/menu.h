@@ -20,7 +20,10 @@ struct Row {
     int id;  // a bind row's input action
     const char* label;
 };
-// 0 graphics, 1 touch controls, 2 general, 3 mouse and keyboard, 5 credits
+inline constexpr int kDisplayPage = 0;
+inline constexpr int kQualityPage = 4;
+
+// 0 display, 1 touch controls, 2 general, 3 mouse and keyboard, 4 quality, 5 credits
 const Row* Page(int page, size_t* count);
 // the sticks' rows, on the game's control setup page
 const Row* Controller(size_t* count);
