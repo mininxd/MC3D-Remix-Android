@@ -58,15 +58,20 @@ void EnsureOpenLocked() {
     }
 
     std::fprintf(g_fp, "=== MC3D-Remix Android 3D Object, Model & Material Accuracy Log ===\n");
+    std::fprintf(g_fp, "# Format: [SSSSS.MMM] [LEVEL ] [SECTION] key=value ...\n");
+    std::fprintf(g_fp, "# Levels: [INFO  ] asset/summary  [OK    ] clean draw  [WARN  ] minor  [ERROR ] broken draw  [DANGER] critical\n");
     std::fprintf(g_fp, "# Sections: [LOAD_MOD] [LOAD_TEX] [PAGE_TEX] [PAGE_SHDR] [OBJ3D] [UI2D] [SUMMARY]\n");
-    std::fprintf(g_fp, "# Anomalies explain why geometry renders black, white, untextured, or mis-shaded.\n\n");
+    std::fprintf(g_fp, "# Filter examples: grep '\\[ERROR' / grep '\\[DANGER' / grep '\\[WARN' / grep '\\[OK'\n\n");
     std::fflush(g_fp);
-    LOGI("object_logs: opened %s", chosen);
+    LOGR("[OK] object_logs: opened %s (structured INFO/OK/WARN/ERROR/DANGER format)", chosen);
 }
 
-void WriteLineVLocked(bool flush_now, const char* fmt, va_list ap) {
+void WriteLineVLocked(logfmt::Severity lv, bool flush_now, const char* fmt, va_list ap) {
     EnsureOpenLocked();
     if (!g_fp) return;
+    char prefix[32];
+    logfmt::FormatPrefix(lv, prefix, sizeof(prefix));
+    std::fputs(prefix, g_fp);
     std::vfprintf(g_fp, fmt, ap);
     std::fputc('\n', g_fp);
     ++g_pending_flush;
@@ -76,18 +81,18 @@ void WriteLineVLocked(bool flush_now, const char* fmt, va_list ap) {
     }
 }
 
-void WriteLineLocked(bool flush_now, const char* fmt, ...) {
+void WriteLineLocked(logfmt::Severity lv, bool flush_now, const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    WriteLineVLocked(flush_now, fmt, ap);
+    WriteLineVLocked(lv, flush_now, fmt, ap);
     va_end(ap);
 }
 
-void WriteFormatted(bool flush_now, const char* fmt, ...) {
+void WriteFormatted(logfmt::Severity lv, bool flush_now, const char* fmt, ...) {
     std::lock_guard<std::mutex> lk(g_io_mu);
     va_list ap;
     va_start(ap, fmt);
-    WriteLineVLocked(flush_now, fmt, ap);
+    WriteLineVLocked(lv, flush_now, fmt, ap);
     va_end(ap);
 }
 

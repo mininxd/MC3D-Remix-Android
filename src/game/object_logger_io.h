@@ -6,14 +6,16 @@
 #include <string>
 #include <unordered_set>
 
+#include "game/log_severity.h"
+
 namespace game {
 namespace objlog {
 namespace detail {
 
 std::mutex& IoMutex();
 void EnsureOpenLocked();
-void WriteLineLocked(bool flush_now, const char* fmt, ...);
-void WriteFormatted(bool flush_now, const char* fmt, ...);
+void WriteLineLocked(logfmt::Severity lv, bool flush_now, const char* fmt, ...);
+void WriteFormatted(logfmt::Severity lv, bool flush_now, const char* fmt, ...);
 
 void RegisterModelLocked(uint32_t obj_va, const char* name);
 void RegisterTextureLocked(uint32_t gfx_tex_va, uint32_t d3d_tex_va, uint32_t data_va, const char* name);

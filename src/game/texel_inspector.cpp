@@ -5,7 +5,9 @@
 #include <cstring>
 
 #include "game/guest_mem_safe.h"
+#include "game/rt_tracker.h"
 #include "gpu/texture.h"
+#include "kernel/memory.h"
 
 namespace game {
 namespace objlog {
@@ -106,8 +108,14 @@ StageTexInspection InspectStageTexture(const gpu::State& s, uint32_t stage) {
     out.is_p8 = (fi.name && std::strcmp(fi.name, "P8") == 0);
     out.p8_no_pal = out.is_p8 && (out.pal_va == 0u);
 
-    if (d.data != 0 && (d.data == s.rt.data || (s.zs.data != 0 && d.data == s.zs.data))) {
+    const uint32_t active_rt_va = s.rt.data ? mem::VirtualFromPhysical(s.rt.data) : 0u;
+    const uint32_t active_zs_va = s.zs.data ? mem::VirtualFromPhysical(s.zs.data) : 0u;
+    if (d.data != 0u && (d.data == active_rt_va || (active_zs_va != 0u && d.data == active_zs_va))) {
         out.rt_feedback = true;
+        out.sample_class = TexSampleClass::RenderTarget;
+        return out;
+    }
+    if (d.data != 0u && rt_tracker::IsKnownRenderTarget(d.data)) {
         out.sample_class = TexSampleClass::RenderTarget;
         return out;
     }

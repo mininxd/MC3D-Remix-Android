@@ -10,6 +10,7 @@
 #include <unordered_set>
 
 #include "game/guest_mem_safe.h"
+#include "game/log_severity.h"
 #include "game/object_anomaly.h"
 #include "game/object_logger_io.h"
 #include "game/render_accuracy_internal.h"
@@ -35,6 +36,10 @@ std::unordered_set<uint64_t> g_logged_anomalies;
 
 std::atomic<uint64_t> g_total_draws{0};
 std::atomic<uint64_t> g_anomalous_draws{0};
+std::atomic<uint64_t> g_ok_draws{0};
+std::atomic<uint64_t> g_warn_draws{0};
+std::atomic<uint64_t> g_error_draws{0};
+std::atomic<uint64_t> g_danger_draws{0};
 std::atomic<uint64_t> g_swap_frames{0};
 std::array<std::atomic<uint64_t>, 14> g_anomaly_counts{};
 
@@ -73,7 +78,14 @@ uint64_t BuildDrawSignature(const gpu::State& s, const char* tag, uint32_t obj_v
     return h;
 }
 
-void RecordAnomalyCounters(uint32_t flags) {
+void RecordAnomalyCounters(uint32_t flags, logfmt::Severity lv) {
+    switch (lv) {
+        case logfmt::Severity::Ok:     ++g_ok_draws; break;
+        case logfmt::Severity::Warn:   ++g_warn_draws; break;
+        case logfmt::Severity::Error:  ++g_error_draws; break;
+        case logfmt::Severity::Danger: ++g_danger_draws; break;
+        case logfmt::Severity::Info:   break;
+    }
     if (flags == kAnomNone) return;
     ++g_anomalous_draws;
     for (uint32_t bit = 0; bit < g_anomaly_counts.size(); ++bit) {
@@ -137,11 +149,13 @@ void LogModelLoad(const char* kind, const char* name, uint32_t obj_va, uint32_t 
         if (detail::InsertBoundedLocked(g_logged_loads, sig, kMaxLoggedLoads)) {
             if (d3dtex) {
                 const gpu::FormatInfo& fi = gpu::Format(desc.format);
-                detail::WriteLineLocked(true, "[LOAD_TEX] name=\"%s\" gfx=0x%08X d3d=0x%08X %s %ux%u data=0x%08X",
+                detail::WriteLineLocked(logfmt::Severity::Info, true,
+                                        "[LOAD_TEX] name=\"%s\" gfx=0x%08X d3d=0x%08X %s %ux%u data=0x%08X",
                                         safe_name, obj_va, d3dtex, fi.name ? fi.name : "UNK",
                                         desc.width, desc.height, desc.data);
             } else {
-                detail::WriteLineLocked(true, "[LOAD_TEX] name=\"%s\" gfx=0x%08X aux=0x%08X",
+                detail::WriteLineLocked(logfmt::Severity::Info, true,
+                                        "[LOAD_TEX] name=\"%s\" gfx=0x%08X aux=0x%08X",
                                         safe_name, obj_va, aux);
             }
         }
@@ -150,7 +164,8 @@ void LogModelLoad(const char* kind, const char* name, uint32_t obj_va, uint32_t 
 
     detail::RegisterModelLocked(obj_va, safe_name);
     if (detail::InsertBoundedLocked(g_logged_loads, sig, kMaxLoggedLoads)) {
-        detail::WriteLineLocked(true, "[LOAD_%s] name=\"%s\" obj=0x%08X aux=0x%08X",
+        detail::WriteLineLocked(logfmt::Severity::Info, true,
+                                "[LOAD_%s] name=\"%s\" obj=0x%08X aux=0x%08X",
                                 kind ? kind : "MOD", safe_name, obj_va, aux);
     }
 }
@@ -160,7 +175,7 @@ void LogResourcePageIn(const char* kind, uint32_t rsc_va, uint32_t arr_va, uint3
     std::lock_guard<std::mutex> lk(detail::IoMutex());
     const uint64_t sig = Mix64(Mix64(rsc_va, arr_va), count);
     if (!detail::InsertBoundedLocked(g_logged_loads, sig, kMaxLoggedLoads)) return;
-    detail::WriteLineLocked(true, "[%s] rsc=0x%08X arr=0x%08X count=%u",
+    detail::WriteLineLocked(logfmt::Severity::Info, true, "[%s] rsc=0x%08X arr=0x%08X count=%u",
                             kind ? kind : "PAGE", rsc_va, arr_va, count);
 
     if (std::strcmp(kind, "PAGE_TEX") == 0 && arr_va && count > 0) {
@@ -201,18 +216,19 @@ void LogDrawState(const gpu::State& s) {
 
     const uint32_t ps_mask = s.ps ? game::render_accuracy::GetCombinerTexReadMask(s.ps->def) : 0u;
     const AnomalyReport anom = AnalyzeDrawAnomalies(s, stages, ps_mask);
-    RecordAnomalyCounters(anom.flags);
+    const logfmt::Severity sev = logfmt::ClassifyAnomalyFlags(anom.flags);
+    RecordAnomalyCounters(anom.flags, sev);
     if (!under_cap) {
         if (anom.flags == kAnomNone || !detail::InsertBoundedLocked(g_logged_anomalies, sig, kMaxLoggedAnomalies)) return;
     }
 
     const std::string model_name = detail::LookupModelLocked(obj_va, s.streams[0].vb, s.index_buffer);
     const std::string tex_desc = FormatTexStages(stages, anom.read_tex_mask);
-    const bool flush_now = (anom.flags != kAnomNone);
+    const bool flush_now = (sev == logfmt::Severity::Error || sev == logfmt::Severity::Danger);
 
     if (s.ps) {
         detail::WriteLineLocked(
-            flush_now,
+            sev, flush_now,
             "[%s] tag=%s obj=0x%08X%s%s vs=0x%08X(%s,r=0x%X) vb0=0x%08X(s=%u) ib=0x%08X "
             "ps=0x%08X(modes=0x%05X,mask=0x%X) blend=%u/%u/%u alpha=%u%s ANOMALY=[%s]",
             anom.is_3d ? "OBJ3D" : "UI2D", tag, obj_va,
@@ -227,7 +243,7 @@ void LogDrawState(const gpu::State& s) {
             tex_desc.c_str(), anom.summary.c_str());
     } else {
         detail::WriteLineLocked(
-            flush_now,
+            sev, flush_now,
             "[%s] tag=%s obj=0x%08X%s%s vs=0x%08X(%s,r=0x%X) vb0=0x%08X(s=%u) ib=0x%08X "
             "FF cop=(%u,%u,%u,%u) a1=(%u,%u,%u) a2=(%u,%u,%u) aop=(%u,%u,%u) res=(%u,%u) tfa=0x%08X lit=%u(%u) blend=%u%s ANOMALY=[%s]",
             anom.is_3d ? "OBJ3D" : "UI2D", tag, obj_va,
@@ -253,12 +269,22 @@ void OnSwapSummary() {
     if (f != 1u && (f % 180u) != 0u) return;
 
     std::lock_guard<std::mutex> lk(detail::IoMutex());
+    const uint64_t danger_n = g_danger_draws.load();
+    const uint64_t error_n = g_error_draws.load();
+    const logfmt::Severity sum_lv =
+        (danger_n > 0u) ? logfmt::Severity::Danger :
+        (error_n > 0u)  ? logfmt::Severity::Error  : logfmt::Severity::Info;
     detail::WriteLineLocked(
-        true,
-        "[SUMMARY] swap=%llu draws=%llu uniqueDraws=%zu uniqueAnom=%zu badDraws=%llu modelsReg=%zu texReg=%zu "
+        sum_lv, true,
+        "[SUMMARY] swap=%llu draws=%llu ok=%llu warn=%llu error=%llu danger=%llu "
+        "uniqueDraws=%zu uniqueAnom=%zu badDraws=%llu modelsReg=%zu texReg=%zu "
         "counts=[progUnbound=%llu mode0=%llu ffUnbound=%llu texBlack=%llu texWhite=%llu p8NoPal=%llu tempUninit=%llu lit0=%llu tf0=%llu sel2Drop=%llu]",
         static_cast<unsigned long long>(f),
         static_cast<unsigned long long>(g_total_draws.load()),
+        static_cast<unsigned long long>(g_ok_draws.load()),
+        static_cast<unsigned long long>(g_warn_draws.load()),
+        static_cast<unsigned long long>(error_n),
+        static_cast<unsigned long long>(danger_n),
         g_logged_draws.size(),
         g_logged_anomalies.size(),
         static_cast<unsigned long long>(g_anomalous_draws.load()),

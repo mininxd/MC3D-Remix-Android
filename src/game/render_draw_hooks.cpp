@@ -3,13 +3,17 @@
 #include "game/deferred_tss_guard.h"
 #include "game/guest_mem_safe.h"
 #include "game/object_logger.h"
+#include "game/push_hle.h"
+#include "game/rt_tracker.h"
 #include "game/stateblock_hle.h"
 
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 
 #include "cpu/x86_context.h"
 #include "cpu/x86_ops.h"
+#include "xdk/d3d8.h"
 #include "xdk/hle.h"
 
 // Helpers generating clean strong wrappers around generated X86_WEAK_FUNC symbols.
@@ -21,57 +25,30 @@
         game::render_accuracy::InvalidateMc3dStateShadows();                  \
     }
 
-#define WRAP_PRE(name)                                                        \
+#define WRAP_PUSH_CALLER(name)                                                \
     extern "C" void __imp__##name(X86Context& ctx, uint8_t* base);            \
     extern "C" void name(X86Context& ctx, uint8_t* base) {                    \
-        game::render_accuracy::ScopedGuestTssGuard tss_guard;                 \
-        game::render_accuracy::ApplyRenderAccuracy();                         \
+        game::push_hle::ScopedPushCallerGuard push_guard(#name);              \
         __imp__##name(ctx, base);                                             \
     }
 
-#define WRAP_PUSH_DRAW(name)                                                  \
+#define WRAP_RT_BIND(name)                                                    \
     extern "C" void __imp__##name(X86Context& ctx, uint8_t* base);            \
     extern "C" void name(X86Context& ctx, uint8_t* base) {                    \
         __imp__##name(ctx, base);                                             \
-        game::render_accuracy::FlushCapturedPushSpan(ctx, base, 0, #name);    \
+        std::lock_guard<std::recursive_mutex> lock(d3d::Lock());              \
+        game::rt_tracker::RecordActiveTargets(d3d::State());                  \
     }
 
 // ============================================================================
-// 1. Missing XDK 5849 D3D8 HLE Entry Points (left weak/unhooked by d3d8.cpp)
+// 1. Missing XDK 5849 D3D8 HLE Entry Points
+//    (SetPalette sub_00412580 & BeginPush sub_00416390 live in push_hle.cpp;
+//     StateBlock APIs & GetVertexShader live in stateblock_hooks.cpp.)
 // ============================================================================
 
-// D3DDevice_SetPalette(stage, palette) - stdcall (ret 0x08)
-extern "C" void __imp__sub_00412580(X86Context& ctx, uint8_t* base);
-extern "C" void sub_00412580(X86Context& ctx, uint8_t* base) {
-    const uint32_t stage = game::render_accuracy::SafeR32(ctx.esp + 4u) & 3u;
-    const uint32_t pal = game::render_accuracy::SafeR32(ctx.esp + 8u);
-    __imp__sub_00412580(ctx, base);
-    game::render_accuracy::NotifyPaletteBound(stage, pal);
-}
-
-// D3DDevice_BeginPush(dwords) - stdcall (ret 0x04) & inline wrapper sub_00416390
-extern "C" void __imp__sub_00416860(X86Context& ctx, uint8_t* base);
-extern "C" void sub_00416860(X86Context& ctx, uint8_t* base) {
-    const uint32_t dwords = game::render_accuracy::SafeR32(ctx.esp + 4u);
-    __imp__sub_00416860(ctx, base);
-    game::render_accuracy::RecordPushSpanBegin(ctx.eax, dwords);
-}
-
-extern "C" void __imp__sub_00416390(X86Context& ctx, uint8_t* base);
-extern "C" void sub_00416390(X86Context& ctx, uint8_t* base) {
-    const uint32_t req = game::render_accuracy::SafeR32(ctx.esp + 4u) + 1u;
-    const uint32_t saved_edx = ctx.edx;
-    __imp__sub_00416390(ctx, base);
-    (void)saved_edx;
-    game::render_accuracy::RecordPushSpanBegin(ctx.eax, req);
-}
-
-// D3DDevice_ApplyStateBlock (sub_00416DFF) and other StateBlock APIs live in stateblock_hooks.cpp.
 WRAP_POST(sub_00418060)
 WRAP_POST(sub_00417F40)
 WRAP_POST(sub_00414830)
-WRAP_POST(sub_00417B70)
-WRAP_POST(sub_004150F0)
 
 // Internal XDK deferred state emitters (kept covered alongside high-level hooks).
 WRAP_POST(sub_0041DCF0)
@@ -112,32 +89,36 @@ WRAP_DRAW_OBJ(sub_000E74E0)
 WRAP_POST(sub_000E3650)
 WRAP_DRAW_OBJ(sub_00051410)
 WRAP_DRAW_OBJ(sub_000988A0)
-WRAP_POST(sub_002D17C0)
 WRAP_DRAW_OBJ(sub_002D6830)
 WRAP_DRAW_OBJ(sub_002D6A18)
 
 // ============================================================================
-// 4. All MC3D Pushbuffer EndPush Callers (10/10) + Immediate Mode Begin/End
+// 4. All MC3D Pushbuffer EndPush Callers (10/10) + RenderTarget Wrappers
 // ============================================================================
 
-WRAP_POST(sub_002D5D90)
-
+// Immediate-mode End: applies accuracy once right before d3d8.cpp's sub_004163B0 draws.
 extern "C" void __imp__sub_002D5E40(X86Context& ctx, uint8_t* base);
 extern "C" void sub_002D5E40(X86Context& ctx, uint8_t* base) {
+    game::render_accuracy::ScopedGuestTssGuard tss_guard;
+    game::objlog::SetDrawHint("sub_002D5E40", 0u);
+    game::render_accuracy::ApplyRenderAccuracy();
     __imp__sub_002D5E40(ctx, base);
-    const uint32_t end = game::render_accuracy::SafeR32(game::render_accuracy::addr::kMcImmPushCur);
-    game::render_accuracy::FlushCapturedPushSpan(ctx, base, end, "sub_002D5E40");
+    game::objlog::ClearDrawHint();
 }
 
-WRAP_PUSH_DRAW(sub_00041480)
-WRAP_PUSH_DRAW(sub_00041BA0)
-WRAP_PUSH_DRAW(sub_000E37D0)
-WRAP_PUSH_DRAW(sub_00332810)
-WRAP_PUSH_DRAW(sub_002D18E0)
-WRAP_PUSH_DRAW(sub_002D1B50)
-WRAP_PUSH_DRAW(sub_002D1D50)
-WRAP_PUSH_DRAW(sub_002D1F00)
-WRAP_PUSH_DRAW(sub_002D1FC6)
+WRAP_PUSH_CALLER(sub_00041480)
+WRAP_PUSH_CALLER(sub_00041BA0)
+WRAP_PUSH_CALLER(sub_000E37D0)
+WRAP_PUSH_CALLER(sub_00332810)
+WRAP_PUSH_CALLER(sub_002D18E0)
+WRAP_PUSH_CALLER(sub_002D1B50)
+WRAP_PUSH_CALLER(sub_002D1D50)
+WRAP_PUSH_CALLER(sub_002D1F00)
+WRAP_PUSH_CALLER(sub_002D1FC6)
+
+// Track GPU render targets bound via MC3D's SetRenderTarget wrappers (even if only cleared).
+WRAP_RT_BIND(sub_000E40A0)
+WRAP_RT_BIND(sub_002D21D0)
 
 // ============================================================================
 // 5. MC3D Shader, Texture, Palette & Stateblock Managers

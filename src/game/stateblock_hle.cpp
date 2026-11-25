@@ -608,7 +608,7 @@ uint32_t End(X86Context& ctx, uint8_t* base, uint32_t out_token_va) {
     }
     const uint64_t n = ++g_created_count;
     if (n <= 12u) {
-        LOGR("stateblock_hle: EndStateBlock tok=%08X ps=%d(%08X) vs=%d(%08X) tex=%X psc=%X",
+        LOGR("[INFO] stateblock_hle: EndStateBlock tok=%08X ps=%d(%08X) vs=%d(%08X) tex=%X psc=%X",
              token, blk->has_ps ? 1 : 0, blk->ps ? blk->ps->handle : 0u,
              blk->has_vs ? 1 : 0, blk->vs_handle, blk->tex_mask, blk->psc_mask);
     }
@@ -625,7 +625,7 @@ uint32_t Create(X86Context& ctx, uint8_t* base, uint32_t type, uint32_t out_toke
     }
     const uint64_t n = ++g_created_count;
     if (n <= 12u) {
-        LOGR("stateblock_hle: CreateStateBlock(type=%u) tok=%08X ps=%08X vs=%08X",
+        LOGR("[INFO] stateblock_hle: CreateStateBlock(type=%u) tok=%08X ps=%08X vs=%08X",
              type, token, blk->ps ? blk->ps->handle : 0u, blk->vs_handle);
     }
     return 0u;
@@ -656,7 +656,7 @@ uint32_t Apply(X86Context& ctx, uint8_t* base, uint32_t token) {
     ApplyBlockToDevice(ctx, base, *blk);
     const uint64_t n = ++g_applied_count;
     if (n <= 8u || (n % 5000u) == 0u) {
-        LOGR("stateblock_hle: ApplyStateBlock #%llu tok=%08X ps=%d(%08X) vs=%d(%08X)",
+        LOGR("[INFO] stateblock_hle: ApplyStateBlock #%llu tok=%08X ps=%d(%08X) vs=%d(%08X)",
              static_cast<unsigned long long>(n), token,
              blk->has_ps ? 1 : 0, blk->ps ? blk->ps->handle : 0u,
              blk->has_vs ? 1 : 0, blk->vs_handle);

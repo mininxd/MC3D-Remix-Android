@@ -50,9 +50,7 @@ void NotifyPixelShaderSet(uint32_t ps_handle);
 void NotifyPaletteBound(uint32_t stage, uint32_t pal_va);
 void InvalidateMc3dStateShadows();
 
-// Pushbuffer capture & HLE draw execution helpers used by render_draw_hooks.cpp.
-void RecordPushSpanBegin(uint32_t begin_va, uint32_t max_dwords);
-void FlushCapturedPushSpan(X86Context& ctx, uint8_t* base, uint32_t explicit_end, const char* tag);
+// Diagnostics and combiner register analysis helpers.
 void OnSwapDiagnostics();
 uint32_t GetCombinerTexReadMask(const uint32_t* def);
 

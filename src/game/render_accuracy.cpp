@@ -2,7 +2,9 @@
 #include "game/render_accuracy_internal.h"
 #include "game/d3d_guest_sync.h"
 #include "game/deferred_tss_guard.h"
+#include "game/mc3d_cache_sync.h"
 #include "game/object_logger.h"
+#include "game/rt_tracker.h"
 
 #include <algorithm>
 #include <array>
@@ -13,29 +15,23 @@
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
-#include <vector>
 
 #include "core/log.h"
 #include "cpu/x86_ops.h"
 #include "gpu/shaders.h"
 #include "gpu/state.h"
 #include "gpu/texture.h"
-#include "gpu/vertex.h"
 #include "image_symbols.h"
 #include "kernel/kernel.h"
 #include "kernel/memory.h"
 #include "xdk/d3d8.h"
 #include "xdk/hle.h"
 
-extern "C" void sub_004168B0(X86Context& ctx, uint8_t* base);  // D3D_KickOffAndWaitForIdle
-extern "C" void sub_00417570(X86Context& ctx, uint8_t* base);  // D3DDevice_DrawVerticesUP
-
 namespace game {
 namespace render_accuracy {
 
 namespace {
 
-constexpr uint32_t kPushGuardSentinel = 0xFEEDBABEu;
 constexpr uint32_t kDeferredTssSlots = 22;  // slots 0..21 synced by d3d8.cpp SyncDeferred()
 constexpr uint32_t kMaxDiagFf   = 48;
 constexpr uint32_t kMaxDiagProg = 64;
@@ -59,7 +55,6 @@ std::atomic<uint64_t> g_ff_repairs{0};
 std::atomic<uint64_t> g_ps_mode_repairs{0};
 std::atomic<uint64_t> g_tex_recoveries{0};
 std::atomic<uint64_t> g_pal_recoveries{0};
-std::atomic<uint64_t> g_push_flushes{0};
 
 std::mutex g_cache_mu;
 uint32_t g_last_dev_tex[4] = {};
@@ -84,20 +79,6 @@ std::unordered_map<PsCloneKey, std::shared_ptr<gpu::PixelShader>, PsCloneHash> g
 std::unordered_set<uint64_t> g_logged_ff;
 std::unordered_set<uint64_t> g_logged_prog;
 uint32_t g_last_s_tex[4] = {};
-
-// Contiguous scratch ring for HLE DrawIndexedVerticesUP execution.
-constexpr uint32_t kDiupRingBytes = 4u << 20;
-constexpr uint32_t kDiupHeaderCount = 64;
-std::mutex g_diup_mu;
-uint32_t g_diup_ring = 0;
-uint32_t g_diup_pos = 0;
-uint32_t g_diup_hdr_idx = 0;
-uint32_t g_diup_headers[kDiupHeaderCount] = {};
-
-thread_local uint32_t tl_push_begin = 0;
-thread_local uint32_t tl_push_max_dwords = 0;
-thread_local uint32_t tl_push_vs_handle = 0;
-thread_local std::shared_ptr<gpu::VertexShader> tl_push_vs;
 
 inline bool UsesTextureArg(uint32_t arg) {
     return (arg & kTaMask) == kTaTexture;
@@ -421,7 +402,7 @@ void LogUniqueDrawState(const gpu::State& s, const std::array<gpu::TextureDesc, 
         }
         std::lock_guard<std::mutex> lk(g_cache_mu);
         if (g_logged_prog.size() >= kMaxDiagProg || !g_logged_prog.insert(sig).second) return;
-        LOGR("render_accuracy[PROG] ps=%08X modes=%05X readMask=%X tex=(%08X:%s,%08X:%s,%08X:%s,%08X:%s) pal=(%08X,%08X)",
+        LOGR("[INFO] render_accuracy[PROG] ps=%08X modes=%05X readMask=%X tex=(%08X:%s,%08X:%s,%08X:%s,%08X:%s) pal=(%08X,%08X)",
              s.ps->handle, s.ps->def[54], read_mask,
              s.textures[0], tex_ok[0] ? gpu::Format(tex_descs[0].format).name : "NONE",
              s.textures[1], tex_ok[1] ? gpu::Format(tex_descs[1].format).name : "NONE",
@@ -438,7 +419,7 @@ void LogUniqueDrawState(const gpu::State& s, const std::array<gpu::TextureDesc, 
         }
         std::lock_guard<std::mutex> lk(g_cache_mu);
         if (g_logged_ff.size() >= kMaxDiagFf || !g_logged_ff.insert(sig).second) return;
-        LOGR("render_accuracy[FF] cop=(%u,%u,%u) a1=(%u,%u,%u) a2=(%u,%u,%u) tex=(%08X:%s,%08X:%s) pal=%08X",
+        LOGR("[INFO] render_accuracy[FF] cop=(%u,%u,%u) a1=(%u,%u,%u) a2=(%u,%u,%u) tex=(%08X:%s,%08X:%s) pal=%08X",
              s.tss[0][gpu::kTssColorOp], s.tss[1][gpu::kTssColorOp], s.tss[2][gpu::kTssColorOp],
              s.tss[0][gpu::kTssColorArg1], s.tss[1][gpu::kTssColorArg1], s.tss[2][gpu::kTssColorArg1],
              s.tss[0][gpu::kTssColorArg2], s.tss[1][gpu::kTssColorArg2], s.tss[2][gpu::kTssColorArg2],
@@ -446,53 +427,6 @@ void LogUniqueDrawState(const gpu::State& s, const std::array<gpu::TextureDesc, 
              s.textures[1], tex_ok[1] ? gpu::Format(tex_descs[1].format).name : "NONE",
              s.palettes[0]);
     }
-}
-
-uint32_t CurrentVertexStrideBytes(const gpu::State& s) {
-    if (s.vs_handle & 1u) return s.vs ? s.vs->stream_stride[0] : 0;
-    gpu::VertexShader fvf{};
-    gpu::FvfInputs(s.vs_handle, fvf);
-    return fvf.stream_stride[0];
-}
-
-void ApplySimpleMethodToState(gpu::State& s, uint32_t method, uint32_t val) {
-    if ((method >> 2) < s.simple.size()) s.simple[method >> 2] = val;
-}
-
-uint32_t AllocDiupContiguousVertices(X86Context& ctx, uint8_t* base,
-                                     const void* src, uint32_t bytes, uint32_t& out_hdr_va) {
-    std::lock_guard<std::mutex> lk(g_diup_mu);
-    if (!g_diup_ring) {
-        g_diup_ring = mem::AllocContiguous(kDiupRingBytes, 0, 0xFFFFFFFFu, 0x1000u);
-        for (uint32_t i = 0; i < kDiupHeaderCount; ++i) {
-            g_diup_headers[i] = mem::AllocSystem(20, 16);
-            std::memset(kernel::HostPtr(g_diup_headers[i]), 0, 20);
-            // High refcount ensures SetStreamSource Release never frees permanent scratch headers.
-            kernel::W32(g_diup_headers[i], 0x01400001u);
-        }
-        LOGR("render_accuracy: allocated DIUP ring=%08X (%u MB)", g_diup_ring, kDiupRingBytes >> 20);
-    }
-
-    const uint32_t room = (bytes + 63u) & ~63u;
-    if (room > kDiupRingBytes) return 0;
-
-    if (g_diup_pos + room > kDiupRingBytes) {
-        g_diup_mu.unlock();
-        X86_PUSH32(0u);
-        sub_004168B0(ctx, base);  // Wait for GPU before overwriting ring head
-        g_diup_mu.lock();
-        g_diup_pos = 0;
-    }
-
-    const uint32_t dst_va = g_diup_ring + g_diup_pos;
-    std::memcpy(kernel::HostPtr(dst_va), src, bytes);
-    g_diup_pos += room;
-
-    out_hdr_va = g_diup_headers[g_diup_hdr_idx];
-    g_diup_hdr_idx = (g_diup_hdr_idx + 1u) % kDiupHeaderCount;
-    kernel::W32(out_hdr_va, 0x01400001u);
-    kernel::W32(out_hdr_va + 4u, mem::PhysicalFromVirtual(dst_va));
-    return dst_va;
 }
 
 }  // namespace
@@ -539,129 +473,7 @@ void NotifyPaletteBound(uint32_t stage, uint32_t pal_va) {
 }
 
 void InvalidateMc3dStateShadows() {
-    // Force MC3D to miss shadow comparisons and issue D3D SetTexture/SetPalette/SetPS/SetVS next draw.
-    for (uint32_t i = 0; i < 4; ++i) {
-        SafeW32(addr::kMcTexturesShadow + i * 4u, 0xFFFFFFFFu);
-        SafeW32(addr::kMcPalettesShadow + i * 4u, 0xFFFFFFFFu);
-    }
-    SafeW32(addr::kMcPsShadow, 0xFFFFFFFFu);
-    SafeW32(addr::kMcVsShadow, 0xFFFFFFFFu);
-}
-
-void RecordPushSpanBegin(uint32_t begin_va, uint32_t max_dwords) {
-    if (!begin_va || !max_dwords || max_dwords > 0x20000u) return;
-    if (!CanAccessGuest(begin_va, max_dwords * 4u)) return;
-    for (uint32_t i = 0; i < max_dwords; ++i) {
-        kernel::W32(begin_va + i * 4u, kPushGuardSentinel);
-    }
-    tl_push_begin = begin_va;
-    tl_push_max_dwords = max_dwords;
-    std::lock_guard<std::recursive_mutex> lock(d3d::Lock());
-    tl_push_vs_handle = d3d::State().vs_handle;
-    tl_push_vs = d3d::State().vs;
-}
-
-void FlushCapturedPushSpan(X86Context& ctx, uint8_t* base, uint32_t explicit_end, const char* tag) {
-    const uint32_t begin = tl_push_begin;
-    const uint32_t max_dwords = tl_push_max_dwords;
-    const uint32_t saved_push_vs_handle = tl_push_vs_handle;
-    std::shared_ptr<gpu::VertexShader> saved_push_vs = std::move(tl_push_vs);
-    tl_push_begin = 0;
-    tl_push_max_dwords = 0;
-    tl_push_vs_handle = 0;
-    tl_push_vs.reset();
-    if (!begin || !max_dwords) return;
-
-    const uint32_t max_end = begin + max_dwords * 4u;
-    uint32_t end = (explicit_end > begin && explicit_end <= max_end) ? explicit_end : max_end;
-    if (!CanAccessGuest(begin, end - begin)) return;
-
-    constexpr uint32_t kBeginEnd = 0x17FCu;
-    constexpr uint32_t kInlineArray = 0x1818u;
-
-    uint32_t prim = 0;
-    std::vector<uint32_t> vertices;
-    uint32_t p = begin;
-    while (p + 4 <= end) {
-        const uint32_t head = kernel::R32(p);
-        if (head == kPushGuardSentinel) break;
-        const uint32_t method = head & 0x1FFCu;
-        const uint32_t count = (head >> 18) & 0x7FFu;
-        p += 4;
-        if ((head & 0xA0030003u) != 0 || count * 4u > end - p) break;
-
-        for (uint32_t i = 0; i < count; ++i, p += 4) {
-            const uint32_t m = (head & 0x40000000u) ? method : (method + i * 4u);
-            const uint32_t v = kernel::R32(p);
-            if (m == kInlineArray) {
-                if (prim) vertices.push_back(v);
-            } else if (m != kBeginEnd) {
-                std::lock_guard<std::recursive_mutex> lock(d3d::Lock());
-                ApplySimpleMethodToState(d3d::State(), m, v);
-            } else if (v != 0) {
-                prim = v;
-                vertices.clear();
-            } else if (prim != 0) {
-                // Several push callers restore the prior VertexShader right after EndPush;
-                // temporarily bind the draw's captured VS/FVF so stride and inputs match.
-                uint32_t post_vs_handle = 0;
-                std::shared_ptr<gpu::VertexShader> post_vs;
-                uint32_t stride = 0;
-                {
-                    std::lock_guard<std::recursive_mutex> lock(d3d::Lock());
-                    auto& s = d3d::State();
-                    post_vs_handle = s.vs_handle;
-                    post_vs = s.vs;
-                    if (saved_push_vs_handle != 0) {
-                        s.vs_handle = saved_push_vs_handle;
-                        s.vs = saved_push_vs;
-                    }
-                    stride = CurrentVertexStrideBytes(s);
-                }
-                {
-                    ScopedGuestTssGuard tss_guard;
-                    game::objlog::SetDrawHint(tag, 0);
-                    ApplyRenderAccuracy();
-                    const uint32_t bytes = uint32_t(vertices.size()) * 4u;
-                    if (stride && bytes >= stride && (bytes % stride) == 0) {
-                        const uint32_t vert_count = bytes / stride;
-                        uint32_t guest_hdr = 0;
-                        const uint32_t guest_verts =
-                            AllocDiupContiguousVertices(ctx, base, vertices.data(), bytes, guest_hdr);
-                        (void)guest_hdr;
-                        if (guest_verts) {
-                            const uint32_t fl = ++g_push_flushes;
-                            if (fl <= 8) {
-                                LOGR("render_accuracy: PushFlush[%s] prim=%u verts=%u stride=%u vs=%08X",
-                                     tag, prim, vert_count, stride, saved_push_vs_handle);
-                            }
-                            const uint32_t saved_eax = ctx.eax;
-                            const uint32_t saved_ecx = ctx.ecx;
-                            const uint32_t saved_edx = ctx.edx;
-                            X86_PUSH32(stride);
-                            X86_PUSH32(guest_verts);
-                            X86_PUSH32(vert_count);
-                            X86_PUSH32(prim);
-                            X86_PUSH32(0u);
-                            sub_00417570(ctx, base);
-                            ctx.eax = saved_eax;
-                            ctx.ecx = saved_ecx;
-                            ctx.edx = saved_edx;
-                        }
-                    }
-                    game::objlog::ClearDrawHint();
-                }
-                {
-                    std::lock_guard<std::recursive_mutex> lock(d3d::Lock());
-                    auto& s = d3d::State();
-                    s.vs_handle = post_vs_handle;
-                    s.vs = std::move(post_vs);
-                }
-                prim = 0;
-                vertices.clear();
-            }
-        }
-    }
+    mc3d_cache::SyncAndInvalidateAll();
 }
 
 void ApplyRenderAccuracy() {
@@ -671,6 +483,7 @@ void ApplyRenderAccuracy() {
     std::lock_guard<std::recursive_mutex> lock(d3d::Lock());
     gpu::State& s = d3d::State();
 
+    rt_tracker::RecordActiveTargets(s);
     PullDeferredFromGuest(s);
     d3d_sync::MirrorHostStateToGuest(s);
 
@@ -696,14 +509,13 @@ void OnSwapDiagnostics() {
     game::objlog::OnSwapSummary();
     const uint64_t f = ++g_swap_count;
     if (f == 1 || (f % 300u) == 0u) {
-        LOGR("render_accuracy: swap=%llu apply=%llu ffFix=%llu psFix=%llu texFix=%llu palFix=%llu push=%llu",
+        LOGR("[INFO] render_accuracy: swap=%llu apply=%llu ffFix=%llu psFix=%llu texFix=%llu palFix=%llu",
              static_cast<unsigned long long>(f),
              static_cast<unsigned long long>(g_apply_calls.load()),
              static_cast<unsigned long long>(g_ff_repairs.load()),
              static_cast<unsigned long long>(g_ps_mode_repairs.load()),
              static_cast<unsigned long long>(g_tex_recoveries.load()),
-             static_cast<unsigned long long>(g_pal_recoveries.load()),
-             static_cast<unsigned long long>(g_push_flushes.load()));
+             static_cast<unsigned long long>(g_pal_recoveries.load()));
     }
 }
 
@@ -749,7 +561,7 @@ void EnsureKernelCompatHooks() {
             if (ret_len) SafeW32(ret_len, written);
             kernel::Return(ctx, status, 5);
         });
-        LOGR("render_accuracy: installed fixed IoQueryVolumeInformation (ordinal 76) export");
+        LOGR("[OK] render_accuracy: installed fixed IoQueryVolumeInformation (ordinal 76) export");
     });
 }
 
@@ -758,7 +570,7 @@ void InitRenderAccuracy() {
         g_initialized.store(true, std::memory_order_release);
         EnsureKernelCompatHooks();
         game::objlog::Init();
-        LOGR("render_accuracy: initialized (MC3DR Xbox D3D8/NV2A HLE+Combiner Accuracy Engine)");
+        LOGR("[OK] render_accuracy: initialized (MC3DR Xbox D3D8/NV2A HLE+Combiner Accuracy Engine)");
     });
 }
 
