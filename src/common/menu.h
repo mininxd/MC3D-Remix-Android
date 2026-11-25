@@ -9,6 +9,7 @@ namespace app {
 bool MenuOpen();
 bool Capturing();  // a key binding waits for a key
 void ToggleMenu();
+void OpenMenuPage(int page);
 void DrawUi(double fps);
 inline constexpr uint32_t kFpsCapRefresh = 1;  // Settings::fps_cap: just under the display's refresh rate
 void PaceFrame();  // app::Pace, with kFpsCapRefresh; game thread, after the present

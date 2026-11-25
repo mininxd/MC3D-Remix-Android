@@ -47,19 +47,32 @@ void PullGuestDeferredToHost(gpu::State& s) {
 void MirrorHostStateToGuest(const gpu::State& s) {
     const uint32_t pDev = safe_mem::Read32(render_accuracy::addr::kD3dDevicePtr, 0u);
     if (pDev && safe_mem::CanAccess(pDev + kDevVertexShaderHnd, 4u)) {
-        kernel::W32(pDev + render_accuracy::addr::kDevPixelShader, s.ps ? s.ps->handle : 0u);
-        kernel::W32(pDev + kDevVertexShaderHnd, s.vs_handle);
+        const uint32_t ps_h = s.ps ? s.ps->handle : 0u;
+        if (kernel::R32(pDev + render_accuracy::addr::kDevPixelShader) != ps_h) {
+            kernel::W32(pDev + render_accuracy::addr::kDevPixelShader, ps_h);
+        }
+        if (kernel::R32(pDev + kDevVertexShaderHnd) != s.vs_handle) {
+            kernel::W32(pDev + kDevVertexShaderHnd, s.vs_handle);
+        }
         const uint32_t vs_ptr =
             ((s.vs_handle & 1u) && (s.vs_handle & ~1u)) ? (s.vs_handle & ~1u) : kD3dFvfShaderStruct;
-        kernel::W32(pDev + kDevVertexShaderPtr, vs_ptr);
+        if (kernel::R32(pDev + kDevVertexShaderPtr) != vs_ptr) {
+            kernel::W32(pDev + kDevVertexShaderPtr, vs_ptr);
+        }
     }
 
+    if (!safe_mem::CanAccess(render_accuracy::addr::kD3dRenderState, gpu::kRsDeferredFirst * 4u)) {
+        return;
+    }
     const uint32_t start_rs = s.ps ? 0u : 57u;
+    auto* guest_rs = static_cast<uint32_t*>(kernel::HostPtr(render_accuracy::addr::kD3dRenderState));
     for (uint32_t rs = start_rs; rs < gpu::kRsDeferredFirst; ++rs) {
         const uint32_t method = SimpleMethodForRs(rs);
-        if (!method || (method >> 2) >= s.simple.size()) continue;
-        const uint32_t ea = render_accuracy::addr::kD3dRenderState + rs * 4u;
-        if (safe_mem::CanAccess(ea, 4u)) kernel::W32(ea, s.simple[method >> 2]);
+        if (!method) continue;
+        const uint32_t idx = method >> 2;
+        if (idx < s.simple.size() && guest_rs[rs] != s.simple[idx]) {
+            guest_rs[rs] = s.simple[idx];
+        }
     }
 }
 

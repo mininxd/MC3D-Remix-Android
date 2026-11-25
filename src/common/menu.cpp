@@ -948,7 +948,13 @@ void DrawPanel() {
     constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
                                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoTitleBar;
     if (ImGui::Begin("##settings", nullptr, kFlags)) {
-        DrawTitle("CHEATS");
+        const char* title = "CHEATS";
+        if (g_page == 0) title = "GRAPHICS OPTIONS";
+        else if (g_page == kTouchPage) title = "TOUCH CONTROLS";
+        else if (g_page == kGeneralPage) title = "GENERAL";
+        else if (g_page == kKeyboardPage) title = "MOUSE & KEYBOARD";
+        else if (g_page == kCreditsPage) title = "CREDITS";
+        DrawTitle(title);
         ImGui::Separator();
         float footer = ImGui::GetTextLineHeightWithSpacing() + ImGui::GetFrameHeightWithSpacing() + em;
         // a scrollbar a thumb can take, not the desktop's thin one
@@ -1077,9 +1083,17 @@ bool Capturing() { return g_capture >= 0; }
 
 void ToggleMenu() {
     bool open = !MenuOpen();
+    if (open) g_page = kCheatsPage;
     g_open.store(open, std::memory_order_relaxed);
     g_capture = -1;
     if (open) input::ReleaseCursor();
+}
+
+void OpenMenuPage(int page) {
+    g_page = page;
+    g_open.store(true, std::memory_order_relaxed);
+    g_capture = -1;
+    input::ReleaseCursor();
 }
 
 void DrawUi(double fps) {

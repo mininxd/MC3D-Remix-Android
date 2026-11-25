@@ -227,6 +227,9 @@ void LogDrawState(const gpu::State& s) {
     Init();
     ++g_total_draws;
 
+    static std::atomic<bool> s_budget_exhausted{false};
+    if (s_budget_exhausted.load(std::memory_order_relaxed)) return;
+
     const char* tag = tl_draw_tag ? tl_draw_tag : "APPLY";
     const uint32_t obj_va = tl_draw_obj_va;
     const char* eff_name = ActiveEffectName();
@@ -239,22 +242,22 @@ void LogDrawState(const gpu::State& s) {
     const uint64_t sig = FinalizeDrawSignature(fast_sig, s, vp);
 
     std::lock_guard<std::mutex> lk(detail::IoMutex());
-    const bool under_cap = (g_logged_draws.size() < kMaxLoggedDraws);
-    const bool track_effect = (eff_name != nullptr && g_logged_effects.size() < kMaxLoggedEffects);
-    bool already_logged_normal = false;
-    if (under_cap) {
-        already_logged_normal = !detail::InsertBoundedLocked(g_logged_draws, sig, kMaxLoggedDraws);
-    } else {
-        already_logged_normal = (g_logged_draws.find(sig) != g_logged_draws.end()) ||
-                                (g_logged_anomalies.find(sig) != g_logged_anomalies.end());
-    }
-    if (track_effect) {
-        if (detail::InsertBoundedLocked(g_logged_effects, sig, kMaxLoggedEffects)) {
-            already_logged_normal = false;
-        }
-    }
+    if (s_budget_exhausted.load(std::memory_order_relaxed)) return;
     if (tl_fast_seen.size() < kMaxTlFastSeen) tl_fast_seen.insert(fast_sig);
-    if (already_logged_normal) return;
+
+    const bool under_cap = (g_logged_draws.size() < kMaxLoggedDraws);
+    bool is_new_effect = false;
+    if (eff_name != nullptr) {
+        if (g_logged_effects.find(sig) != g_logged_effects.end()) return;
+        is_new_effect = detail::InsertBoundedLocked(g_logged_effects, sig, kMaxLoggedEffects);
+        if (!is_new_effect && !under_cap) return;
+    }
+
+    const bool already_logged_normal = under_cap
+        ? !detail::InsertBoundedLocked(g_logged_draws, sig, kMaxLoggedDraws)
+        : (g_logged_draws.find(sig) != g_logged_draws.end() ||
+           g_logged_anomalies.find(sig) != g_logged_anomalies.end());
+    if (already_logged_normal && !is_new_effect) return;
 
     std::array<StageTexInspection, 4> stages{};
     for (uint32_t i = 0; i < 4u; ++i) stages[i] = InspectStageTexture(s, i);
@@ -263,14 +266,21 @@ void LogDrawState(const gpu::State& s) {
     const AnomalyReport anom = AnalyzeDrawAnomalies(s, stages, ps_mask, vp, eff_name);
     const logfmt::Severity sev = logfmt::ClassifyAnomalyFlags(anom.flags);
     RecordAnomalyCounters(anom.flags, sev);
-    if (!under_cap && !(eff_name != nullptr && g_logged_effects.find(sig) != g_logged_effects.end())) {
+    if (!under_cap && !is_new_effect) {
         if (anom.flags == kAnomNone || !detail::InsertBoundedLocked(g_logged_anomalies, sig, kMaxLoggedAnomalies)) return;
+    }
+
+    static uint32_t s_lines_written = 0;
+    constexpr uint32_t kMaxDetailLogLines = 1536u;
+    if (++s_lines_written >= kMaxDetailLogLines) {
+        s_budget_exhausted.store(true, std::memory_order_relaxed);
     }
 
     const std::string model_name = detail::LookupModelLocked(obj_va, s.streams[0].vb, s.index_buffer);
     const std::string tex_desc = FormatTexStages(stages, anom.read_tex_mask);
     const std::string blend_eff = FormatBlendAndEffectSuffix(s, vp, eff_name);
-    const bool flush_now = (sev == logfmt::Severity::Error || sev == logfmt::Severity::Danger || eff_name != nullptr);
+    const bool flush_now = (s_lines_written <= 64u) &&
+                           (sev == logfmt::Severity::Error || sev == logfmt::Severity::Danger);
 
     if (s.ps) {
         detail::WriteLineLocked(

@@ -328,31 +328,43 @@ VkFormat VertexFormat(uint32_t dxgi) {
 
 // ---- DXT on the CPU, for GPUs without BC textures (most phones)
 
-void Rgb565(uint16_t c, uint8_t* bgr) {
-    bgr[2] = uint8_t((c >> 11) * 255 / 31);
-    bgr[1] = uint8_t(((c >> 5) & 63) * 255 / 63);
-    bgr[0] = uint8_t((c & 31) * 255 / 31);
+inline uint32_t Rgb565Bgra(uint16_t c) {
+    uint32_t r = (c >> 11) & 31u;
+    uint32_t g = (c >> 5) & 63u;
+    uint32_t b = c & 31u;
+    r = (r << 3) | (r >> 2);
+    g = (g << 2) | (g >> 4);
+    b = (b << 3) | (b >> 2);
+    return 0xFF000000u | (r << 16) | (g << 8) | b;
 }
 
-// one 4x4 block's colours, BGRA, out 16 x 4 bytes; dxt1 alpha for the 3 colour mode
-void ColourBlock(const uint8_t* b, bool dxt1, uint8_t* out) {
-    uint16_t c0 = uint16_t(b[0] | b[1] << 8), c1 = uint16_t(b[2] | b[3] << 8);
-    uint8_t pal[4][4] = {};
-    Rgb565(c0, pal[0]);
-    Rgb565(c1, pal[1]);
-    for (int i = 0; i < 4; i++) pal[i][3] = 255;
-    for (int k = 0; k < 3; k++) {
-        if (c0 > c1 || !dxt1) {
-            pal[2][k] = uint8_t((2 * pal[0][k] + pal[1][k]) / 3);
-            pal[3][k] = uint8_t((pal[0][k] + 2 * pal[1][k]) / 3);
-        } else {
-            pal[2][k] = uint8_t((pal[0][k] + pal[1][k]) / 2);
-            pal[3][k] = 0;
-        }
+inline uint32_t LerpRgbDiv3(uint32_t c0, uint32_t c1) {
+    uint32_t b = (((c0 & 0xFFu) * 2u + (c1 & 0xFFu)) * 21846u) >> 16;
+    uint32_t g = ((((c0 >> 8) & 0xFFu) * 2u + ((c1 >> 8) & 0xFFu)) * 21846u) >> 16;
+    uint32_t r = ((((c0 >> 16) & 0xFFu) * 2u + ((c1 >> 16) & 0xFFu)) * 21846u) >> 16;
+    return 0xFF000000u | (r << 16) | (g << 8) | b;
+}
+
+inline uint32_t AvgRgbDiv2(uint32_t c0, uint32_t c1) {
+    uint32_t b = ((c0 & 0xFFu) + (c1 & 0xFFu)) >> 1;
+    uint32_t g = (((c0 >> 8) & 0xFFu) + ((c1 >> 8) & 0xFFu)) >> 1;
+    uint32_t r = (((c0 >> 16) & 0xFFu) + ((c1 >> 16) & 0xFFu)) >> 1;
+    return 0xFF000000u | (r << 16) | (g << 8) | b;
+}
+
+// Compute 4-entry packed BGRA palette for a 4x4 BC1/2/3 colour block.
+inline void DecodeColourPalette(const uint8_t* b, bool dxt1, uint32_t pal[4]) {
+    uint16_t c0 = uint16_t(b[0] | (uint16_t(b[1]) << 8));
+    uint16_t c1 = uint16_t(b[2] | (uint16_t(b[3]) << 8));
+    pal[0] = Rgb565Bgra(c0);
+    pal[1] = Rgb565Bgra(c1);
+    if (c0 > c1 || !dxt1) {
+        pal[2] = LerpRgbDiv3(pal[0], pal[1]);
+        pal[3] = LerpRgbDiv3(pal[1], pal[0]);
+    } else {
+        pal[2] = AvgRgbDiv2(pal[0], pal[1]);
+        pal[3] = 0;
     }
-    if (dxt1 && c0 <= c1) pal[3][3] = 0;
-    uint32_t bits = uint32_t(b[4] | b[5] << 8 | b[6] << 16 | uint32_t(b[7]) << 24);
-    for (int i = 0; i < 16; i++) std::memcpy(out + i * 4, pal[(bits >> (i * 2)) & 3], 4);
 }
 
 // a level of DXT1, 3 or 5 blocks (bw x bh per slice, row_pitch bytes a block row) into w x h BGRA texels
@@ -360,34 +372,102 @@ void DecodeDxt(Host host, const std::vector<uint8_t>& in, uint32_t row_pitch, ui
                std::vector<uint8_t>& out) {
     uint32_t block = host == Host::BC1 ? 8 : 16;
     uint32_t bw = std::max(1u, (w + 3) / 4), bh = std::max(1u, (h + 3) / 4);
-    out.assign(size_t(w) * h * z * 4, 0);
-    uint8_t px[64];
-    for (uint32_t s = 0; s < z; s++)
-        for (uint32_t by = 0; by < bh; by++)
+    size_t out_bytes = size_t(w) * h * z * 4;
+    out.resize(out_bytes);
+    if ((w & 3u) || (h & 3u)) std::memset(out.data(), 0, out_bytes);
+    auto* dst_all = reinterpret_cast<uint32_t*>(out.data());
+    uint32_t pal[4];
+    for (uint32_t s = 0; s < z; s++) {
+        uint32_t* dst_slice = dst_all + size_t(s) * w * h;
+        for (uint32_t by = 0; by < bh; by++) {
+            uint32_t max_y = std::min(4u, h - by * 4u);
             for (uint32_t bx = 0; bx < bw; bx++) {
                 size_t at = (size_t(s) * bh + by) * row_pitch + size_t(bx) * block;
-                if (at + block > in.size()) continue;
-                const uint8_t* b = &in[at];
-                ColourBlock(host == Host::BC1 ? b : b + 8, host == Host::BC1, px);
-                if (host == Host::BC2) {
-                    for (int i = 0; i < 16; i++) px[i * 4 + 3] = uint8_t(((b[i / 2] >> ((i & 1) * 4)) & 15) * 17);
-                } else if (host == Host::BC3) {
-                    uint8_t a[8] = {b[0], b[1]};
-                    if (a[0] > a[1]) {
-                        for (int i = 1; i < 7; i++) a[i + 1] = uint8_t(((7 - i) * a[0] + i * a[1]) / 7);
-                    } else {
-                        for (int i = 1; i < 5; i++) a[i + 1] = uint8_t(((5 - i) * a[0] + i * a[1]) / 5);
-                        a[6] = 0;
-                        a[7] = 255;
-                    }
-                    uint64_t bits = 0;
-                    for (int i = 0; i < 6; i++) bits |= uint64_t(b[2 + i]) << (8 * i);
-                    for (int i = 0; i < 16; i++) px[i * 4 + 3] = a[(bits >> (3 * i)) & 7];
+                if (at + block > in.size()) {
+                    for (uint32_t y = 0; y < max_y; y++)
+                        std::memset(dst_slice + (by * 4u + y) * w + bx * 4u, 0, std::min(4u, w - bx * 4u) * 4u);
+                    continue;
                 }
-                for (uint32_t y = 0; y < 4 && by * 4 + y < h; y++)
-                    for (uint32_t x = 0; x < 4 && bx * 4 + x < w; x++)
-                        std::memcpy(&out[((size_t(s) * h + by * 4 + y) * w + bx * 4 + x) * 4], px + (y * 4 + x) * 4, 4);
+                const uint8_t* b = &in[at];
+                const uint8_t* cb = (host == Host::BC1) ? b : (b + 8);
+                DecodeColourPalette(cb, host == Host::BC1, pal);
+                uint32_t bits = uint32_t(cb[4]) | (uint32_t(cb[5]) << 8) | (uint32_t(cb[6]) << 16) |
+                                (uint32_t(cb[7]) << 24);
+                uint32_t max_x = std::min(4u, w - bx * 4u);
+                uint32_t* block_dst = dst_slice + size_t(by * 4u) * w + bx * 4u;
+
+                if (host == Host::BC1) {
+                    if (max_x == 4u && max_y == 4u) {
+                        for (uint32_t y = 0; y < 4u; y++) {
+                            uint32_t* row = block_dst + y * w;
+                            row[0] = pal[bits & 3u];
+                            row[1] = pal[(bits >> 2) & 3u];
+                            row[2] = pal[(bits >> 4) & 3u];
+                            row[3] = pal[(bits >> 6) & 3u];
+                            bits >>= 8;
+                        }
+                    } else {
+                        for (uint32_t y = 0; y < max_y; y++) {
+                            uint32_t* row = block_dst + y * w;
+                            for (uint32_t x = 0; x < max_x; x++) row[x] = pal[(bits >> ((y * 4u + x) * 2u)) & 3u];
+                        }
+                    }
+                } else if (host == Host::BC2) {
+                    if (max_x == 4u && max_y == 4u) {
+                        for (uint32_t y = 0; y < 4u; y++) {
+                            uint32_t* row = block_dst + y * w;
+                            uint16_t ab = uint16_t(b[y * 2u]) | (uint16_t(b[y * 2u + 1u]) << 8);
+                            row[0] = (pal[bits & 3u] & 0x00FFFFFFu) | (uint32_t((ab & 15u) * 17u) << 24);
+                            row[1] = (pal[(bits >> 2) & 3u] & 0x00FFFFFFu) | (uint32_t(((ab >> 4) & 15u) * 17u) << 24);
+                            row[2] = (pal[(bits >> 4) & 3u] & 0x00FFFFFFu) | (uint32_t(((ab >> 8) & 15u) * 17u) << 24);
+                            row[3] = (pal[(bits >> 6) & 3u] & 0x00FFFFFFu) | (uint32_t(((ab >> 12) & 15u) * 17u) << 24);
+                            bits >>= 8;
+                        }
+                    } else {
+                        for (uint32_t y = 0; y < max_y; y++) {
+                            uint32_t* row = block_dst + y * w;
+                            for (uint32_t x = 0; x < max_x; x++) {
+                                uint32_t i = y * 4u + x;
+                                uint32_t a = ((b[i >> 1] >> ((i & 1u) * 4u)) & 15u) * 17u;
+                                row[x] = (pal[(bits >> (i * 2u)) & 3u] & 0x00FFFFFFu) | (a << 24);
+                            }
+                        }
+                    }
+                } else {
+                    uint32_t a[8] = {b[0], b[1]};
+                    if (a[0] > a[1]) {
+                        for (uint32_t i = 1; i < 7u; i++) a[i + 1u] = (((7u - i) * a[0] + i * a[1]) * 9363u) >> 16;
+                    } else {
+                        for (uint32_t i = 1; i < 5u; i++) a[i + 1u] = (((5u - i) * a[0] + i * a[1]) * 13108u) >> 16;
+                        a[6] = 0;
+                        a[7] = 255u;
+                    }
+                    uint64_t abits = uint64_t(b[2]) | (uint64_t(b[3]) << 8) | (uint64_t(b[4]) << 16) |
+                                     (uint64_t(b[5]) << 24) | (uint64_t(b[6]) << 32) | (uint64_t(b[7]) << 40);
+                    if (max_x == 4u && max_y == 4u) {
+                        for (uint32_t y = 0; y < 4u; y++) {
+                            uint32_t* row = block_dst + y * w;
+                            row[0] = (pal[bits & 3u] & 0x00FFFFFFu) | (a[abits & 7u] << 24);
+                            row[1] = (pal[(bits >> 2) & 3u] & 0x00FFFFFFu) | (a[(abits >> 3) & 7u] << 24);
+                            row[2] = (pal[(bits >> 4) & 3u] & 0x00FFFFFFu) | (a[(abits >> 6) & 7u] << 24);
+                            row[3] = (pal[(bits >> 6) & 3u] & 0x00FFFFFFu) | (a[(abits >> 9) & 7u] << 24);
+                            bits >>= 8;
+                            abits >>= 12;
+                        }
+                    } else {
+                        for (uint32_t y = 0; y < max_y; y++) {
+                            uint32_t* row = block_dst + y * w;
+                            for (uint32_t x = 0; x < max_x; x++) {
+                                uint32_t i = y * 4u + x;
+                                row[x] = (pal[(bits >> (i * 2u)) & 3u] & 0x00FFFFFFu) |
+                                         (a[(abits >> (i * 3u)) & 7u] << 24);
+                            }
+                        }
+                    }
+                }
             }
+        }
+    }
 }
 
 // ---- device memory: 64 MB blocks per memory type, first fit inside them; big allocations get their own
@@ -525,6 +605,7 @@ struct Image {
     VkFormat fmt = VK_FORMAT_UNDEFINED;
     uint32_t w = 1, h = 1, d = 1, layers = 1, levels = 1;
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    uint64_t cb_render_seq = 0;
     bool depth = false, stencil = false;
     explicit operator bool() const { return image != VK_NULL_HANDLE; }
 };
@@ -667,8 +748,8 @@ uint8_t ShadowDepthKind(uint32_t format) { return format == kFmtD16 || format ==
 
 uint32_t GuestPitch(uint32_t width) { return (width * 4 + 63) & ~63u; }
 
-constexpr uint32_t kSigWholeMax = 65536;
-constexpr uint32_t kSigSamples = 64;
+constexpr uint32_t kSigWholeMax = 4096;
+constexpr uint32_t kSigSamples = 32;
 constexpr uint32_t kSigSampleBytes = 64;
 
 uint64_t MemSig(uint32_t data, uint32_t total) {
@@ -824,12 +905,14 @@ void FillSurfaceConstants(const State& s, GuestExtent size, DrawConstants& c) {
 }
 
 void FillCombinerConstants(const State& s, DrawConstants& c) {
-    for (int i = 0; i < 8; i++) {
-        Color(SimpleState(s, kMPsConstant0 + i * 4), c.pc[i * 2]);
-        Color(SimpleState(s, kMPsConstant1 + i * 4), c.pc[i * 2 + 1]);
+    if (s.ps) {
+        for (int i = 0; i < 8; i++) {
+            Color(SimpleState(s, kMPsConstant0 + i * 4), c.pc[i * 2]);
+            Color(SimpleState(s, kMPsConstant1 + i * 4), c.pc[i * 2 + 1]);
+        }
+        Color(SimpleState(s, kMPsFinalConstant0), c.pc[16]);
+        Color(SimpleState(s, kMPsFinalConstant1), c.pc[17]);
     }
-    Color(SimpleState(s, kMPsFinalConstant0), c.pc[16]);
-    Color(SimpleState(s, kMPsFinalConstant1), c.pc[17]);
     Color(s.rs[kRsTextureFactor], c.tfactor);
 }
 
@@ -1023,23 +1106,26 @@ public:
     void WaitGpuFrame(uint64_t n);
 
 private:
+    struct Alloc {
+        VkBuffer buf;
+        VkDeviceSize off;
+        uint8_t* cpu;
+    };
     struct Frame {
         VkCommandPool pool = VK_NULL_HANDLE;
         VkCommandBuffer cb = VK_NULL_HANDLE;
         Buffer upload;
         VkDeviceSize used = 0;
+        Alloc dummy_vc{};
         uint64_t value = 0;  // the timeline's value once the GPU is past this frame
         std::vector<Image> images;
         std::vector<Buffer> buffers;
         std::vector<VkDescriptorPool> pools;
         size_t pool_at = 0;  // the descriptor pool sets come from
+        size_t total_sets = 0;
         std::unordered_map<uint64_t, VkDescriptorSet> sets;
+        std::unordered_map<VkImageView, std::vector<uint64_t>> view_keys;
         VkSemaphore acquire = VK_NULL_HANDLE;
-    };
-    struct Alloc {
-        VkBuffer buf;
-        VkDeviceSize off;
-        uint8_t* cpu;
     };
     struct Late {
         Buffer rb[kFrames];
@@ -1101,6 +1187,9 @@ private:
     void DropFramebuffers(VkImageView v);
     void SetViewport(float x, float y, float w, float h);
     void SetScissor(int32_t x0, int32_t y0, int32_t x1, int32_t y1);
+    void BindPipeline(VkPipeline pipe);
+    void SetBlend(const float c[4]);
+    void SetStencil(uint32_t ref);
     VkDescriptorSet Set(const VkImageView views[4], const VkSampler samplers[4]);
     void BindSet(VkDescriptorSet set, VkDeviceSize vc, VkDeviceSize dc);
 
@@ -1211,10 +1300,19 @@ private:
     Frame frames_[kFrames];
     uint64_t frame_ = 0;
 
-    // the rendering under way: its attachments
+    // the rendering under way: its attachments and cached CB state
     bool rendering_ = false;
     Image* rend_color_ = nullptr;
     Image* rend_depth_ = nullptr;
+    uint64_t render_seq_ = 1;
+    VkPipeline cmd_pipe_ = VK_NULL_HANDLE;
+    bool has_vp_ = false, has_sc_ = false, has_blend_ = false, has_stencil_ = false;
+    VkViewport cmd_vp_{};
+    VkRect2D cmd_sc_{};
+    float cmd_blend_[4] = {};
+    uint32_t cmd_stencil_ = 0;
+    std::vector<uint8_t> upload_px_;
+    std::vector<uint8_t> upload_decoded_;
 
     std::unordered_map<uint64_t, VkShaderModule> modules_;
     std::unordered_map<uint64_t, uint64_t> shader_src_;
@@ -1751,7 +1849,16 @@ bool VulkanBackend::CreateBuffer(Buffer& b, VkDeviceSize size, VkBufferUsageFlag
 }
 
 void VulkanBackend::Destroy(Image& im) {
-    if (im.view) vkDestroyImageView(dev_, im.view, nullptr);
+    if (im.view) {
+        for (Frame& fr : frames_) {
+            auto vit = fr.view_keys.find(im.view);
+            if (vit != fr.view_keys.end()) {
+                for (uint64_t key : vit->second) fr.sets.erase(key);
+                fr.view_keys.erase(vit);
+            }
+        }
+        vkDestroyImageView(dev_, im.view, nullptr);
+    }
     DropFramebuffers(im.attach);
     if (im.attach) vkDestroyImageView(dev_, im.attach, nullptr);
     if (im.image) vkDestroyImage(dev_, im.image, nullptr);
@@ -1803,6 +1910,10 @@ void VulkanBackend::Begin() {
     vkBeginCommandBuffer(Cb(), &bi);
     rendering_ = false;
     rend_color_ = rend_depth_ = nullptr;
+    ++render_seq_;
+    CurrentFrame().dummy_vc = {};
+    cmd_pipe_ = VK_NULL_HANDLE;
+    has_vp_ = has_sc_ = has_blend_ = has_stencil_ = false;
 }
 
 uint64_t VulkanBackend::Completed() {
@@ -1869,10 +1980,16 @@ void VulkanBackend::ResetFrame(Frame& f) {
     for (Buffer& b : f.buffers) Destroy(b);
     f.images.clear();
     f.buffers.clear();
-    for (VkDescriptorPool p : f.pools) vkResetDescriptorPool(dev_, p, 0);
-    f.pool_at = 0;
-    f.sets.clear();
+    constexpr size_t kMaxCachedFrameSets = 2048;
+    if (f.total_sets >= kMaxCachedFrameSets) {
+        for (VkDescriptorPool p : f.pools) vkResetDescriptorPool(dev_, p, 0);
+        f.pool_at = 0;
+        f.sets.clear();
+        f.view_keys.clear();
+        f.total_sets = 0;
+    }
     f.used = 0;
+    f.dummy_vc = {};
 }
 
 // present: the frame's last commands, waiting on the acquired image and signalling its present semaphore
@@ -1937,6 +2054,7 @@ void VulkanBackend::Transition(Image& im, VkImageLayout to) {
     b.subresourceRange = {aspect, 0, im.levels, 0, im.layers};
     vkCmdPipelineBarrier(Cb(), src, dst, 0, 0, nullptr, 0, nullptr, 1, &b);
     im.layout = to;
+    im.cb_render_seq = 0;
 }
 
 // a rendering over the whole of the attachments, which keep what they hold; the one under way carries on when it
@@ -1946,14 +2064,19 @@ void VulkanBackend::BeginRender(Image* color, Image* depth) {
     EndRender();
     if (color) Transition(*color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     if (depth) Transition(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-    // the renderings before wrote the same attachments: their writes come first
-    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    mb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    mb.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-                       VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    VkPipelineStageFlags st = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
-                              VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-    vkCmdPipelineBarrier(Cb(), st, st, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    // Emit attachment write->read/write barrier only if either attachment already rendered in this CB without transition.
+    if ((color && color->cb_render_seq == render_seq_) || (depth && depth->cb_render_seq == render_seq_)) {
+        VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        mb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                           VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        VkPipelineStageFlags st = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                  VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                  VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        vkCmdPipelineBarrier(Cb(), st, st, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    }
+    if (color) color->cb_render_seq = render_seq_;
+    if (depth) depth->cb_render_seq = render_seq_;
     rendering_ = true;
     rend_color_ = color;
     rend_depth_ = depth;
@@ -2001,6 +2124,8 @@ void VulkanBackend::EndRender() {
         vkCmdEndRenderPass(Cb());
     rendering_ = false;
     rend_color_ = rend_depth_ = nullptr;
+    cmd_pipe_ = VK_NULL_HANDLE;
+    has_vp_ = has_sc_ = has_blend_ = has_stencil_ = false;
 }
 
 // the layouts stay the attachment ones throughout, as with dynamic rendering: barriers outside do the transitions.
@@ -2079,16 +2204,42 @@ void VulkanBackend::DropFramebuffers(VkImageView v) {
 // in the D3D convention, y down from the top: a negative height turns Vulkan's clip space the same way up
 void VulkanBackend::SetViewport(float x, float y, float w, float h) {
     VkViewport vp{x, y + h, w, -h, 0, 1};
+    if (has_vp_ && std::memcmp(&cmd_vp_, &vp, sizeof(vp)) == 0) return;
+    cmd_vp_ = vp;
+    has_vp_ = true;
     vkCmdSetViewport(Cb(), 0, 1, &vp);
 }
 
 void VulkanBackend::SetScissor(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
     VkRect2D r{{std::max(x0, 0), std::max(y0, 0)}, {uint32_t(std::max(x1 - std::max(x0, 0), 0)), uint32_t(std::max(y1 - std::max(y0, 0), 0))}};
+    if (has_sc_ && std::memcmp(&cmd_sc_, &r, sizeof(r)) == 0) return;
+    cmd_sc_ = r;
+    has_sc_ = true;
     vkCmdSetScissor(Cb(), 0, 1, &r);
 }
 
-// the draw's descriptor set: the ring at b0 and b1 (offsets bound with it), the views and samplers; one per
-// combination a frame
+void VulkanBackend::BindPipeline(VkPipeline pipe) {
+    if (pipe == cmd_pipe_) return;
+    cmd_pipe_ = pipe;
+    vkCmdBindPipeline(Cb(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+}
+
+void VulkanBackend::SetBlend(const float c[4]) {
+    if (has_blend_ && std::memcmp(cmd_blend_, c, sizeof(cmd_blend_)) == 0) return;
+    std::memcpy(cmd_blend_, c, sizeof(cmd_blend_));
+    has_blend_ = true;
+    vkCmdSetBlendConstants(Cb(), c);
+}
+
+void VulkanBackend::SetStencil(uint32_t ref) {
+    if (has_stencil_ && cmd_stencil_ == ref) return;
+    cmd_stencil_ = ref;
+    has_stencil_ = true;
+    vkCmdSetStencilReference(Cb(), VK_STENCIL_FACE_FRONT_AND_BACK, ref);
+}
+
+// the draw's descriptor set: the ring at b0 and b1 (offsets bound with it), the views and samplers; cached per frame
+// and invalidated when a bound VkImageView is destroyed
 VkDescriptorSet VulkanBackend::Set(const VkImageView views[4], const VkSampler samplers[4]) {
     Frame& f = CurrentFrame();
     uint64_t key = Hash(views, sizeof(VkImageView) * 4, Hash(samplers, sizeof(VkSampler) * 4));
@@ -2139,6 +2290,10 @@ VkDescriptorSet VulkanBackend::Set(const VkImageView views[4], const VkSampler s
     }
     vkUpdateDescriptorSets(dev_, vkshader::kBindings, w, 0, nullptr);
     f.sets[key] = set;
+    ++f.total_sets;
+    for (int i = 0; i < 4; i++) {
+        if (views[i]) f.view_keys[views[i]].push_back(key);
+    }
     return set;
 }
 
@@ -2536,7 +2691,7 @@ void VulkanBackend::Blit(Image& dst, const VkRect2D& to, Image& src, const float
     const VkSampler samplers[4] = {linear_, point_, point_, point_};
     VkDescriptorSet set = Set(views, samplers);
     BeginRender(&dst, nullptr);
-    vkCmdBindPipeline(Cb(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    BindPipeline(pipe);
     BindSet(set, cb.off, cb.off);
     SetViewport(float(to.offset.x), float(to.offset.y), float(to.extent.width), float(to.extent.height));
     SetScissor(0, 0, int32_t(dst.w), int32_t(dst.h));
@@ -2577,7 +2732,7 @@ bool VulkanBackend::DepthCopy(const State& s) {
     const VkSampler samplers[4] = {linear_, point_, point_, point_};
     VkDescriptorSet set = Set(views, samplers);
     BeginRender(nullptr, &dst.img);
-    vkCmdBindPipeline(Cb(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    BindPipeline(pipe);
     BindSet(set, cb.off, cb.off);
     SetViewport(0, 0, float(dst.w), float(dst.h));
     SetScissor(0, 0, int32_t(dst.w), int32_t(dst.h));
@@ -2752,7 +2907,8 @@ void VulkanBackend::UploadTexture(Tex& tx, const TextureDesc& d, const FormatInf
                                   const uint32_t* colours) {
     Transition(tx.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     uint32_t faces = d.cube ? 6 : 1;
-    std::vector<uint8_t> px, decoded;
+    std::vector<uint8_t>& px = upload_px_;
+    std::vector<uint8_t>& decoded = upload_decoded_;
     bool bc = fi.compressed && !tx.decode;
     uint32_t block = fi.host == Host::BC1 ? 8 : 16;
     for (uint32_t f = 0; f < faces; f++)
@@ -2961,7 +3117,17 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
         FillTransformConstants(s, size, c);
         FillLightConstants(s, sh.fk, c);
     }
-    Alloc vc = Constants(s.vsc.data(), sizeof(s.vsc));
+    Alloc vc{};
+    if (sh.prog) {
+        vc = Constants(s.vsc.data(), sizeof(s.vsc));
+    } else {
+        Frame& cur = CurrentFrame();
+        if (!cur.dummy_vc.cpu) {
+            static constexpr float kZeroVsc[4] = {};
+            cur.dummy_vc = Constants(kZeroVsc, sizeof(kZeroVsc));
+        }
+        vc = cur.dummy_vc;
+    }
     Alloc dc = Constants(&c, sizeof(c));
     VkBuffer vbufs[16];
     VkDeviceSize voffs[16];
@@ -2980,14 +3146,14 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
     }
     bool clamp = AnyStageWraps(s) && UnitTexcoords(a);
     VkSampler samplers[4];
-    for (int i = 0; i < 4; i++) samplers[i] = StageSampler(s, i, stages, clamp);
+    for (int i = 0; i < 4; i++) samplers[i] = s.textures[size_t(i)] ? StageSampler(s, i, stages, clamp) : point_;
     VkDescriptorSet set = Set(stages.view, samplers);
 
     // the rendering
     BeginRender(draw_rt_ ? &draw_rt_->img : nullptr, draw_ds_ ? &draw_ds_->img : nullptr);
     if (draw_rt_) draw_rt_->drawn = true;
     if (draw_ds_) draw_ds_->drawn = true;
-    vkCmdBindPipeline(Cb(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    BindPipeline(pipe);
     BindSet(set, vc.off, dc.off);
     Target& bt = draw_rt_ ? *draw_rt_ : *draw_ds_;
     float W = float(bt.w), H = float(bt.h);
@@ -3005,8 +3171,8 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
                std::clamp(y1, 0, int32_t(H)));
     float bf[4];
     Color(SimpleState(s, kMBlendColor), bf);
-    vkCmdSetBlendConstants(Cb(), bf);
-    vkCmdSetStencilReference(Cb(), VK_STENCIL_FACE_FRONT_AND_BACK, SimpleState(s, kMStencilRef) & 0xFF);
+    SetBlend(bf);
+    SetStencil(SimpleState(s, kMStencilRef) & 0xFF);
     if (a.buffer_count) vkCmdBindVertexBuffers(Cb(), 0, a.buffer_count, vbufs, voffs);
     if (a.index_count) {
         vkCmdBindIndexBuffer(Cb(), ib.buf, ib.off, a.index16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
@@ -3064,7 +3230,7 @@ void VulkanBackend::ClearTarget(Target& t, const State& s, uint32_t count, const
             const VkSampler samplers[4] = {};
             VkDescriptorSet set = Set(views, samplers);
             BeginRender(&t.img, nullptr);
-            vkCmdBindPipeline(Cb(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+            BindPipeline(pipe);
             BindSet(set, cb.off, cb.off);
             SetViewport(0, 0, float(t.w), float(t.h));
             for (const VkClearRect& r : rs) {
