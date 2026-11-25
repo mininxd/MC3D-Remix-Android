@@ -2,6 +2,7 @@
 #include "common/options.h"
 #include "core/log.h"
 #include "cpu/x86_ops.h"
+#include "game/guest_mem_safe.h"
 #include "kernel/kernel.h"
 #include "kernel/memory.h"
 #include "sound/sound.h"
@@ -1486,6 +1487,22 @@ X86_FUNC(sub_00012150) {
     LOGI("================================================================================");
     __imp__sub_00012150(ctx, base);
     LOGI("guest: sub_00012150 returned");
+}
+
+// sub_0020B6F0: AGE datTimeManager::Update frame clock & delta time.
+// Gameplay forces fixed-timestep mode ([0x00534770] = 1, 1/30s) and the step
+// quantizer ([0x00534776] = 1), which makes 60 FPS run at 2x speed. Clearing
+// both (outside replay playback) keeps physics/timers locked to 1.0x real time.
+X86_EXTERN_FUNC(__imp__sub_0020B6F0);
+X86_FUNC(sub_0020B6F0) {
+    const bool replaying =
+        game::safe_mem::Read32(0x00534AC4u, 0u) != 0u &&
+        game::safe_mem::Read8(0x00534A9Cu, 0u) != 0u;
+    if (!replaying) {
+        X86_MEM32(0x00534770u) = 0u;
+        X86_MEM8(0x00534776u) = 0u;
+    }
+    __imp__sub_0020B6F0(ctx, base);
 }
 
 

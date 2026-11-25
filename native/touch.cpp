@@ -121,7 +121,6 @@ constexpr size_t HostAction(std::string_view id) {
     return i;
 }
 constexpr size_t kHudAction = HostAction("hide_hud");
-constexpr size_t kPanelAction = HostAction("settings_panel");
 struct Name {
     int vk;
     const char* name;
@@ -432,7 +431,6 @@ void Bind(size_t action, int vk, int slot) {
         for (size_t i = 0; i < keys.size() && i < 2; i++) slots[i] = keys[i];
         if (vk && slots[1 - slot] == vk) slots[1 - slot] = 0;
         slots[slot] = vk;
-        if (!slots[0] && !slots[1] && action == kPanelAction) return;
         keys.clear();
         for (int k : slots) {
             if (k) keys.push_back(k);
@@ -443,7 +441,7 @@ void Bind(size_t action, int vk, int slot) {
 }
 
 void Unbind(size_t action) {
-    if (action >= kCount || action == kPanelAction) return;
+    if (action >= kCount) return;
     {
         std::lock_guard lock(g_bind_lock);
         g_binds[action].clear();
@@ -493,7 +491,6 @@ int PressedKey() {
     return 0;
 }
 
-bool PanelKey(int vk) { return HostKeyBound(kPanelAction, vk); }
 bool HudKey(int vk) { return HostKeyBound(kHudAction, vk); }
 
 }  // namespace input
@@ -744,6 +741,7 @@ bool InMenus() { return input::g_menu; }
 bool ButtonShown(size_t i) {
     if (!game::Opt().touch_controls) return false;
     const Button& b = kButtons[i];
+    if (b.press == kPanel) return false;
     if (g_editing) return b.when != When::Menus;
     if (g_layout[i].hidden) return false;
     if (i == kZoomButton && !(game::g_zoom < kScoped)) return false;
@@ -937,7 +935,6 @@ void FingerDown(SDL_FingerID id, float x, float y) {
         f.role = Role::Button;
         f.button = b;
         f.down_ms = NowMs();
-        if (kButtons[b].press == kPanel) app::ToggleMenu();
         if (kButtons[b].press == kGyro) gyro::NextMode();
     } else if (InMenus()) {
         // not the cursor yet: a tap clicks where it lifts, a swipe scrolls without moving the cursor
@@ -1063,8 +1060,6 @@ void KeyEvent(const SDL_KeyboardEvent& k) {
         std::lock_guard lock(g_lock);
         if (g_editing) {
             CloseEditor(false);
-        } else if (app::MenuOpen()) {
-            app::ToggleMenu();
         } else {
             g_back_until = NowMs() + kBackTapMs;
         }
@@ -1076,9 +1071,7 @@ void KeyEvent(const SDL_KeyboardEvent& k) {
     if (!k.down) return;
     input::g_keyboard = true;
     input::g_touch = false;
-    if (!k.repeat && input::PanelKey(vk)) app::ToggleMenu();
-    else if (!k.repeat && !app::MenuOpen() && input::HudKey(vk)) game::g_hide_hud = !game::g_hide_hud;
-    else if (vk == VK_ESCAPE && app::MenuOpen() && !app::Capturing()) app::ToggleMenu();
+    if (!k.repeat && input::HudKey(vk)) game::g_hide_hud = !game::g_hide_hud;
     // a name being typed takes Backspace and Enter as WM_CHAR has them
     if (vk == VK_BACK) input::OnChar('\b');
     if (vk == VK_RETURN) input::OnChar('\r');
@@ -1133,11 +1126,6 @@ bool OnEvent(const SDL_Event& e) {
             std::lock_guard lock(g_lock);
             EnsureLayout();
             if (e.type == SDL_EVENT_FINGER_DOWN) {
-                // the settings panel takes the touches, but for the button that closes it
-                if (app::MenuOpen() && !g_editing) {
-                    size_t b = HitButton(x, y);
-                    if (b == kButtonCount || kButtons[b].press != kPanel) return false;
-                }
                 FingerDown(e.tfinger.fingerID, x, y);
                 return true;
             }
@@ -1486,7 +1474,7 @@ void Draw() {
     if (editing) dl->AddRectFilled(ImVec2(0, 0), ImVec2(Width(), h), IM_COL32(0, 0, 0, 90));
     for (size_t i = 0; i < kButtonCount; i++) {
         const Button& b = kButtons[i];
-        if (!ButtonShown(i) || (app::MenuOpen() && b.press != kPanel && !editing)) continue;
+        if (!ButtonShown(i)) continue;
         float cx, cy;
         Centre(i, cx, cy);
         float r = Radius(i);

@@ -47,7 +47,6 @@ struct Options {
     bool one_hit_kill = false;
     bool infinite_grenades = false;
     bool unlock_levels = false;
-    bool unlock_black_ops = false;
     bool esp = false;
     bool aimbot = false;
     std::map<std::string, std::string> keys;
