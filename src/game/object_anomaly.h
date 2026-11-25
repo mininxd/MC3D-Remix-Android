@@ -25,6 +25,8 @@ enum AnomalyFlag : uint32_t {
     kAnomLitNoLights       = 1u << 9,
     kAnomBadVsNoRegs       = 1u << 10,
     kAnomAlphaKillAll      = 1u << 11,
+    kAnomFfTfactorBlack    = 1u << 12,
+    kAnomFfSelectDropsTex  = 1u << 13,
 };
 
 struct AnomalyReport {

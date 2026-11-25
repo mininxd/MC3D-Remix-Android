@@ -36,8 +36,7 @@ TexSampleClass ClassifyTexelPayload(const gpu::TextureDesc& d, const gpu::Format
     bool all_ff = true;
     bool all_rgb_zero = (fi.bits == 32 && !fi.compressed);
     bool all_equal = true;
-    uint32_t first_dword = 0;
-    uint32_t first_word_hi = 0;
+    uint32_t first_dwords[4] = {};
     bool have_first = false;
 
     for (uint32_t off : offsets) {
@@ -45,20 +44,26 @@ TexSampleClass ClassifyTexelPayload(const gpu::TextureDesc& d, const gpu::Format
         if (!safe_mem::CanAccess(va, stride_elem)) continue;
         any_accessible = true;
 
-        const uint32_t w0 = safe_mem::Read32(va, 0);
-        const uint32_t w1 = (stride_elem >= 8u) ? safe_mem::Read32(va + 4u, w0) : w0;
-        if (!have_first) {
-            first_dword = w0;
-            first_word_hi = w1;
-            have_first = true;
-            out_sample = w0;
-        } else if (w0 != first_dword || (stride_elem >= 8u && w1 != first_word_hi)) {
-            all_equal = false;
+        const uint32_t nwords = std::min<uint32_t>(4u, std::max<uint32_t>(1u, stride_elem / 4u));
+        uint32_t cur[4] = {};
+        for (uint32_t i = 0; i < nwords; ++i) {
+            cur[i] = safe_mem::Read32(va + i * 4u, 0);
+            if (cur[i] != 0u) all_zero = false;
+            if (cur[i] != 0xFFFFFFFFu) all_ff = false;
         }
-
-        if (w0 != 0u || (stride_elem >= 8u && w1 != 0u)) all_zero = false;
-        if (w0 != 0xFFFFFFFFu || (stride_elem >= 8u && w1 != 0xFFFFFFFFu)) all_ff = false;
-        if (all_rgb_zero && (w0 & 0x00FFFFFFu) != 0u) all_rgb_zero = false;
+        if (!have_first) {
+            for (uint32_t i = 0; i < nwords; ++i) first_dwords[i] = cur[i];
+            have_first = true;
+            out_sample = cur[0];
+        } else {
+            for (uint32_t i = 0; i < nwords; ++i) {
+                if (cur[i] != first_dwords[i]) {
+                    all_equal = false;
+                    break;
+                }
+            }
+        }
+        if (all_rgb_zero && (cur[0] & 0x00FFFFFFu) != 0u) all_rgb_zero = false;
     }
 
     if (!any_accessible) return TexSampleClass::OutOfRam;

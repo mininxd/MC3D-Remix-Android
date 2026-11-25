@@ -5,6 +5,7 @@
 
 #include "cpu/x86_context.h"
 #include "cpu/x86_ops.h"
+#include "game/deferred_tss_guard.h"
 #include "game/guest_mem_safe.h"
 #include "game/object_logger.h"
 #include "game/render_accuracy.h"
@@ -15,9 +16,11 @@ namespace {
 
 uint32_t ProbeGfxD3dTex(uint32_t gfx_tex_va) {
     if (!gfx_tex_va || !game::safe_mem::CanAccess(gfx_tex_va, 0x24u)) return 0;
-    const uint32_t cand = game::safe_mem::Read32(gfx_tex_va + 0x08u, 0);
-    gpu::TextureDesc desc{};
-    if (cand && game::safe_mem::CanAccess(cand, 20u) && gpu::Describe(cand, desc)) return cand;
+    for (uint32_t off : {0x08u, 0x04u, 0x0Cu, 0x10u, 0x14u, 0x18u, 0x1Cu}) {
+        const uint32_t cand = game::safe_mem::Read32(gfx_tex_va + off, 0);
+        gpu::TextureDesc desc{};
+        if (cand && game::safe_mem::CanAccess(cand, 20u) && gpu::Describe(cand, desc) && desc.data) return cand;
+    }
     return 0;
 }
 
@@ -69,6 +72,7 @@ extern "C" void sub_000DFB40(X86Context& ctx, uint8_t* base) {
 // Immediate-mode primitive builder wrapping Begin/End (sub_004182E0; D3DDevice_End sub_00417B00 is HLE in d3d8.cpp)
 extern "C" void __imp__sub_004182E0(X86Context& ctx, uint8_t* base);
 extern "C" void sub_004182E0(X86Context& ctx, uint8_t* base) {
+    game::render_accuracy::ScopedGuestTssGuard tss_guard;
     game::objlog::SetDrawHint("IMM_4182E0", ctx.ecx);
     game::render_accuracy::ApplyRenderAccuracy();
     __imp__sub_004182E0(ctx, base);

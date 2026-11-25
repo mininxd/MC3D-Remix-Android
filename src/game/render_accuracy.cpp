@@ -1,5 +1,6 @@
 #include "game/render_accuracy.h"
 #include "game/render_accuracy_internal.h"
+#include "game/deferred_tss_guard.h"
 #include "game/object_logger.h"
 
 #include <algorithm>
@@ -613,33 +614,38 @@ void FlushCapturedPushSpan(X86Context& ctx, uint8_t* base, uint32_t explicit_end
                     }
                     stride = CurrentVertexStrideBytes(s);
                 }
-                ApplyRenderAccuracy();
-                const uint32_t bytes = uint32_t(vertices.size()) * 4u;
-                if (stride && bytes >= stride && (bytes % stride) == 0) {
-                    const uint32_t vert_count = bytes / stride;
-                    uint32_t guest_hdr = 0;
-                    const uint32_t guest_verts =
-                        AllocDiupContiguousVertices(ctx, base, vertices.data(), bytes, guest_hdr);
-                    (void)guest_hdr;
-                    if (guest_verts) {
-                        const uint32_t fl = ++g_push_flushes;
-                        if (fl <= 8) {
-                            LOGR("render_accuracy: PushFlush[%s] prim=%u verts=%u stride=%u vs=%08X",
-                                 tag, prim, vert_count, stride, saved_push_vs_handle);
+                {
+                    ScopedGuestTssGuard tss_guard;
+                    game::objlog::SetDrawHint(tag, 0);
+                    ApplyRenderAccuracy();
+                    const uint32_t bytes = uint32_t(vertices.size()) * 4u;
+                    if (stride && bytes >= stride && (bytes % stride) == 0) {
+                        const uint32_t vert_count = bytes / stride;
+                        uint32_t guest_hdr = 0;
+                        const uint32_t guest_verts =
+                            AllocDiupContiguousVertices(ctx, base, vertices.data(), bytes, guest_hdr);
+                        (void)guest_hdr;
+                        if (guest_verts) {
+                            const uint32_t fl = ++g_push_flushes;
+                            if (fl <= 8) {
+                                LOGR("render_accuracy: PushFlush[%s] prim=%u verts=%u stride=%u vs=%08X",
+                                     tag, prim, vert_count, stride, saved_push_vs_handle);
+                            }
+                            const uint32_t saved_eax = ctx.eax;
+                            const uint32_t saved_ecx = ctx.ecx;
+                            const uint32_t saved_edx = ctx.edx;
+                            X86_PUSH32(stride);
+                            X86_PUSH32(guest_verts);
+                            X86_PUSH32(vert_count);
+                            X86_PUSH32(prim);
+                            X86_PUSH32(0u);
+                            sub_00417570(ctx, base);
+                            ctx.eax = saved_eax;
+                            ctx.ecx = saved_ecx;
+                            ctx.edx = saved_edx;
                         }
-                        const uint32_t saved_eax = ctx.eax;
-                        const uint32_t saved_ecx = ctx.ecx;
-                        const uint32_t saved_edx = ctx.edx;
-                        X86_PUSH32(stride);
-                        X86_PUSH32(guest_verts);
-                        X86_PUSH32(vert_count);
-                        X86_PUSH32(prim);
-                        X86_PUSH32(0u);
-                        sub_00417570(ctx, base);
-                        ctx.eax = saved_eax;
-                        ctx.ecx = saved_ecx;
-                        ctx.edx = saved_edx;
                     }
+                    game::objlog::ClearDrawHint();
                 }
                 {
                     std::lock_guard<std::recursive_mutex> lock(d3d::Lock());

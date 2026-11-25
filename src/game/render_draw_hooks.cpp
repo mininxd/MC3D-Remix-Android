@@ -1,5 +1,6 @@
 #include "game/render_accuracy.h"
 #include "game/render_accuracy_internal.h"
+#include "game/deferred_tss_guard.h"
 #include "game/object_logger.h"
 
 #include <cstdint>
@@ -10,16 +11,18 @@
 #include "xdk/hle.h"
 
 // Helpers generating clean strong wrappers around generated X86_WEAK_FUNC symbols.
+// State setters invalidate shadows without mutating TSS before textures are bound.
 #define WRAP_POST(name)                                                       \
     extern "C" void __imp__##name(X86Context& ctx, uint8_t* base);            \
     extern "C" void name(X86Context& ctx, uint8_t* base) {                    \
         __imp__##name(ctx, base);                                             \
-        game::render_accuracy::ApplyRenderAccuracy();                         \
+        game::render_accuracy::InvalidateMc3dStateShadows();                  \
     }
 
 #define WRAP_PRE(name)                                                        \
     extern "C" void __imp__##name(X86Context& ctx, uint8_t* base);            \
     extern "C" void name(X86Context& ctx, uint8_t* base) {                    \
+        game::render_accuracy::ScopedGuestTssGuard tss_guard;                 \
         game::render_accuracy::ApplyRenderAccuracy();                         \
         __imp__##name(ctx, base);                                             \
     }
@@ -27,7 +30,6 @@
 #define WRAP_PUSH_DRAW(name)                                                  \
     extern "C" void __imp__##name(X86Context& ctx, uint8_t* base);            \
     extern "C" void name(X86Context& ctx, uint8_t* base) {                    \
-        game::render_accuracy::ApplyRenderAccuracy();                         \
         __imp__##name(ctx, base);                                             \
         game::render_accuracy::FlushCapturedPushSpan(ctx, base, 0, #name);    \
     }
@@ -67,7 +69,6 @@ extern "C" void __imp__sub_00416DFF(X86Context& ctx, uint8_t* base);
 extern "C" void sub_00416DFF(X86Context& ctx, uint8_t* base) {
     __imp__sub_00416DFF(ctx, base);
     game::render_accuracy::InvalidateMc3dStateShadows();
-    game::render_accuracy::ApplyRenderAccuracy();
 }
 
 WRAP_POST(sub_00418060)
@@ -103,6 +104,7 @@ extern "C" void sub_002D2990(X86Context& ctx, uint8_t* base) {
 #define WRAP_DRAW_OBJ(name)                                                   \
     extern "C" void __imp__##name(X86Context& ctx, uint8_t* base);            \
     extern "C" void name(X86Context& ctx, uint8_t* base) {                    \
+        game::render_accuracy::ScopedGuestTssGuard tss_guard;                 \
         game::objlog::SetDrawHint(#name, ctx.ecx);                            \
         game::render_accuracy::ApplyRenderAccuracy();                         \
         __imp__##name(ctx, base);                                             \
@@ -150,7 +152,7 @@ extern "C" void sub_002D1810(X86Context& ctx, uint8_t* base) {
     const uint32_t ps_h = game::render_accuracy::SafeR32(ctx.esp + 4u);
     __imp__sub_002D1810(ctx, base);
     game::render_accuracy::NotifyPixelShaderSet(ps_h);
-    game::render_accuracy::ApplyRenderAccuracy();
+    game::render_accuracy::InvalidateMc3dStateShadows();
 }
 
 WRAP_POST(sub_0037F096)
@@ -163,7 +165,6 @@ WRAP_POST(sub_0004ED67)
 extern "C" void __imp__sub_002D17E0(X86Context& ctx, uint8_t* base);
 extern "C" void sub_002D17E0(X86Context& ctx, uint8_t* base) {
     __imp__sub_002D17E0(ctx, base);
-    game::render_accuracy::ApplyRenderAccuracy();
     game::render_accuracy::OnSwapDiagnostics();
 }
 

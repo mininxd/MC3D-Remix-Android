@@ -13,6 +13,7 @@ constexpr uint32_t kTopSelectArg2  = 3u;
 constexpr uint32_t kTaMask         = 0x0Fu;
 constexpr uint32_t kTaDiffuse      = 0u;
 constexpr uint32_t kTaTexture      = 2u;
+constexpr uint32_t kTaTfactor      = 3u;
 constexpr uint32_t kTaTemp         = 5u;
 
 void AppendTag(std::string& dst, const char* tag) {
@@ -112,6 +113,20 @@ AnomalyReport AnalyzeDrawAnomalies(const gpu::State& s, const std::array<StageTe
             if ((rep.read_tex_mask & (1u << st)) && !stages[st].bound_va) {
                 rep.flags |= kAnomFfUnboundTex;
                 AppendTag(rep.summary, "FF_UNBOUND_TEX");
+            }
+            const uint32_t cop = s.tss[st][gpu::kTssColorOp];
+            if (cop <= kTopDisable) break;
+            const uint32_t a1 = s.tss[st][gpu::kTssColorArg1] & kTaMask;
+            const uint32_t a2 = s.tss[st][gpu::kTssColorArg2] & kTaMask;
+            if (cop == kTopSelectArg2 && a1 == kTaTexture && a2 != kTaTexture && stages[st].valid_desc) {
+                rep.flags |= kAnomFfSelectDropsTex;
+                AppendTag(rep.summary, "FF_SELARG2_DROPS_TEX");
+            }
+            if ((cop == 4u || cop == 5u || cop == 6u) &&
+                (a1 == kTaTfactor || a2 == kTaTfactor) &&
+                (s.rs[gpu::kRsTextureFactor] & 0x00FFFFFFu) == 0u) {
+                rep.flags |= kAnomFfTfactorBlack;
+                AppendTag(rep.summary, "FF_TFACTOR_ZERO");
             }
         }
     }

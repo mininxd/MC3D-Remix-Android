@@ -22,7 +22,8 @@ namespace objlog {
 namespace {
 
 constexpr size_t kMaxLoggedLoads = 2048;
-constexpr size_t kMaxLoggedDraws = 1536;
+constexpr size_t kMaxLoggedDraws = 4096;
+constexpr size_t kMaxLoggedAnomalies = 2048;
 
 thread_local const char* tl_draw_tag = nullptr;
 thread_local uint32_t tl_draw_obj_va = 0;
@@ -30,11 +31,12 @@ thread_local uint32_t tl_draw_obj_va = 0;
 std::once_flag g_init_once;
 std::unordered_set<uint64_t> g_logged_loads;
 std::unordered_set<uint64_t> g_logged_draws;
+std::unordered_set<uint64_t> g_logged_anomalies;
 
 std::atomic<uint64_t> g_total_draws{0};
 std::atomic<uint64_t> g_anomalous_draws{0};
 std::atomic<uint64_t> g_swap_frames{0};
-std::array<std::atomic<uint64_t>, 12> g_anomaly_counts{};
+std::array<std::atomic<uint64_t>, 14> g_anomaly_counts{};
 
 uint64_t Mix64(uint64_t h, uint64_t v) {
     h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
@@ -186,7 +188,13 @@ void LogDrawState(const gpu::State& s) {
     const uint64_t sig = BuildDrawSignature(s, tag, obj_va);
 
     std::lock_guard<std::mutex> lk(detail::IoMutex());
-    if (!detail::InsertBoundedLocked(g_logged_draws, sig, kMaxLoggedDraws)) return;
+    const bool under_cap = (g_logged_draws.size() < kMaxLoggedDraws);
+    if (under_cap) {
+        if (!detail::InsertBoundedLocked(g_logged_draws, sig, kMaxLoggedDraws)) return;
+    } else {
+        if (g_logged_draws.find(sig) != g_logged_draws.end()) return;
+        if (g_logged_anomalies.find(sig) != g_logged_anomalies.end()) return;
+    }
 
     std::array<StageTexInspection, 4> stages{};
     for (uint32_t i = 0; i < 4u; ++i) stages[i] = InspectStageTexture(s, i);
@@ -194,6 +202,9 @@ void LogDrawState(const gpu::State& s) {
     const uint32_t ps_mask = s.ps ? game::render_accuracy::GetCombinerTexReadMask(s.ps->def) : 0u;
     const AnomalyReport anom = AnalyzeDrawAnomalies(s, stages, ps_mask);
     RecordAnomalyCounters(anom.flags);
+    if (!under_cap) {
+        if (anom.flags == kAnomNone || !detail::InsertBoundedLocked(g_logged_anomalies, sig, kMaxLoggedAnomalies)) return;
+    }
 
     const std::string model_name = detail::LookupModelLocked(obj_va, s.streams[0].vb, s.index_buffer);
     const std::string tex_desc = FormatTexStages(stages, anom.read_tex_mask);
@@ -218,7 +229,7 @@ void LogDrawState(const gpu::State& s) {
         detail::WriteLineLocked(
             flush_now,
             "[%s] tag=%s obj=0x%08X%s%s vs=0x%08X(%s,r=0x%X) vb0=0x%08X(s=%u) ib=0x%08X "
-            "FF cop=(%u,%u,%u,%u) arg1=(%u,%u,%u) res=(%u,%u) lit=%u(%u) blend=%u%s ANOMALY=[%s]",
+            "FF cop=(%u,%u,%u,%u) a1=(%u,%u,%u) a2=(%u,%u,%u) aop=(%u,%u,%u) res=(%u,%u) tfa=0x%08X lit=%u(%u) blend=%u%s ANOMALY=[%s]",
             anom.is_3d ? "OBJ3D" : "UI2D", tag, obj_va,
             model_name.empty() ? "" : " name=", model_name.empty() ? "" : model_name.c_str(),
             s.vs_handle, anom.vs_prog ? "prog" : "fvf", anom.vs_regs_mask,
@@ -226,7 +237,10 @@ void LogDrawState(const gpu::State& s) {
             s.tss[0][gpu::kTssColorOp], s.tss[1][gpu::kTssColorOp],
             s.tss[2][gpu::kTssColorOp], s.tss[3][gpu::kTssColorOp],
             s.tss[0][gpu::kTssColorArg1], s.tss[1][gpu::kTssColorArg1], s.tss[2][gpu::kTssColorArg1],
+            s.tss[0][gpu::kTssColorArg2], s.tss[1][gpu::kTssColorArg2], s.tss[2][gpu::kTssColorArg2],
+            s.tss[0][gpu::kTssAlphaOp], s.tss[1][gpu::kTssAlphaOp], s.tss[2][gpu::kTssAlphaOp],
             s.tss[0][gpu::kTssResultArg], s.tss[1][gpu::kTssResultArg],
+            s.rs[gpu::kRsTextureFactor],
             s.rs[gpu::kRsLighting] & 1u, s.light_enable,
             s.simple[gpu::kMBlendEnable / 4u] & 1u,
             tex_desc.c_str(), anom.summary.c_str());
@@ -241,11 +255,12 @@ void OnSwapSummary() {
     std::lock_guard<std::mutex> lk(detail::IoMutex());
     detail::WriteLineLocked(
         true,
-        "[SUMMARY] swap=%llu draws=%llu uniqueDraws=%zu badDraws=%llu modelsReg=%zu texReg=%zu "
-        "counts=[progUnbound=%llu mode0=%llu ffUnbound=%llu texBlack=%llu texWhite=%llu p8NoPal=%llu tempUninit=%llu lit0=%llu]",
+        "[SUMMARY] swap=%llu draws=%llu uniqueDraws=%zu uniqueAnom=%zu badDraws=%llu modelsReg=%zu texReg=%zu "
+        "counts=[progUnbound=%llu mode0=%llu ffUnbound=%llu texBlack=%llu texWhite=%llu p8NoPal=%llu tempUninit=%llu lit0=%llu tf0=%llu sel2Drop=%llu]",
         static_cast<unsigned long long>(f),
         static_cast<unsigned long long>(g_total_draws.load()),
         g_logged_draws.size(),
+        g_logged_anomalies.size(),
         static_cast<unsigned long long>(g_anomalous_draws.load()),
         detail::RegisteredModelCountLocked(),
         detail::RegisteredTextureCountLocked(),
@@ -256,7 +271,9 @@ void OnSwapSummary() {
         static_cast<unsigned long long>(g_anomaly_counts[4].load()),
         static_cast<unsigned long long>(g_anomaly_counts[7].load()),
         static_cast<unsigned long long>(g_anomaly_counts[8].load()),
-        static_cast<unsigned long long>(g_anomaly_counts[9].load()));
+        static_cast<unsigned long long>(g_anomaly_counts[9].load()),
+        static_cast<unsigned long long>(g_anomaly_counts[12].load()),
+        static_cast<unsigned long long>(g_anomaly_counts[13].load()));
 }
 
 }  // namespace objlog
