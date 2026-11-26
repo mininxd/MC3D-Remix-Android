@@ -75,7 +75,7 @@ constexpr uint32_t kAntiAliasings[] = {0, 1, 2};
 const char* const kAntiAliasingNames[] = {"Off", "FXAA", "SSAA 2x"};
 constexpr uint32_t kMotionBlurs[] = {0, 1, 2};
 const char* const kMotionBlurNames[] = {"Off", "Low", "Strong"};
-constexpr uint32_t kReflections[] = {0, 1, 2};
+constexpr uint32_t kReflectionValues[] = {0, 1, 2};
 const char* const kReflectionNames[] = {"Off", "Low", "High"};
 constexpr uint32_t kFmvScales[] = {0, 1};
 const char* const kFmvScaleNames[] = {"Fill", "4:3"};
@@ -381,7 +381,7 @@ bool StepGraphicsRow(int id, int step, Settings& s, char (&text)[64]) {
             std::snprintf(text, sizeof(text), "%s", kMotionBlurNames[StepTable(kMotionBlurs, o.motion_blur, step)]);
             return true;
         case kReflections:
-            std::snprintf(text, sizeof(text), "%s", kReflectionNames[StepTable(kReflections, o.reflections, step)]);
+            std::snprintf(text, sizeof(text), "%s", kReflectionNames[StepTable(kReflectionValues, o.reflections, step)]);
             return true;
         case kDrawDistance:
             std::snprintf(text, sizeof(text), "%s", kDistanceNames[StepTable(kDistances, o.draw_distance, step)]);
