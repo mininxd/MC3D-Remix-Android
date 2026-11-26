@@ -682,27 +682,10 @@ bool rows::SliderRatio(int id, float* out_ratio) {
 
 bool MenuOpen() { return false; }
 
-void DrawFpsOverlay(double fps) {
-    if (!game::Opt().fps_counter) return;
-    const ImGuiViewport* vp = ImGui::GetMainViewport();
-    float em = ImGui::GetFontSize();
-    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + em * 0.7f, vp->WorkPos.y + em * 0.5f), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.55f);
-    constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                                        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
-                                        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs;
-    if (ImGui::Begin("##fps_hud", nullptr, kFlags)) {
-        ImGui::Text("%.0f FPS | %u%%", fps, dynres::Percent());
-    }
-    ImGui::End();
-}
-
 void DrawUi(double fps) {
     game::g_fps = float(fps);
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
-    io.FontGlobalScale = std::max(1.0f, io.DisplaySize.y / 720.0f);
-    DrawFpsOverlay(fps);
 }
 
 }  // namespace app
