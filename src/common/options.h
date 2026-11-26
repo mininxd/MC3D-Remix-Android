@@ -18,6 +18,8 @@ struct Options {
     bool reload_blur = true;
     bool bloom = true;
     bool fog = true;
+    uint32_t motion_blur = 0;   // 0 Off, 1 Low, 2 Strong
+    uint32_t reflections = 2;   // 0 Off, 1 Low (1/4 rate), 2 High (every frame)
     uint32_t anti_aliasing = 0;  // 0 off, 1 FXAA, 2 SSAA
     bool hdr = false;
     uint32_t draw_distance = 1;

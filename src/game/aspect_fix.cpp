@@ -45,6 +45,7 @@ struct AspectMetrics {
     float ref_par = 1.0f;
     float ui_sx = 1.0f;
     float ui_x_pad = 0.0f;
+    bool ultrawide_3d = false;
     bool ultrawide_ui = false;
 };
 
@@ -78,9 +79,12 @@ AspectMetrics ComputeMetrics() {
     m.ref_par = hw_ratio * ui_ref;
 
     if (host_a > ui_ref + kAspectEps) {
-        m.ultrawide_ui = true;
-        m.ui_sx = ui_aspect_rules::AdjustScaleX(ui_ref / host_a, true);
+        m.ultrawide_3d = true;
+        // Fill full width on modern 20:9 / 21:9 displays so the UI window & menus match
+        // screen width instead of narrowing into a centered 16:9 column, while 3D keeps HOR+.
+        m.ui_sx = ui_aspect_rules::AdjustScaleX(1.0f, false);
         m.ui_x_pad = static_cast<float>(m.guest_w) * (1.0f - m.ui_sx) * 0.5f;
+        m.ultrawide_ui = m.ui_sx < 0.999f;
     }
     return m;
 }
@@ -325,7 +329,7 @@ ScopedMinimapClear::~ScopedMinimapClear() { --tl_minimap_clear_depth; }
 ScopedRefPixelAspect::ScopedRefPixelAspect() {
     ++tl_ref_par_depth;
     const AspectMetrics m = ComputeMetrics();
-    if (m.ultrawide_ui) {
+    if (m.ultrawide_3d) {
         saved_par_ = ReadGuestF32(addr::kPixelAspectRatio, m.host_par);
         WriteGuestF32(addr::kPixelAspectRatio, m.ref_par);
         active_ = true;

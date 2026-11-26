@@ -93,13 +93,15 @@ float4 psmain(O i) : SV_Target {
 // what moves (grain, VHS), src.w the colour look. pscrt: crt.x the lines, a whole number of pixels each so they never
 // beat against the screen's; crt.y how dark the gaps between them are, crt.z the tube's curve, crt.w the phosphor
 // mask's dimming; look.x the corners' shade, look.y the brightness the lines and mask take back. post.x HDR on,
-// post.y FXAA on; both go before the filter, psplain is them alone
+// post.y FXAA on, post.z temporal motion blur weight, post.w radial speed blur radius; all go before the filter
 const char* kFilterHlsl = R"(
 cbuffer B : register(b1) { float4 uvrect; float4 opts; float4 crt; float4 look; float4 src; float4 post; };
 Texture2D img : register(t0);
 Texture2D lut : register(t1);
+Texture2D prev_img : register(t2);
 SamplerState ls : register(s0);
 SamplerState ps : register(s1);
+SamplerState ms : register(s2);
 struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };
 O vs(uint id : SV_VertexID) {
     O o;
@@ -112,6 +114,37 @@ float3 Fetch(float2 uv) {
     float3 c = img.SampleLevel(ls, uv, 0).rgb;
     if (opts.x > 0) c = float3(lut.Sample(ps, float2(c.r, 0.5)).r, lut.Sample(ps, float2(c.g, 0.5)).g, lut.Sample(ps, float2(c.b, 0.5)).b);
     return c;
+}
+float3 FetchPrev(float2 uv) {
+    float3 c = prev_img.SampleLevel(ms, uv, 0).rgb;
+    if (opts.x > 0) c = float3(lut.Sample(ps, float2(c.r, 0.5)).r, lut.Sample(ps, float2(c.g, 0.5)).g, lut.Sample(ps, float2(c.b, 0.5)).b);
+    return c;
+}
+float3 MotionBlur(float2 uv, float3 cur) {
+    float3 acc = cur;
+    if (post.w > 0) {
+        float2 d = uv - float2(0.5, 0.5);
+        float dist = length(d);
+        float edge = smoothstep(0.16, 0.92, dist);
+        if (edge > 0.001) {
+            float2 step_uv = (d / max(dist, 1e-4)) * (post.w * edge);
+            float3 radial = cur * 0.36;
+            radial += Fetch(saturate(uv - step_uv * 0.25)) * 0.24;
+            radial += Fetch(saturate(uv - step_uv * 0.55)) * 0.18;
+            radial += Fetch(saturate(uv - step_uv * 0.90)) * 0.13;
+            radial += Fetch(saturate(uv - step_uv * 1.30)) * 0.09;
+            acc = radial;
+        }
+    }
+    if (post.z > 0) {
+        float3 prev = FetchPrev(uv);
+        float3 delta = abs(acc - prev);
+        float diff = max(delta.r, max(delta.g, delta.b));
+        float move = smoothstep(0.015, 0.08, diff);
+        float keep = 1.0 - smoothstep(0.55, 0.85, diff);
+        acc = lerp(acc, prev, post.z * move * keep);
+    }
+    return acc;
 }
 float Luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
 float Noise(float2 p) { return frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453); }
@@ -147,7 +180,11 @@ float3 Fxaa(float2 uv) {
 }
 
 // the frame at a point with what the graphics settings add before a filter
-float3 Frame(float2 uv) { return Tone(post.y > 0 ? Fxaa(uv) : Fetch(uv)); }
+float3 Frame(float2 uv) {
+    float3 c = post.y > 0 ? Fxaa(uv) : Fetch(uv);
+    if (post.z > 0 || post.w > 0) c = MotionBlur(uv, c);
+    return Tone(c);
+}
 
 float4 psplain(O i) : SV_Target { return float4(Frame(i.uv), 1); }
 
@@ -175,7 +212,9 @@ float4 pssharpen(O i) : SV_Target {
     float3 w = Fetch(i.uv - float2(src.x, 0)), e = Fetch(i.uv + float2(src.x, 0));
     float3 lo = min(c, min(min(n, s), min(w, e))), hi = max(c, max(max(n, s), max(w, e)));
     float3 amp = sqrt(saturate(min(lo, 1 - hi) / max(hi, 1e-4)));
-    return float4(Tone(saturate(c + (4 * c - n - s - w - e) * amp * 0.35)), 1);
+    float3 outc = saturate(c + (4 * c - n - s - w - e) * amp * 0.35);
+    if (post.z > 0 || post.w > 0) outc = MotionBlur(i.uv, outc);
+    return float4(Tone(outc), 1);
 }
 
 float4 pscolor(O i) : SV_Target {
@@ -1321,6 +1360,8 @@ private:
     std::unordered_map<uint64_t, Target> targets_;
     std::unordered_map<uint64_t, Tex> textures_;
     Image lut_;
+    Image prev_frame_;
+    bool prev_frame_valid_ = false;
     Image dummy_[3];  // 2D, 3D, cube
     VkSampler linear_ = VK_NULL_HANDLE, point_ = VK_NULL_HANDLE;
     VkDescriptorPool ui_pool_ = VK_NULL_HANDLE;
@@ -3464,11 +3505,16 @@ void VulkanBackend::DrawFrame(Target* t, uint32_t index) {
     uint32_t filter = std::min(game::Opt().screen_filter, 8u);
     uint32_t crt = filter <= 2 ? filter : 0;
     bool fxaa = game::Opt().anti_aliasing == 1, ssaa = game::Opt().anti_aliasing == 2;
-    bool post = game::Opt().hdr || fxaa;
+    uint32_t mb = std::min(game::Opt().motion_blur, 2u);
+    bool prev_ready = mb > 0 && t && prev_frame_valid_ && prev_frame_ && prev_frame_.w == t->img.w &&
+                      prev_frame_.h == t->img.h && prev_frame_.fmt == t->img.fmt;
+    bool post = game::Opt().hdr || fxaa || mb > 0;
     // opts.z: the taps a side over each screen pixel, 2 averaging SSAA's samples
     float c[24] = {0, 0, 1, 1, gamma_ ? 1.0f : 0.0f, 0, ssaa ? 2.0f : 1.0f, 1};
     c[20] = game::Opt().hdr ? 1.0f : 0.0f;
     c[21] = fxaa ? 1.0f : 0.0f;
+    c[22] = prev_ready ? (mb == 1 ? 0.28f : 0.54f) : 0.0f;
+    c[23] = mb == 1 ? 0.010f : (mb == 2 ? 0.024f : 0.0f);
     if (t) {
         // a texel of the frame, seconds that wrap before a float loses them, the colour look (4 vibrant on)
         using clock = std::chrono::steady_clock;
@@ -3499,8 +3545,10 @@ void VulkanBackend::DrawFrame(Target* t, uint32_t index) {
     if (pipe) {
         Transition(t->img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         Transition(lut_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        const VkImageView views[4] = {t->img.view, lut_.view, VK_NULL_HANDLE, VK_NULL_HANDLE};
-        const VkSampler samplers[4] = {linear_, point_, point_, point_};
+        if (prev_ready) Transition(prev_frame_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        const VkImageView views[4] = {t->img.view, lut_.view, prev_ready ? prev_frame_.view : VK_NULL_HANDLE,
+                                      VK_NULL_HANDLE};
+        const VkSampler samplers[4] = {linear_, point_, linear_, point_};
         set = Set(views, samplers);
     }
     VkRenderingAttachmentInfoKHR ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR};
@@ -3538,6 +3586,28 @@ void VulkanBackend::DrawFrame(Target* t, uint32_t index) {
         end_rendering_(cb);
     else
         vkCmdEndRenderPass(cb);
+    if (mb > 0 && t) {
+        if (!prev_frame_ || prev_frame_.w != t->img.w || prev_frame_.h != t->img.h || prev_frame_.fmt != t->img.fmt) {
+            if (prev_frame_) Retire(prev_frame_);
+            prev_frame_valid_ = false;
+            CreateImage(prev_frame_, t->img.fmt, t->img.w, t->img.h, 1, 1, 1,
+                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_VIEW_TYPE_2D);
+        }
+        if (prev_frame_) {
+            Transition(t->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            Transition(prev_frame_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            VkImageCopy cp{{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0},
+                           {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0},
+                           {t->img.w, t->img.h, 1}};
+            vkCmdCopyImage(cb, t->img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, prev_frame_.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+            Transition(prev_frame_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            prev_frame_valid_ = true;
+        }
+    } else {
+        if (prev_frame_) Retire(prev_frame_);
+        prev_frame_valid_ = false;
+    }
     b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     b.dstAccessMask = 0;
     b.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -3624,6 +3694,8 @@ void VulkanBackend::ApplySettings() {
         Retire(t.fb);
     }
     targets_.clear();
+    Retire(prev_frame_);
+    prev_frame_valid_ = false;
     draw_rt_ = draw_ds_ = nullptr;
     scale_ = want;
     LOGI("vulkan: render scale %.3f", scale_);

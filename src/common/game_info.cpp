@@ -93,6 +93,8 @@ const app::GameInfo app::kGame = {
                 {"fps_counter", &game::Opt().fps_counter, nullptr},
                 {"bloom", &game::Opt().bloom, nullptr},
                 {"fog", &game::Opt().fog, nullptr},
+                {"motion_blur", nullptr, &game::Opt().motion_blur},
+                {"reflections", nullptr, &game::Opt().reflections},
                 {"anti_aliasing", nullptr, &game::Opt().anti_aliasing},
                 {"hdr", &game::Opt().hdr, nullptr},
                 {"screen_filter", nullptr, &game::Opt().screen_filter},

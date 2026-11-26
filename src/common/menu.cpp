@@ -73,6 +73,10 @@ constexpr uint32_t kDistances[] = {1, 2, 4, 8};
 const char* const kDistanceNames[] = {"Default", "2x", "4x", "8x"};
 constexpr uint32_t kAntiAliasings[] = {0, 1, 2};
 const char* const kAntiAliasingNames[] = {"Off", "FXAA", "SSAA 2x"};
+constexpr uint32_t kMotionBlurs[] = {0, 1, 2};
+const char* const kMotionBlurNames[] = {"Off", "Low", "Strong"};
+constexpr uint32_t kReflections[] = {0, 1, 2};
+const char* const kReflectionNames[] = {"Off", "Low", "High"};
 constexpr uint32_t kFmvScales[] = {0, 1};
 const char* const kFmvScaleNames[] = {"Fill", "4:3"};
 constexpr uint32_t kScreenFilters[] = {0, 1, 2, 3, 4, 5, 6, 7, 8};
@@ -148,7 +152,7 @@ enum RowId { kRenderResolution, kMaxFps, kVsync, kFpsCounter, kAniso, kReloadBlu
              kFmvScale, kGyro, kGyroSensitivity, kTouchLayout, kTouchOpacity, kTouchSize, kTouchEdit,
              kCheckUpdates, kTouchSensitivity, kLeftDeadzone, kRightDeadzone, kLeftSensitivity, kRightSensitivity,
              kScreenFilter, kGyroInvertX, kGyroInvertY, kTouchSkin, kCredit, kBloom,
-             kFog, kAntiAliasing, kTouchStick, kDynamicRes, kDynamicTarget, kDynamicMin,
+             kFog, kAntiAliasing, kMotionBlur, kReflections, kTouchStick, kDynamicRes, kDynamicTarget, kDynamicMin,
              kDynamicMax, kDynamicHold, kAutoUpdate };
 
 using rows::Kind;
@@ -168,6 +172,8 @@ constexpr Row kDisplayRows[] = {
 constexpr Row kQualityRows[] = {
     {Kind::Value, kAntiAliasing, "Anti Aliasing"},
     {Kind::Value, kBloom, "Bloom"},
+    {Kind::Value, kMotionBlur, "Motion Blur"},
+    {Kind::Value, kReflections, "Reflections"},
     {Kind::Value, kAniso, "Anisotropic Filtering"},
     {Kind::Value, kFog, "Fog"},
 };
@@ -370,6 +376,12 @@ bool StepGraphicsRow(int id, int step, Settings& s, char (&text)[64]) {
     switch (id) {
         case kAniso:
             std::snprintf(text, sizeof(text), "%s", kAnisoNames[StepTable(kAnisoValues, s.aniso, step)]);
+            return true;
+        case kMotionBlur:
+            std::snprintf(text, sizeof(text), "%s", kMotionBlurNames[StepTable(kMotionBlurs, o.motion_blur, step)]);
+            return true;
+        case kReflections:
+            std::snprintf(text, sizeof(text), "%s", kReflectionNames[StepTable(kReflections, o.reflections, step)]);
             return true;
         case kDrawDistance:
             std::snprintf(text, sizeof(text), "%s", kDistanceNames[StepTable(kDistances, o.draw_distance, step)]);

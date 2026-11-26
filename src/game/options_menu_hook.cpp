@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <string>
 
 #include "common/menu.h"
@@ -10,12 +11,14 @@
 #include "game/guest_mem_safe.h"
 #include "kernel/memory.h"
 
+extern "C" void __imp__sub_00154E40(X86Context& ctx, uint8_t* base);
 extern "C" void __imp__sub_0018D610(X86Context& ctx, uint8_t* base);
 extern "C" void __imp__sub_00163830(X86Context& ctx, uint8_t* base);
 extern "C" void __imp__sub_00163C40(X86Context& ctx, uint8_t* base);
 extern "C" void __imp__sub_0018DD50(X86Context& ctx, uint8_t* base);
 extern "C" void __imp__sub_0018DB10(X86Context& ctx, uint8_t* base);
 
+extern "C" void sub_001395E0(X86Context& ctx, uint8_t* base);
 extern "C" void sub_00348950(X86Context& ctx, uint8_t* base);
 extern "C" void sub_00348BE0(X86Context& ctx, uint8_t* base);
 extern "C" void sub_00348D70(X86Context& ctx, uint8_t* base);
@@ -23,6 +26,9 @@ extern "C" void sub_00348D70(X86Context& ctx, uint8_t* base);
 namespace {
 
 constexpr uint32_t kMenuMgrGlobalPtr = 0x0050F148u;
+constexpr uint32_t kFlashRootGlobalPtr = 0x0050F15Cu;
+constexpr uint32_t kFlashVarTitle = 0x0045B9F8u;        // "title"
+constexpr uint32_t kFlashVarSectionName = 0x0045772Cu;  // "sectionName"
 constexpr uint32_t kActionGameOptions = 0x41u;
 constexpr uint32_t kActionDisplayOptions = 0x7F4Bu;
 constexpr uint32_t kActionQualityOptions = 0x7F4Cu;
@@ -249,7 +255,56 @@ void RefreshVisibleRows(X86Context& ctx, uint8_t* base) {
     }
 }
 
+void ApplyNativeScreenTitle(X86Context& ctx, uint8_t* base, NativePage page) {
+    const char* title = (page == NativePage::Display)   ? "Display Options"
+                        : (page == NativePage::Quality) ? "Quality Options"
+                                                        : nullptr;
+    if (!title || ctx.esp <= 64u) return;
+
+    const uint32_t mgr_va = game::safe_mem::Read32(kMenuMgrGlobalPtr, 0u);
+    const uint32_t cur_menu_va = mgr_va ? game::safe_mem::Read32(mgr_va + 0x0Cu, 0u) : 0u;
+    const uint32_t owner_va = cur_menu_va ? game::safe_mem::Read32(cur_menu_va + 0x0Cu, 0u) : 0u;
+    if (!owner_va) return;
+
+    const uint32_t title_buf_va = owner_va + 0x60u;
+    if (!game::safe_mem::CanAccess(title_buf_va, 0x78u)) return;
+
+    auto* dst = static_cast<char*>(kernel::HostPtr(title_buf_va));
+    const size_t len = std::min<size_t>(std::strlen(title), 0x77u);
+    std::memcpy(dst, title, len);
+    dst[len] = '\0';
+
+    const uint32_t flash_root_va = game::safe_mem::Read32(kFlashRootGlobalPtr, 0u);
+    uint32_t target_flash_va = 0u;
+    uint32_t var_name_va = 0u;
+    if (flash_root_va) {
+        target_flash_va = game::safe_mem::Read32(flash_root_va + 0xFACu, 0u);
+        var_name_va = kFlashVarTitle;
+    } else {
+        target_flash_va = game::safe_mem::Read32(owner_va + 0x1E8u, 0u);
+        var_name_va = kFlashVarSectionName;
+    }
+    if (!target_flash_va || !game::safe_mem::CanAccess(target_flash_va, 0x10u)) return;
+
+    const SavedRegs saved = SavedRegs::Save(ctx);
+    X86_PUSH32(title_buf_va);
+    X86_PUSH32(var_name_va);
+    ctx.ecx = target_flash_va;
+    X86_PUSH32(0u);
+    sub_001395E0(ctx, base);
+    saved.Restore(ctx);
+}
+
 }  // namespace
+
+// Override screen header title setter so Display Options / Quality Options show their real names.
+extern "C" void sub_00154E40(X86Context& ctx, uint8_t* base) {
+    __imp__sub_00154E40(ctx, base);
+    const auto page = static_cast<NativePage>(g_native_page.load());
+    if (page != NativePage::None) {
+        ApplyNativeScreenTitle(ctx, base, page);
+    }
+}
 
 // Override Options menu populate: append Display Options and Quality Options items.
 extern "C" void sub_0018D610(X86Context& ctx, uint8_t* base) {
@@ -293,6 +348,7 @@ extern "C" void sub_0018DD50(X86Context& ctx, uint8_t* base) {
         return;
     }
     PopulateNativeOptionsList(ctx, base, ctx.ecx, page);
+    ApplyNativeScreenTitle(ctx, base, page);
     ctx.esp += 4u;  // __thiscall ret 0
 }
 

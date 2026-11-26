@@ -1492,7 +1492,8 @@ X86_FUNC(sub_00012150) {
 // sub_0020B6F0: AGE datTimeManager::Update frame clock & delta time.
 // Gameplay forces fixed-timestep mode ([0x00534770] = 1, 1/30s) and the step
 // quantizer ([0x00534776] = 1), which makes 60 FPS run at 2x speed. Clearing
-// both (outside replay playback) keeps physics/timers locked to 1.0x real time.
+// both (outside replay playback) and keeping MIN_DT <= 0.001s keeps physics
+// and camera timers locked to 1.0x real time at 30/60/90/120/144 FPS.
 X86_EXTERN_FUNC(__imp__sub_0020B6F0);
 X86_FUNC(sub_0020B6F0) {
     const bool replaying =
@@ -1501,8 +1502,58 @@ X86_FUNC(sub_0020B6F0) {
     if (!replaying) {
         X86_MEM32(0x00534770u) = 0u;
         X86_MEM8(0x00534776u) = 0u;
+        if (game::safe_mem::CanAccess(0x004B2D60u, 4u)) {
+            float min_dt = 0.0f;
+            const uint32_t raw = X86_MEM32(0x004B2D60u);
+            std::memcpy(&min_dt, &raw, sizeof(min_dt));
+            if (min_dt > 0.001f) {
+                const float clamped = 0.0001f;
+                uint32_t bits = 0u;
+                std::memcpy(&bits, &clamped, sizeof(bits));
+                X86_MEM32(0x004B2D60u) = bits;
+            }
+        }
     }
     __imp__sub_0020B6F0(ctx, base);
+}
+
+// Dynamic 256x256 cubemap reflections throttle (sub_00332EF0 + sub_00332460).
+// Reflections option: 0 = Off (seed initial cubemap only), 1 = Low (1/4 rate), 2 = High (every frame).
+namespace {
+uint32_t g_envmap_last_mgr = 0u;
+uint32_t g_envmap_frame = 0u;
+bool g_envmap_run_pass = true;
+}  // namespace
+
+X86_EXTERN_FUNC(__imp__sub_00332EF0);
+X86_FUNC(sub_00332EF0) {
+    const uint32_t mode = game::Opt().reflections;
+    if (ctx.ecx != g_envmap_last_mgr) {
+        g_envmap_last_mgr = ctx.ecx;
+        g_envmap_frame = 0u;
+    }
+    const uint32_t frame = g_envmap_frame++;
+    if (mode >= 2u) {
+        g_envmap_run_pass = true;
+    } else if (mode == 1u) {
+        g_envmap_run_pass = (frame < 4u) || ((frame & 3u) == 0u);
+    } else {
+        g_envmap_run_pass = (frame < 2u);
+    }
+    if (!g_envmap_run_pass) {
+        ctx.esp += 4u;  // __thiscall ret 0
+        return;
+    }
+    __imp__sub_00332EF0(ctx, base);
+}
+
+X86_EXTERN_FUNC(__imp__sub_00332460);
+X86_FUNC(sub_00332460) {
+    if (game::Opt().reflections < 2u && ctx.ecx == g_envmap_last_mgr && !g_envmap_run_pass) {
+        ctx.esp += 4u;  // __thiscall ret 0
+        return;
+    }
+    __imp__sub_00332460(ctx, base);
 }
 
 
