@@ -1302,6 +1302,9 @@ private:
         std::array<std::array<float, 4>, 192> last_vsc{};
         Alloc last_vsc_alloc{};
         bool has_last_vsc = false;
+        DrawConstants last_dc{};
+        Alloc last_dc_alloc{};
+        bool has_last_dc = false;
         std::unordered_map<uint64_t, CachedBuf> buf_cache;
         uint64_t value = 0;  // the timeline's value once the GPU is past this frame
         std::vector<Image> images;
@@ -1516,10 +1519,21 @@ private:
     DxtWorkerPool dxt_pool_;
     uint64_t perf_vb_hits_ = 0;
     uint64_t perf_vsc_hits_ = 0;
+    uint64_t perf_dc_hits_ = 0;
+    uint64_t perf_pso_hits_ = 0;
     uint64_t perf_fast_tex_hits_ = 0;
     uint64_t perf_clear_coalesced_ = 0;
     uint64_t perf_frustum_culled_ = 0;
     uint64_t perf_dxt_parallel_ = 0;
+
+    uint64_t mru_vkey_ = 0;
+    uint64_t mru_vh_ = 0;
+    VkShaderModule mru_vs_ = VK_NULL_HANDLE;
+    uint64_t mru_pkey_ = 0;
+    uint64_t mru_ph_ = 0;
+    VkShaderModule mru_ps_ = VK_NULL_HANDLE;
+    uint64_t mru_pso_hash_ = 0;
+    VkPipeline mru_pso_pipe_ = VK_NULL_HANDLE;
 
     std::unordered_map<uint64_t, VkShaderModule> modules_;
     std::unordered_map<uint64_t, uint64_t> shader_src_;
@@ -2160,6 +2174,7 @@ void VulkanBackend::Begin() {
     Frame& f = CurrentFrame();
     f.dummy_vc = {};
     f.has_last_vsc = false;
+    f.has_last_dc = false;
     f.buf_cache.clear();
     cmd_pipe_ = VK_NULL_HANDLE;
     cmd_set_ = VK_NULL_HANDLE;
@@ -2244,6 +2259,7 @@ void VulkanBackend::ResetFrame(Frame& f) {
     f.used = 0;
     f.dummy_vc = {};
     f.has_last_vsc = false;
+    f.has_last_dc = false;
     f.buf_cache.clear();
 }
 
@@ -2756,7 +2772,15 @@ VkPipeline VulkanBackend::FullScreenPipeline(const char* hlsl, const char* ps_en
 
 VkPipeline VulkanBackend::EnsurePipeline(const PsoKey& k, VkShaderModule vs, VkShaderModule ps) {
     uint64_t h = Hash(&k, sizeof(k));
-    if (auto it = pipelines_.find(h); it != pipelines_.end()) return it->second;
+    if (mru_pso_pipe_ != VK_NULL_HANDLE && mru_pso_hash_ == h) {
+        ++perf_pso_hits_;
+        return mru_pso_pipe_;
+    }
+    if (auto it = pipelines_.find(h); it != pipelines_.end()) {
+        mru_pso_hash_ = h;
+        mru_pso_pipe_ = it->second;
+        return it->second;
+    }
     VkPipelineShaderStageCreateInfo st[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
                                              {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
     st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -3145,9 +3169,17 @@ bool VulkanBackend::ReadBack(Image& im, uint32_t w, uint32_t h, std::vector<uint
 // ---- draws
 
 void VulkanBackend::EnsureVertexShader(const State& s, const Assembled& a, DrawShaders& sh) {
+    if (mru_vs_ != VK_NULL_HANDLE && mru_vkey_ == sh.vkey) {
+        sh.vh = mru_vh_;
+        sh.vs = mru_vs_;
+        return;
+    }
     if (auto it = shader_src_.find(sh.vkey); it != shader_src_.end()) {
         sh.vh = it->second;
         sh.vs = modules_[sh.vh];
+        mru_vkey_ = sh.vkey;
+        mru_vh_ = sh.vh;
+        mru_vs_ = sh.vs;
         return;
     }
     std::string src = VertexHlsl(s, a, sh);
@@ -3167,9 +3199,17 @@ constexpr uint64_t kSignedPixelSalt = 0x5164E5B1E4D00001ull;
 
 void VulkanBackend::EnsurePixelShader(const PixelKey& pk, DrawShaders& sh, bool signed_src) {
     uint64_t key = sh.pkey ^ kPixelKeySalt ^ (signed_src ? kSignedPixelSalt : 0ull);
+    if (mru_ps_ != VK_NULL_HANDLE && mru_pkey_ == key) {
+        sh.ph = mru_ph_;
+        sh.ps = mru_ps_;
+        return;
+    }
     if (auto it = shader_src_.find(key); it != shader_src_.end()) {
         sh.ph = it->second;
         sh.ps = modules_[sh.ph];
+        mru_pkey_ = key;
+        mru_ph_ = sh.ph;
+        mru_ps_ = sh.ps;
         return;
     }
     std::string hlsl = PixelHlsl(pk);
@@ -3538,7 +3578,20 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
         }
         vc = cur.dummy_vc;
     }
-    Alloc dc = Constants(&c, sizeof(c));
+    Alloc dc{};
+    {
+        Frame& cur = CurrentFrame();
+        if (cur.has_last_dc && std::memcmp(&cur.last_dc, &c, sizeof(c)) == 0) {
+            dc = cur.last_dc_alloc;
+            ++perf_dc_hits_;
+        } else {
+            dc = Constants(&c, sizeof(c));
+            Frame& after = CurrentFrame();
+            after.last_dc = c;
+            after.last_dc_alloc = dc;
+            after.has_last_dc = true;
+        }
+    }
     VkBuffer vbufs[16];
     VkDeviceSize voffs[16];
     const bool raw_guest_verts = a.vertices.empty();
@@ -4152,9 +4205,10 @@ void VulkanBackend::Present(const Surface& front) {
     }
     if (presents_ % 600 == 0) {
         SavePipelineCache();
-        LOGR("[INFO] vkPerf: frame=%llu fps=%.1f tex=%zu vbHits=%llu vscHits=%llu fastTex=%llu clearCoalesce=%llu culled=%llu dxtPar=%llu",
+        LOGR("[INFO] vkPerf: frame=%llu fps=%.1f tex=%zu vbHits=%llu vscHits=%llu dcHits=%llu psoHits=%llu fastTex=%llu clearCoalesce=%llu culled=%llu dxtPar=%llu",
              (unsigned long long)presents_, fps_, textures_.size(),
              (unsigned long long)perf_vb_hits_, (unsigned long long)perf_vsc_hits_,
+             (unsigned long long)perf_dc_hits_, (unsigned long long)perf_pso_hits_,
              (unsigned long long)perf_fast_tex_hits_, (unsigned long long)perf_clear_coalesced_,
              (unsigned long long)perf_frustum_culled_, (unsigned long long)perf_dxt_parallel_);
     }

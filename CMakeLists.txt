@@ -100,11 +100,11 @@ target_include_directories(main PRIVATE ${NATIVE}/compat ${SDK}/harness/compat $
                            ${CMAKE_CURRENT_BINARY_DIR} ${glslang_SOURCE_DIR})
 target_include_directories(main SYSTEM PRIVATE ${imgui_SOURCE_DIR})
 # x86 chars are signed, as the game's code and the runtime were written for
-target_compile_options(main PRIVATE -fno-strict-aliasing -fsigned-char)
+target_compile_options(main PRIVATE -O3 -ffp-contract=fast -fno-strict-aliasing -fsigned-char)
 set(HOST_SOURCES ${RUNTIME_SOURCES} ${GAME_HOST_SOURCES} ${ANDROID_SOURCES})
 set_source_files_properties(${HOST_SOURCES} PROPERTIES COMPILE_OPTIONS "-include;${NATIVE}/compat/crt.h")
 set_source_files_properties(${GEN_SOURCES} PROPERTIES
-    COMPILE_OPTIONS "-O2;-w;-fno-strict-aliasing;-fsigned-char")
+    COMPILE_OPTIONS "-O3;-ffp-contract=fast;-w;-fno-strict-aliasing;-fsigned-char")
 set_source_files_properties(${NATIVE}/vk_shader.cpp PROPERTIES COMPILE_DEFINITIONS ENABLE_HLSL)
 target_link_libraries(main PRIVATE SDL3::SDL3 tomlplusplus::tomlplusplus glslang glslang-default-resource-limits
                       vulkan android log)
