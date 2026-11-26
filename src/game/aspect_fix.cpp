@@ -200,6 +200,23 @@ void AdjustSetWindowArgs(X86Context& ctx) {
     kernel::W32(ctx.esp + 0x0Cu, static_cast<uint32_t>(new_w));
 }
 
+void AdjustHudIndicatorPos(uint32_t obj_va, uint32_t out_xy_va) {
+    if (!out_xy_va || !safe_mem::CanAccess(out_xy_va, 8u)) return;
+    constexpr float kRoamingSelectLeftShift = 44.0f;
+    const float orig_x = ReadGuestF32(out_xy_va, 0.0f);
+    const float orig_y = ReadGuestF32(out_xy_va + 4u, 0.0f);
+    const float new_x = orig_x - kRoamingSelectLeftShift;
+    WriteGuestF32(out_xy_va, new_x);
+
+    static std::atomic<uint32_t> s_logged{0u};
+    const uint32_t n = s_logged.fetch_add(1u, std::memory_order_relaxed);
+    if (n < 3u) {
+        const uint32_t state = obj_va ? safe_mem::Read32(obj_va + 0x54u, 0u) : 0u;
+        LOGR("[OK] aspect_fix: hudIndicator(selectOn) state=%u pos=(%.1f,%.1f)->(%.1f,%.1f)",
+             state, orig_x, orig_y, new_x, orig_y);
+    }
+}
+
 void HandleQuadBlit(X86Context& ctx, uint8_t* base, GuestFunc orig) {
     if (!IsMainBackbuffer() || !safe_mem::CanAccess(ctx.esp + 0x04u, 16u)) {
         orig(ctx, base);

@@ -28,6 +28,7 @@ bool IsMainBackbuffer();
 // Hook helpers invoked by aspect_hooks.cpp, render_draw_hooks.cpp, and d3d8.cpp.
 void AdjustOrthoArgs(X86Context& ctx);
 void AdjustSetWindowArgs(X86Context& ctx);
+void AdjustHudIndicatorPos(uint32_t obj_va, uint32_t out_xy_va);
 void HandleQuadBlit(X86Context& ctx, uint8_t* base, GuestFunc orig);
 void HandleFontBlit(X86Context& ctx, uint8_t* base, GuestFunc orig);
 // Maps D3DRECT left/right X coords when inside ScopedMinimapClear on the main backbuffer.

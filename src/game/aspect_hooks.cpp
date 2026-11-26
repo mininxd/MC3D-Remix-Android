@@ -1,4 +1,5 @@
 #include "game/aspect_fix.h"
+#include "game/guest_mem_safe.h"
 #include "game/ui_aspect_rules.h"
 
 #include <cstdint>
@@ -108,4 +109,13 @@ extern "C" void __imp__sub_001C23E0(X86Context& ctx, uint8_t* base);
 extern "C" void sub_001C23E0(X86Context& ctx, uint8_t* base) {
     game::aspect_fix::ScopedFullScreenBypass guard;
     __imp__sub_001C23E0(ctx, base);
+}
+
+// 9. hudIndicator::GetPos ("selectOn" / "hud_messageOn_%s_x") -> shift top-left roaming prompt left.
+extern "C" void __imp__sub_000D0E70(X86Context& ctx, uint8_t* base);
+extern "C" void sub_000D0E70(X86Context& ctx, uint8_t* base) {
+    const uint32_t obj_va = ctx.ecx;
+    const uint32_t out_xy_va = game::safe_mem::Read32(ctx.esp + 4u, 0u);
+    __imp__sub_000D0E70(ctx, base);
+    game::aspect_fix::AdjustHudIndicatorPos(obj_va, out_xy_va);
 }

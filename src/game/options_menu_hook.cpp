@@ -12,16 +12,18 @@
 #include "kernel/memory.h"
 
 extern "C" void __imp__sub_00154E40(X86Context& ctx, uint8_t* base);
+extern "C" void __imp__sub_0018C770(X86Context& ctx, uint8_t* base);
+extern "C" void __imp__sub_0018CAD0(X86Context& ctx, uint8_t* base);
 extern "C" void __imp__sub_0018D610(X86Context& ctx, uint8_t* base);
 extern "C" void __imp__sub_00163830(X86Context& ctx, uint8_t* base);
 extern "C" void __imp__sub_00163C40(X86Context& ctx, uint8_t* base);
 extern "C" void __imp__sub_0018DD50(X86Context& ctx, uint8_t* base);
 extern "C" void __imp__sub_0018DB10(X86Context& ctx, uint8_t* base);
+extern "C" void __imp__sub_00348BE0(X86Context& ctx, uint8_t* base);
+extern "C" void __imp__sub_00348D70(X86Context& ctx, uint8_t* base);
 
 extern "C" void sub_001395E0(X86Context& ctx, uint8_t* base);
 extern "C" void sub_00348950(X86Context& ctx, uint8_t* base);
-extern "C" void sub_00348BE0(X86Context& ctx, uint8_t* base);
-extern "C" void sub_00348D70(X86Context& ctx, uint8_t* base);
 
 namespace {
 
@@ -33,6 +35,7 @@ constexpr uint32_t kActionGameOptions = 0x41u;
 constexpr uint32_t kActionDisplayOptions = 0x7F4Bu;
 constexpr uint32_t kActionQualityOptions = 0x7F4Cu;
 constexpr uint32_t kFnMenuAction = 0x00163830u;
+constexpr uint32_t kFnMainMenuNetworking = 0x0018C5A0u;
 constexpr uint32_t kFnSettingCallback = 0x0018DB10u;
 constexpr uint32_t kMaxListItems = 16u;
 constexpr uint32_t kMaxRootListItems = 20u;
@@ -46,6 +49,20 @@ enum class NativePage : int {
 };
 
 std::atomic<int> g_native_page{static_cast<int>(NativePage::None)};
+
+thread_local bool g_in_main_menu_populate = false;
+thread_local bool g_skipped_networking = false;
+
+struct ScopedMainMenuPopulate {
+    ScopedMainMenuPopulate() {
+        g_in_main_menu_populate = true;
+        g_skipped_networking = false;
+    }
+    ~ScopedMainMenuPopulate() {
+        g_in_main_menu_populate = false;
+        g_skipped_networking = false;
+    }
+};
 
 struct NativeEntry {
     app::rows::Row row{};
@@ -126,8 +143,23 @@ void UpdateListRowText(X86Context& ctx, uint8_t* base, uint32_t list_va, uint32_
     X86_PUSH32(handle);
     ctx.ecx = list_va;
     X86_PUSH32(0u);
-    sub_00348D70(ctx, base);
+    __imp__sub_00348D70(ctx, base);
 
+    saved.Restore(ctx);
+}
+
+void CallWidgetSetVisible(X86Context& ctx, uint8_t* base, uint32_t widget_va, uint32_t visible) {
+    if (!widget_va || !game::safe_mem::CanAccess(widget_va, 4u)) return;
+    const uint32_t vtbl_va = game::safe_mem::Read32(widget_va, 0u);
+    if (!vtbl_va || !game::safe_mem::CanAccess(vtbl_va + 0xB0u, 4u)) return;
+    const uint32_t fn_va = game::safe_mem::Read32(vtbl_va + 0xB0u, 0u);
+    if (!fn_va) return;
+
+    const SavedRegs saved = SavedRegs::Save(ctx);
+    X86_PUSH32(visible);
+    ctx.ecx = widget_va;
+    X86_PUSH32(0u);
+    x86_icall(ctx, base, fn_va);
     saved.Restore(ctx);
 }
 
@@ -156,7 +188,7 @@ void AppendRootOptionItem(X86Context& ctx, uint8_t* base, uint32_t list_va, uint
     X86_PUSH32(item_idx);
     ctx.ecx = list_va;
     X86_PUSH32(0u);
-    sub_00348BE0(ctx, base);
+    __imp__sub_00348BE0(ctx, base);
 
     const uint32_t item_handle = ctx.eax;
     if (item_handle != 0u && game::safe_mem::CanAccess(item_handle, 16u)) {
@@ -165,7 +197,7 @@ void AppendRootOptionItem(X86Context& ctx, uint8_t* base, uint32_t list_va, uint
         X86_PUSH32(item_handle);
         ctx.ecx = list_va;
         X86_PUSH32(0u);
-        sub_00348D70(ctx, base);
+        __imp__sub_00348D70(ctx, base);
     }
 
     saved.Restore(ctx);
@@ -181,8 +213,16 @@ void AppendCustomOptionsItems(X86Context& ctx, uint8_t* base) {
 }
 
 void PopulateNativeOptionsList(X86Context& ctx, uint8_t* base, uint32_t screen_va, NativePage page) {
-    const uint32_t list_va = GetOptionScreenList();
+    uint32_t owner_va = 0u;
+    const uint32_t list_va = GetOptionScreenList(&owner_va);
     if (!list_va || !screen_va || ctx.esp <= kScratchBytes + 128u) return;
+
+    // Match __imp__sub_0018DD50 preamble: ensure list widget is visible and clear sentinel flag.
+    CallWidgetSetVisible(ctx, base, list_va, 1u);
+    if (owner_va && game::safe_mem::CanAccess(owner_va + 0x224u, 1u) &&
+        X86_MEM8(owner_va + 0x224u) == 0xFFu) {
+        X86_MEM8(owner_va + 0x224u) = 0u;
+    }
 
     const SavedRegs saved = SavedRegs::Save(ctx);
 
@@ -222,7 +262,7 @@ void PopulateNativeOptionsList(X86Context& ctx, uint8_t* base, uint32_t screen_v
             X86_PUSH32(r);
             ctx.ecx = list_va;
             X86_PUSH32(0u);
-            sub_00348BE0(ctx, base);
+            __imp__sub_00348BE0(ctx, base);
 
             e.handle = ctx.eax;
             if (e.handle != 0u && game::safe_mem::CanAccess(e.handle, 16u)) {
@@ -234,7 +274,7 @@ void PopulateNativeOptionsList(X86Context& ctx, uint8_t* base, uint32_t screen_v
                 X86_PUSH32(e.handle);
                 ctx.ecx = list_va;
                 X86_PUSH32(0u);
-                sub_00348D70(ctx, base);
+                __imp__sub_00348D70(ctx, base);
             }
         }
     }
@@ -256,10 +296,7 @@ void RefreshVisibleRows(X86Context& ctx, uint8_t* base) {
 }
 
 void ApplyNativeScreenTitle(X86Context& ctx, uint8_t* base, NativePage page) {
-    const char* title = (page == NativePage::Display)   ? "Display Options"
-                        : (page == NativePage::Quality) ? "Quality Options"
-                                                        : nullptr;
-    if (!title || ctx.esp <= 64u) return;
+    if (page == NativePage::None || ctx.esp <= 64u) return;
 
     const uint32_t mgr_va = game::safe_mem::Read32(kMenuMgrGlobalPtr, 0u);
     const uint32_t cur_menu_va = mgr_va ? game::safe_mem::Read32(mgr_va + 0x0Cu, 0u) : 0u;
@@ -269,12 +306,22 @@ void ApplyNativeScreenTitle(X86Context& ctx, uint8_t* base, NativePage page) {
     const uint32_t title_buf_va = owner_va + 0x60u;
     if (!game::safe_mem::CanAccess(title_buf_va, 0x78u)) return;
 
+    const uint32_t flash_root_va = game::safe_mem::Read32(kFlashRootGlobalPtr, 0u);
+    // In Main Menu (bg_options.xbck), the narrow uppercase title slot wraps two-word titles like
+    // "Display Options" / "Quality Options", causing "OPTIONS" to drop onto line 2 over the menu
+    // controls. Use single-word "Display" / "Quality" in Main Menu and full titles in Pause Menu.
+    const char* title = nullptr;
+    if (flash_root_va) {
+        title = (page == NativePage::Display) ? "Display" : "Quality";
+    } else {
+        title = (page == NativePage::Display) ? "Display Options" : "Quality Options";
+    }
+
     auto* dst = static_cast<char*>(kernel::HostPtr(title_buf_va));
     const size_t len = std::min<size_t>(std::strlen(title), 0x77u);
     std::memcpy(dst, title, len);
     dst[len] = '\0';
 
-    const uint32_t flash_root_va = game::safe_mem::Read32(kFlashRootGlobalPtr, 0u);
     uint32_t target_flash_va = 0u;
     uint32_t var_name_va = 0u;
     if (flash_root_va) {
@@ -297,13 +344,57 @@ void ApplyNativeScreenTitle(X86Context& ctx, uint8_t* base, NativePage page) {
 
 }  // namespace
 
-// Override screen header title setter so Display Options / Quality Options show their real names.
+// Override screen header title setter so Display / Quality Options never flash "GAME OPTIONS" or wrap "OPTIONS".
 extern "C" void sub_00154E40(X86Context& ctx, uint8_t* base) {
-    __imp__sub_00154E40(ctx, base);
     const auto page = static_cast<NativePage>(g_native_page.load());
     if (page != NativePage::None) {
         ApplyNativeScreenTitle(ctx, base, page);
+        ctx.esp += 4u;  // __cdecl ret 0
+        return;
     }
+    __imp__sub_00154E40(ctx, base);
+}
+
+// Hide Networking item from Main Menu list while keeping remaining items contiguously indexed.
+extern "C" void sub_0018C770(X86Context& ctx, uint8_t* base) {
+    ScopedMainMenuPopulate guard;
+    __imp__sub_0018C770(ctx, base);
+}
+
+// Filter Networking row during Main Menu CMenuList population (sub_00348BE0: __thiscall ret 0x1C).
+extern "C" void sub_00348BE0(X86Context& ctx, uint8_t* base) {
+    if (g_in_main_menu_populate) {
+        const uint32_t cb_fn = game::safe_mem::Read32(ctx.esp + 20u, 0u);
+        if (cb_fn == kFnMainMenuNetworking) {
+            g_skipped_networking = true;
+            ctx.eax = 0u;
+            ctx.esp += 32u;  // return address + 0x1C args
+            return;
+        }
+        if (g_skipped_networking && game::safe_mem::CanAccess(ctx.esp + 4u, 4u)) {
+            const uint32_t idx = X86_MEM32(ctx.esp + 4u);
+            if (idx > 0u) {
+                X86_MEM32(ctx.esp + 4u) = idx - 1u;
+            }
+        }
+    }
+    __imp__sub_00348BE0(ctx, base);
+}
+
+// Skip label assignment for filtered Main Menu item handles (sub_00348D70: __thiscall ret 0x0C).
+extern "C" void sub_00348D70(X86Context& ctx, uint8_t* base) {
+    if (g_in_main_menu_populate && game::safe_mem::Read32(ctx.esp + 4u, 0u) == 0u) {
+        ctx.esp += 16u;  // return address + 0x0C args
+        return;
+    }
+    __imp__sub_00348D70(ctx, base);
+}
+
+// Hide Main Menu Xbox Live sign-in status widget ([this + 0x1C0], "Not Signed In" / "Signed in...").
+extern "C" void sub_0018CAD0(X86Context& ctx, uint8_t* base) {
+    const uint32_t status_widget_va = game::safe_mem::Read32(ctx.ecx + 0x1C0u, 0u);
+    CallWidgetSetVisible(ctx, base, status_widget_va, 0u);
+    ctx.esp += 4u;  // __thiscall ret 0
 }
 
 // Override Options menu populate: append Display Options and Quality Options items.
