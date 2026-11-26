@@ -705,9 +705,16 @@ HLE_STDCALL(D3DDevice_SetScreenSpaceOffset, 2) {
 
 // render states
 
+static uint32_t CanonicalSimpleValue(uint32_t method, uint32_t value) {
+    // Normalize IEEE-754 -0.0f to +0.0f on float depth-bias methods so host/guest shadows
+    // and Vulkan PSO keys stay synchronized.
+    if ((method == gpu::kMSlopeScale || method == gpu::kMDepthOffset) && value == 0x80000000u) return 0u;
+    return value;
+}
+
 HLE_FASTCALL(D3DDevice_SetRenderState_Simple, 0) {
     uint32_t method = a[0] & 0x1FFC;
-    uint32_t value = a[1];
+    uint32_t value = CanonicalSimpleValue(method, a[1]);
     g_state.simple[method >> 2] = value;
     return 0;
 }
@@ -717,7 +724,7 @@ HLE_STDCALL(D3DDevice_SetRenderStateNotInline, 2) {
     uint32_t v = a[1];
     if (rs < gpu::kRsDeferredFirst) {
         uint32_t method = R32(kSimpleEncode + rs * 4) & 0x1FFC;
-        g_state.simple[method >> 2] = v;
+        g_state.simple[method >> 2] = CanonicalSimpleValue(method, v);
     } else if (rs < gpu::kRsMax) {
         SetComplex(rs, v);
     }
@@ -1363,7 +1370,7 @@ void Walk(uint32_t end) {
                        (m >= 0x1518 && m < 0x1528)) {
                 ApplyImmediateMethod(m, v);
             } else {
-                if (m >> 2 < g_state.simple.size()) g_state.simple[m >> 2] = v;
+                if (m >> 2 < g_state.simple.size()) g_state.simple[m >> 2] = CanonicalSimpleValue(m, v);
             }
         }
     }
@@ -1407,7 +1414,7 @@ HLE_STDCALL(D3DDevice_EndPush, 1) {
             if (m == kMInlineArray) {
                 if (prim) vertices.push_back(v);
             } else if (m != kMBeginEnd) {
-                if (m >> 2 < g_state.simple.size()) g_state.simple[m >> 2] = v;
+                if (m >> 2 < g_state.simple.size()) g_state.simple[m >> 2] = CanonicalSimpleValue(m, v);
             } else if (v) {
                 prim = v;
                 vertices.clear();

@@ -76,7 +76,8 @@ TexSampleClass ClassifyP8WithPalette(const gpu::TextureDesc& d, uint32_t span,
 
     if (!any_accessible) return TexSampleClass::OutOfRam;
     if (all_transparent) return TexSampleClass::TransparentZero;
-    if (all_rgb_zero) return TexSampleClass::ZeroBlack;
+    // Black-RGB sheets with varying alpha (e.g. drop-shadow font atlases *_s) are valid alpha masks, not broken black frames.
+    if (all_rgb_zero) return (any_non_opaque && !all_equal) ? TexSampleClass::Varied : TexSampleClass::ZeroBlack;
     if (all_white_opaque) return TexSampleClass::SolidWhite;
     if (!any_colored_visible && any_non_opaque) return TexSampleClass::WhiteRgbAlphaMask;
     if (all_equal) return TexSampleClass::SolidConst;

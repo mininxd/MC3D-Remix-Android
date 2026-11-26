@@ -1517,8 +1517,33 @@ X86_FUNC(sub_0020B6F0) {
     __imp__sub_0020B6F0(ctx, base);
 }
 
-// Dynamic 256x256 cubemap reflections throttle (sub_00332EF0 + sub_00332460).
-// Reflections option: 0 = Off (seed initial cubemap only), 1 = Low (1/4 rate), 2 = High (every frame).
+// Native MC3D Sense-of-Speed / Radial Motion Blur control (mcFbGlow::RenderMotionBlur).
+// Signature: __thiscall void sub_00044230(float alphaScale, float radiusScale, int flag) [ret 0x0C].
+// Motion Blur option: 0 = Off (skip pass), 1 = Low (reduced alpha/radius), 2 = Strong (stock Xbox).
+X86_EXTERN_FUNC(__imp__sub_00044230);
+X86_FUNC(sub_00044230) {
+    const uint32_t mode = game::Opt().motion_blur;
+    if (mode == 0u) {
+        ctx.esp += 16u;  // __thiscall ret 0x0C
+        return;
+    }
+    if (mode == 1u && game::safe_mem::CanAccess(ctx.esp + 4u, 8u)) {
+        auto scale_arg = [&](uint32_t va, float factor) {
+            uint32_t bits = X86_MEM32(va);
+            float v = 0.0f;
+            std::memcpy(&v, &bits, sizeof(v));
+            v *= factor;
+            std::memcpy(&bits, &v, sizeof(bits));
+            X86_MEM32(va) = bits;
+        };
+        scale_arg(ctx.esp + 4u, 0.35f);  // alphaScale
+        scale_arg(ctx.esp + 8u, 0.40f);  // radiusScale
+    }
+    __imp__sub_00044230(ctx, base);
+}
+
+// Dynamic 256x256 cubemap reflections toggle (sub_00332EF0 + sub_00332460).
+// Reflections option: 0 = Off (seed initial cubemap only), >= 1 = On (full every-frame high reflections).
 namespace {
 uint32_t g_envmap_last_mgr = 0u;
 uint32_t g_envmap_frame = 0u;
@@ -1527,19 +1552,13 @@ bool g_envmap_run_pass = true;
 
 X86_EXTERN_FUNC(__imp__sub_00332EF0);
 X86_FUNC(sub_00332EF0) {
-    const uint32_t mode = game::Opt().reflections;
+    const bool enabled = game::Opt().reflections != 0u;
     if (ctx.ecx != g_envmap_last_mgr) {
         g_envmap_last_mgr = ctx.ecx;
         g_envmap_frame = 0u;
     }
     const uint32_t frame = g_envmap_frame++;
-    if (mode >= 2u) {
-        g_envmap_run_pass = true;
-    } else if (mode == 1u) {
-        g_envmap_run_pass = (frame < 4u) || ((frame & 3u) == 0u);
-    } else {
-        g_envmap_run_pass = (frame < 2u);
-    }
+    g_envmap_run_pass = enabled || (frame < 2u);
     if (!g_envmap_run_pass) {
         ctx.esp += 4u;  // __thiscall ret 0
         return;
@@ -1549,7 +1568,7 @@ X86_FUNC(sub_00332EF0) {
 
 X86_EXTERN_FUNC(__imp__sub_00332460);
 X86_FUNC(sub_00332460) {
-    if (game::Opt().reflections < 2u && ctx.ecx == g_envmap_last_mgr && !g_envmap_run_pass) {
+    if (game::Opt().reflections == 0u && ctx.ecx == g_envmap_last_mgr && !g_envmap_run_pass) {
         ctx.esp += 4u;  // __thiscall ret 0
         return;
     }

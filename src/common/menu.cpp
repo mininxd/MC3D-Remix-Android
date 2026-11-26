@@ -75,8 +75,8 @@ constexpr uint32_t kAntiAliasings[] = {0, 1, 2};
 const char* const kAntiAliasingNames[] = {"Off", "FXAA", "SSAA 2x"};
 constexpr uint32_t kMotionBlurs[] = {0, 1, 2};
 const char* const kMotionBlurNames[] = {"Off", "Low", "Strong"};
-constexpr uint32_t kReflectionValues[] = {0, 1, 2};
-const char* const kReflectionNames[] = {"Off", "Low", "High"};
+constexpr uint32_t kReflectionValues[] = {0, 1};
+const char* const kReflectionNames[] = {"Off", "On"};
 constexpr uint32_t kFmvScales[] = {0, 1};
 const char* const kFmvScaleNames[] = {"Fill", "4:3"};
 constexpr uint32_t kScreenFilters[] = {0, 1, 2, 3, 4, 5, 6, 7, 8};
@@ -175,7 +175,6 @@ constexpr Row kQualityRows[] = {
     {Kind::Value, kMotionBlur, "Motion Blur"},
     {Kind::Value, kReflections, "Reflections"},
     {Kind::Value, kAniso, "Anisotropic Filtering"},
-    {Kind::Value, kFog, "Fog"},
 };
 
 constexpr Row kTouchRows[] = {

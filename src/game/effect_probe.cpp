@@ -199,7 +199,10 @@ void CapturePreSyncSimpleDesync(const gpu::State& s) {
         if (!safe_mem::CanAccess(ea, 4u)) continue;
         const uint32_t guest_val = kernel::R32(ea);
         const uint32_t host_val = s.simple[method >> 2];
-        if (guest_val != host_val) {
+        const bool signed_zero_eq =
+            (method == gpu::kMSlopeScale || method == gpu::kMDepthOffset) &&
+            ((guest_val & 0x7FFFFFFFu) == 0u) && ((host_val & 0x7FFFFFFFu) == 0u);
+        if (guest_val != host_val && !signed_zero_eq) {
             if (count < 3u) {
                 std::snprintf(buf, sizeof(buf), "%srs%u(m=0x%X):g=0x%X!=h=0x%X",
                               tl_pre_sync_desync.empty() ? "" : ",", rs, method, guest_val, host_val);

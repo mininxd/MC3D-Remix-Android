@@ -174,8 +174,11 @@ AnomalyReport AnalyzeDrawAnomalies(const gpu::State& s, const std::array<StageTe
             case TexSampleClass::ZeroBlack:
             case TexSampleClass::AlphaZeroBlack:
                 if (!rep.is_3d) {
-                    rep.flags |= kAnomUiBlackFrame;
-                    AppendTag(rep.summary, "UI_BLACK_FRAME");
+                    // Full-screen linear video surfaces (Bink FMV intro fade-in) legitimately start black.
+                    if (!(t.linear && t.width >= 512u && t.height >= 360u)) {
+                        rep.flags |= kAnomUiBlackFrame;
+                        AppendTag(rep.summary, "UI_BLACK_FRAME");
+                    }
                 } else {
                     rep.flags |= kAnomTexZeroBlack;
                     AppendTag(rep.summary, "TEX_ZERO_BLACK");
@@ -192,8 +195,7 @@ AnomalyReport AnalyzeDrawAnomalies(const gpu::State& s, const std::array<StageTe
                 }
                 break;
             case TexSampleClass::SolidConst:
-                rep.flags |= kAnomTexConst;
-                AppendTag(rep.summary, "TEX_SOLID_CONST");
+                // Valid in-RAM constant-color material swatches (e.g. 8x8 DXT1 / tinted DXT5) are benign.
                 break;
             case TexSampleClass::InvalidDesc:
             case TexSampleClass::OutOfRam:
