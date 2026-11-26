@@ -24,7 +24,7 @@ constexpr uint16_t kFormatXboxAdpcm = 0x69;
 constexpr uint32_t kAdpcmFrames = 64;
 constexpr uint32_t kAdpcmBlockBytes = 36;
 
-// XMEDIAPACKET as the title queued it
+// XMEDIAPACKET as the title queued it (with host byte snapshot to prevent guest ring-buffer overwrite races)
 struct Packet {
     uint32_t data;
     uint32_t size;
@@ -32,6 +32,8 @@ struct Packet {
     uint32_t status_ptr;
     uint32_t context;
     uint32_t used = 0;
+    uint64_t id = 0;
+    std::vector<uint8_t> buf;
 };
 
 constexpr uint32_t kEarLength = 64;  // past the longest interaural delay, 31 samples
@@ -125,6 +127,7 @@ struct Done {
 };
 
 inline std::recursive_mutex g_lock;
+inline std::mutex g_callback_lock;
 inline std::map<uint32_t, Voice> g_voices;
 inline float g_listener[3] = {};
 inline float g_front[3] = {0, 0, 1};
@@ -134,6 +137,10 @@ inline float g_top[3] = {0, 1, 0};
 inline std::deque<Done> g_done;
 inline std::condition_variable_any g_done_cv;
 inline std::atomic<int64_t> g_pumped{0};          // the last DirectSoundDoWork, steady ms
+inline std::atomic<uint64_t> g_next_packet_id{1};
+inline std::atomic<uint32_t> g_active_streams{0};
+inline std::atomic<uint32_t> g_active_buffers{0};
+inline std::atomic<float> g_last_reverb_peak{0.0f};
 inline bool g_started = false;
 inline uint32_t g_ds = 0;
 inline bool g_headphones = false;  // IDirectSound_EnableHeadphones

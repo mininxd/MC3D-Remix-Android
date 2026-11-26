@@ -28,6 +28,16 @@ constexpr uint32_t kTaTexture          = 2u;
 std::atomic<uint64_t> g_additive_fog_fixes{0};
 std::atomic<uint64_t> g_neon_state_fixes{0};
 std::atomic<uint64_t> g_additive_blendop_fixes{0};
+std::atomic<uint64_t> g_unlit_vcol_fixes{0};
+
+bool IsUnlitDiffuseEffect(const char* eff) {
+    if (!eff) return false;
+    return std::strcmp(eff, "NEON_GLOW") == 0 ||
+           std::strcmp(eff, "CAR_LIGHT_FX") == 0 ||
+           std::strcmp(eff, "LIGHT_QUAD_FX") == 0 ||
+           std::strcmp(eff, "PARTICLE_FX") == 0 ||
+           std::strcmp(eff, "PARTICLE_BILLBOARD") == 0;
+}
 
 }  // namespace
 
@@ -36,18 +46,24 @@ void Apply(gpu::State& s) {
     const bool is_neon = (eff != nullptr && std::strcmp(eff, "NEON_GLOW") == 0);
 
     // sub_000FA5A0(0x10) draws car neon underglow tubes (fx_car_neon_glow) and the ground glow pool
-    // (vp_shadow.tex) via fixed-function vglBegin/vglEnd immediately after sub_00106E30 (car ground
-    // shadow). sub_00106E30 leaves D3DRS_BLENDOP=REVSUBTRACT (0x800B) and/or a shadow pixel shader /
-    // TSS active, while sub_002D3660(2, 0x80) only sets SRCBLEND=SRCALPHA and DESTBLEND=ONE.
-    // Restore clean additive fixed-function modulate state so neon glows with its true RGB color.
+    // (vp_shadow.tex) via fixed-function vglBegin/vglEnd (FVF 0x142: XYZ|DIFFUSE|TEX1, no normal)
+    // immediately after sub_00106E30 (car ground shadow).
+    // Two state leaks turn neon dark:
+    //  1) D3DRS_LIGHTING=1 left on from 3D car body/shadow causes FixedVertexHlsl (shaders.cpp) to
+    //     compute dot(normal=(0,0,0), light)=0 and drop vertex diffuse i.v3 completely!
+    //  2) Stale D3DRS_BLENDOP=REVSUBTRACT (0x800B) / pixel shader / TSS from sub_00106E30.
+    // All deferred RS writes must go through ApplyRenderState so d3d8.cpp::SyncDeferred() preserves them.
     if (is_neon) {
         const uint32_t prev_op = s.simple[gpu::kMBlendOp / 4u];
+        const uint32_t prev_lit = s.rs[gpu::kRsLighting] & 1u;
         const bool had_ps = (s.ps != nullptr);
         if (had_ps) {
             d3d_sync::LoadPixelShaderIntoState(s, nullptr);
         }
         d3d_sync::ApplyRenderState(s, kRsAlphaBlendEnable, 1u);
         d3d_sync::ApplyRenderState(s, kRsBlendOp, kBlendOpAdd);
+        d3d_sync::ApplyRenderState(s, gpu::kRsLighting, 0u);
+        d3d_sync::ApplyRenderState(s, gpu::kRsFogEnable, 0u);
         d3d_sync::ApplyTextureStageState(s, 0u, gpu::kTssColorOp, kTopModulate);
         d3d_sync::ApplyTextureStageState(s, 0u, gpu::kTssColorArg1, kTaTexture);
         d3d_sync::ApplyTextureStageState(s, 0u, gpu::kTssColorArg2, kTaDiffuse);
@@ -56,12 +72,22 @@ void Apply(gpu::State& s) {
         d3d_sync::ApplyTextureStageState(s, 0u, gpu::kTssAlphaArg2, kTaDiffuse);
         d3d_sync::ApplyTextureStageState(s, 1u, gpu::kTssColorOp, kTopDisable);
         d3d_sync::ApplyTextureStageState(s, 1u, gpu::kTssAlphaOp, kTopDisable);
-        s.rs[gpu::kRsFogEnable] = 0u;
 
         const uint64_t n = ++g_neon_state_fixes;
         if (n <= 4u) {
-            LOGR("[OK] car_lights_fix: restored additive FF state for NEON_GLOW (prevOp=0x%X hadPs=%u count=%llu)",
-                 prev_op, had_ps ? 1u : 0u, static_cast<unsigned long long>(n));
+            LOGR("[OK] car_lights_fix: restored unlit additive FF state for NEON_GLOW (prevOp=0x%X prevLit=%u hadPs=%u count=%llu)",
+                 prev_op, prev_lit, had_ps ? 1u : 0u, static_cast<unsigned long long>(n));
+        }
+    } else if (IsUnlitDiffuseEffect(eff) && !s.ps && (s.rs[gpu::kRsLighting] & 1u) != 0u) {
+        const bool is_fvf = (s.vs_handle != 0u) && ((s.vs_handle & 1u) == 0u);
+        const bool fvf_has_vcol_no_nrm = is_fvf && ((s.vs_handle & 0x40u) != 0u) && ((s.vs_handle & 0x10u) == 0u);
+        if (fvf_has_vcol_no_nrm || s.vs_handle == 0u) {
+            d3d_sync::ApplyRenderState(s, gpu::kRsLighting, 0u);
+            const uint64_t n = ++g_unlit_vcol_fixes;
+            if (n <= 4u) {
+                LOGR("[OK] car_lights_fix: cleared Lighting=1 on unlit %s pass (fvf=0x%X count=%llu)",
+                     eff, s.vs_handle, static_cast<unsigned long long>(n));
+            }
         }
     }
 
@@ -84,8 +110,9 @@ void Apply(gpu::State& s) {
     // On NV2A/D3D8 additive passes (DestBlend == D3DBLEND_ONE == 1), shaders.cpp lerps
     // fogcolor.rgb into outc before additive blending, adding (1 - fog.a) * fogcolor on
     // top of dark areas and washing car lights/coronas/billboards out toward solid grey/white.
+    // Must mirror to guest RAM via ApplyRenderState so d3d8.cpp::SyncDeferred() does not restore 1.
     if (blend_on && dst_blend == kBlendOne && (s.rs[gpu::kRsFogEnable] & 1u) != 0u) {
-        s.rs[gpu::kRsFogEnable] = 0u;
+        d3d_sync::ApplyRenderState(s, gpu::kRsFogEnable, 0u);
         const uint64_t n = ++g_additive_fog_fixes;
         if (n <= 4u) {
             LOGI("car_lights_fix: cleared FOGENABLE on additive pass (dstBlend=ONE, count=%llu)",

@@ -1,6 +1,8 @@
 // decoding, levels and the mix
 #include <chrono>
+#include <cstdio>
 
+#include "game/object_logger.h"
 #include "sound/sound.h"
 
 namespace sound {
@@ -41,33 +43,58 @@ void DecodeBlock(const uint8_t* b, int ch, int16_t* out) {
     }
 }
 
-// The decoded ADPCM block at guest address at. A frame between two blocks reads both, so the one before stays too.
-const int16_t* DecodedBlock(Voice& v, int64_t at) {
-    if (at == v.block) return v.decoded[v.slot];
+// The decoded ADPCM block at source key `key` and host bytes `src`. A frame between two blocks reads both.
+const int16_t* DecodedBlockPtr(Voice& v, int64_t key, const uint8_t* src) {
+    if (key == v.block) return v.decoded[v.slot];
     int64_t before = v.block_decoded_now ? v.block : -1;
-    if (at != v.spare_block) {
+    if (key != v.spare_block) {
         int16_t* into = v.decoded[v.slot ^ 1];
-        DecodeBlock(static_cast<const uint8_t*>(HostPtr(uint32_t(at))), std::min<int>(v.channels, 8), into);
+        DecodeBlock(src, std::min<int>(v.channels, 8), into);
     }
     v.spare_block = before;
-    v.block = at;
+    v.block = key;
     v.slot ^= 1;
     v.block_decoded_now = true;
     return v.decoded[v.slot];
 }
 
-// sample of channel c at frame f of memory starting at data
-float Sample(Voice& v, uint32_t data, uint32_t f, int c) {
+// sample of channel c at frame f from host byte buffer (either snapshot pk.buf or guest buffer)
+float SampleBytes(Voice& v, const uint8_t* p, uint32_t avail_bytes, int64_t key_base, uint32_t f, int c) {
+    if (!p || avail_bytes == 0u) return 0.0f;
     c = std::min<int>(c, v.channels - 1);
-    const uint8_t* p = static_cast<const uint8_t*>(HostPtr(data));
     if (v.tag == kFormatXboxAdpcm) {
-        int64_t at = int64_t(data) + int64_t(f / kAdpcmFrames) * kAdpcmBlockBytes * v.channels;
-        return DecodedBlock(v, at)[(f % kAdpcmFrames) * v.channels + c] / 32768.0f;
+        const uint32_t blk_idx = f / kAdpcmFrames;
+        const uint32_t blk_bytes = kAdpcmBlockBytes * v.channels;
+        const uint32_t off = blk_idx * blk_bytes;
+        if (off + blk_bytes > avail_bytes) return 0.0f;
+        const int64_t key = key_base + int64_t(blk_idx);
+        return DecodedBlockPtr(v, key, p + off)[(f % kAdpcmFrames) * v.channels + c] / 32768.0f;
     }
-    if (v.bits == 8) return (p[f * v.align + c] - 128) / 128.0f;
+    if (v.bits == 8) {
+        const uint32_t off = f * v.align + uint32_t(c);
+        if (off >= avail_bytes) return 0.0f;
+        return (p[off] - 128) / 128.0f;
+    }
+    const uint32_t off = f * v.align + uint32_t(c) * 2u;
+    if (off + 2u > avail_bytes) return 0.0f;
     int16_t s;
-    std::memcpy(&s, p + f * v.align + c * 2, 2);
+    std::memcpy(&s, p + off, 2);
     return s / 32768.0f;
+}
+
+// sample of channel c at frame f of memory starting at guest address data
+float Sample(Voice& v, uint32_t data, uint32_t avail_bytes, uint32_t f, int c) {
+    const uint8_t* p = static_cast<const uint8_t*>(HostPtr(data));
+    return SampleBytes(v, p, avail_bytes, int64_t(data) << 16, f, c);
+}
+
+float SamplePacket(Voice& v, const Packet& pk, uint32_t f, int c) {
+    if (!pk.buf.empty()) {
+        // Negative key space keyed by unique packet_id prevents any stale ADPCM cache hits on reused guest VAs.
+        const int64_t key_base = -(int64_t(pk.id) << 24);
+        return SampleBytes(v, pk.buf.data(), static_cast<uint32_t>(pk.buf.size()), key_base, f, c);
+    }
+    return Sample(v, pk.data, pk.size, f, c);
 }
 
 void Complete(Voice& v, Packet& pk, uint32_t status) {
@@ -318,26 +345,32 @@ float EarAt(const Voice& v, float delay) {
 bool StreamFrame(Voice& v, float s[2]) {
     uint32_t f = uint32_t(v.pos);
     while (!v.packets.empty() && f >= FramesOf(v, v.packets.front().size)) {
-        Packet pk = v.packets.front();
+        Packet pk = std::move(v.packets.front());
         v.packets.pop_front();
         pk.used = pk.size;
+        game::objlog::RecordAudioPacketEvent(1);
         Complete(v, pk, 0);
         v.pos -= FramesOf(v, pk.size);
+        v.block = -1;
+        v.spare_block = -1;
         f = uint32_t(v.pos);
     }
     if (v.packets.empty()) {
+        if (v.active && !v.ending) {
+            game::objlog::RecordAudioPacketEvent(3);
+        }
         v.pos = 0;
         if (v.ending) Deactivate(v);
         return false;
     }
-    Packet& pk = v.packets.front();
+    const Packet& pk = v.packets.front();
     float t = float(v.pos - f);
     int channels = std::min<int>(v.channels, 2);
     for (int c = 0; c < channels; c++) {
-        float now = Sample(v, pk.data, f, c);
+        float now = SamplePacket(v, pk, f, c);
         float next = now;
-        if (f + 1 < FramesOf(v, pk.size)) next = Sample(v, pk.data, f + 1, c);
-        else if (v.packets.size() > 1) next = Sample(v, v.packets[1].data, 0, c);
+        if (f + 1 < FramesOf(v, pk.size)) next = SamplePacket(v, pk, f + 1, c);
+        else if (v.packets.size() > 1) next = SamplePacket(v, v.packets[1], 0, c);
         s[c] = now + (next - now) * t;
     }
     if (channels == 1) s[1] = s[0];  // a mono voice reads its one channel as both
@@ -373,6 +406,7 @@ bool BufferFrame(Voice& v, const Region& region, float s[2]) {
     }
     if (!v.data) return false;
     uint32_t base = v.data + v.play_start;
+    uint32_t avail = (v.bytes > v.play_start) ? (v.bytes - v.play_start) : 0u;
     // the frame after the last is the loop start, or the last again
     uint32_t next = f;
     if (f + 1 < end) next = f + 1;
@@ -380,8 +414,8 @@ bool BufferFrame(Voice& v, const Region& region, float s[2]) {
     float t = float(v.pos - f);
     int channels = std::min<int>(v.channels, 2);
     for (int c = 0; c < channels; c++) {
-        float now = Sample(v, base, f, c);
-        s[c] = now + (Sample(v, base, next, c) - now) * t;
+        float now = Sample(v, base, avail, f, c);
+        s[c] = now + (Sample(v, base, avail, next, c) - now) * t;
     }
     if (channels == 1) s[1] = s[0];  // a mono voice reads its one channel as both
     return true;
@@ -399,7 +433,8 @@ void MixVoice(Voice& v, float* out, float* send, uint32_t frames) {
     Lanes lanes = AudibleLanes(v.gain, dg);
     Region region = RegionOf(v);
     double step = double(v.freq ? v.freq : v.rate) / audio::kRate;
-    // the game may have rewritten sample memory since the last block: a block left behind is decoded again
+    // Always drop stale ADPCM block caches at block start so rewritten buffer/ring memory is decoded fresh.
+    v.block = -1;
     v.spare_block = -1;
     v.block_decoded_now = false;
     for (uint32_t i = 0; i < frames; i++) {
@@ -420,17 +455,31 @@ void MixVoice(Voice& v, float* out, float* send, uint32_t frames) {
     v.itd = itd;
 }
 
-// the device clips once, after the fold to stereo sums the speakers
+// the device soft-limits and clips once, after the fold to stereo sums the speakers
 void Render(float* out, uint32_t frames) {
     std::memset(out, 0, frames * kOuts * sizeof(float));
     static std::vector<float> send;  // the output thread alone renders
     send.assign(frames, 0.0f);
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
-    for (auto& [obj, v] : g_voices) {
-        if (v.paused || v.sync || (!v.stream && !v.playing)) continue;
-        MixVoice(v, out, send.data(), frames);
+    uint32_t active_streams = 0;
+    uint32_t active_buffers = 0;
+    float rev_peak = 0.0f;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_lock);
+        for (auto& [obj, v] : g_voices) {
+            if (v.paused || v.sync || (!v.stream && !v.playing)) continue;
+            if (v.stream) {
+                if (!v.packets.empty()) ++active_streams;
+            } else {
+                ++active_buffers;
+            }
+            MixVoice(v, out, send.data(), frames);
+        }
+        rev_peak = g_reverb.Run(send.data(), out, frames);
     }
-    g_reverb.Run(send.data(), out, frames);
+    g_active_streams.store(active_streams, std::memory_order_relaxed);
+    g_active_buffers.store(active_buffers, std::memory_order_relaxed);
+    g_last_reverb_peak.store(rev_peak, std::memory_order_relaxed);
+    game::objlog::RecordAudioRenderStats(active_streams, active_buffers, rev_peak);
 }
 
 int64_t NowMs() {
@@ -439,6 +488,8 @@ int64_t NowMs() {
 }
 
 void Run(X86Context& ctx, const std::vector<Done>& done) {
+    if (done.empty()) return;
+    std::lock_guard<std::mutex> cb_lock(g_callback_lock);
     for (const Done& d : done) CallGuest(ctx, d.callback, {d.context, d.packet_context, d.status});
 }
 
@@ -446,18 +497,23 @@ void Start() {
     if (g_started) return;
     g_started = true;
     audio::StartOutput(Render);
-    // for a title that never calls DirectSoundDoWork: its callbacks come from here instead
+    // Fallback callback pump: fast (8ms) ONLY if the title has never called DirectSoundDoWork;
+    // once DirectSoundDoWork is active (g_pumped != 0), wait 250ms before intervening so gameplay
+    // frames (16-33ms) never race guest XACT/radio stream callbacks across two threads.
     StartHostThread("dsound", [](X86Context& ctx) {
-        constexpr int64_t kPumpMs = 12;
+        constexpr int64_t kStalePumpMs = 250;
         for (;;) {
             std::vector<Done> done;
             {
                 std::unique_lock<std::recursive_mutex> lock(g_lock);
                 g_done_cv.wait_for(lock, std::chrono::milliseconds(8));
-                if (NowMs() - g_pumped < kPumpMs) continue;
+                const int64_t last_pump = g_pumped.load(std::memory_order_relaxed);
+                if (last_pump != 0 && (NowMs() - last_pump) < kStalePumpMs) continue;
+                if (g_done.empty()) continue;
                 done.assign(g_done.begin(), g_done.end());
                 g_done.clear();
             }
+            game::objlog::RecordAudioPumpEvent(true);
             Run(ctx, done);
         }
     });
@@ -476,7 +532,12 @@ void ReadFormat(Voice& v, uint32_t wfx) {
     v.rate = R32(wfx + kWfxRate);
     v.align = std::max<uint16_t>(R16(wfx + kWfxBlockAlign), 1);
     v.bits = R16(wfx + kWfxBits);
-    if (v.tag != kFormatPcm && v.tag != kFormatXboxAdpcm) LOG_FIRST(8, "dsound: format tag %X not supported", v.tag);
+    if (v.tag != kFormatPcm && v.tag != kFormatXboxAdpcm) {
+        LOG_FIRST(8, "dsound: format tag %X not supported", v.tag);
+        char msg[96];
+        std::snprintf(msg, sizeof(msg), "unsupported_tag=0x%X ch=%u rate=%u bits=%u", v.tag, v.channels, v.rate, v.bits);
+        game::objlog::LogAudioIssue(true, "UNSUPPORTED_FMT", v.obj, msg);
+    }
 }
 
 // DSMIXBINS: count, then a pointer to (bin, volume) pairs of 8 bytes

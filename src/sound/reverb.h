@@ -185,20 +185,29 @@ struct Reverb {
         pending = false;
         fade = 0;
     }
-    // adds the reverb of the 48 kHz send to the front and back pairs
-    void Run(const float* send, float* out, uint32_t frames) {
+    // adds the reverb of the 48 kHz send to the front and back pairs; returns peak wet amplitude
+    float Run(const float* send, float* out, uint32_t frames) {
         static const audio::Speaker kOut[4] = {audio::FrontLeft, audio::FrontRight, audio::BackLeft, audio::BackRight};
+        float peak = 0.0f;
         for (uint32_t i = 0; on && i < frames; i++) {
-            float x = now.in_lp.Run(send[i] * 0.5f);
+            const float s_in = std::isfinite(send[i]) ? std::clamp(send[i], -2.0f, 2.0f) : 0.0f;
+            float x = now.in_lp.Run(s_in * 0.5f);
             float o[4];
             // the core runs at 24 kHz, every other 48 kHz frame
             if (!(tick++ & 1)) {
                 UpdateFade();
                 Frame(x, o);
-                for (int k = 0; k < 4; k++) held[k] = o[k] * fade;
+                for (int k = 0; k < 4; k++) {
+                    float v = o[k] * fade;
+                    if (!std::isfinite(v)) v = 0.0f;
+                    v = std::clamp(v, -1.5f, 1.5f);
+                    held[k] = v;
+                    peak = std::max(peak, std::fabs(v));
+                }
             }
             for (int k = 0; k < 4; k++) out[i * audio::kChannels + kOut[k]] += held[k];
         }
+        return peak;
     }
 };
 inline Reverb g_reverb;

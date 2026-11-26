@@ -3,6 +3,7 @@
 #include "core/log.h"
 #include "cpu/x86_ops.h"
 #include "game/guest_mem_safe.h"
+#include "game/object_logger.h"
 #include "kernel/kernel.h"
 #include "kernel/memory.h"
 #include "sound/sound.h"
@@ -449,15 +450,24 @@ X86_FUNC(sub_003C7696) {
 // DirectSound Buffer & Stream host implementations for methods that receive host-allocated Voice* objects
 
 // IDirectSoundBuffer::SetPitch(this, lPitch)
+// Xbox NV2A MCPX pitch is signed 4.12 fixed-point octaves relative to 48000 Hz (clamped -32767..8191 in sub_003C6788).
 X86_FUNC(sub_003C2090) {
     uint32_t obj = X86_MEM32(ctx.esp + 4);
     int32_t pitch = static_cast<int32_t>(X86_MEM32(ctx.esp + 8));
-    std::lock_guard<std::recursive_mutex> lock(sound::g_lock);
-    sound::Voice* v = sound::Find(obj);
-    if (v) {
-        v->freq = static_cast<uint32_t>(std::clamp<double>(
-            double(v->rate) * std::pow(2.0, double(pitch) / 1200.0), 100.0, 192000.0));
+    const int32_t clamped = std::clamp<int32_t>(pitch, -32767, 8191);
+    uint32_t base_rate = 0u;
+    uint32_t freq_hz = 0u;
+    {
+        std::lock_guard<std::recursive_mutex> lock(sound::g_lock);
+        sound::Voice* v = sound::Find(obj);
+        if (v) {
+            base_rate = v->rate;
+            freq_hz = static_cast<uint32_t>(std::clamp<double>(
+                48000.0 * std::pow(2.0, double(clamped) / 4096.0), 100.0, 192000.0));
+            v->freq = freq_hz;
+        }
     }
+    if (freq_hz) game::objlog::LogAudioPitch(obj, false, base_rate, pitch, freq_hz);
     ctx.eax = 0;
     ctx.esp += 12;
 }
@@ -494,12 +504,20 @@ X86_FUNC(sub_003C2278) {
 X86_FUNC(sub_003C2299) {
     uint32_t obj = X86_MEM32(ctx.esp + 4);
     int32_t pitch = static_cast<int32_t>(X86_MEM32(ctx.esp + 8));
-    std::lock_guard<std::recursive_mutex> lock(sound::g_lock);
-    sound::Voice* v = sound::Find(obj);
-    if (v) {
-        v->freq = static_cast<uint32_t>(std::clamp<double>(
-            double(v->rate) * std::pow(2.0, double(pitch) / 1200.0), 100.0, 192000.0));
+    const int32_t clamped = std::clamp<int32_t>(pitch, -32767, 8191);
+    uint32_t base_rate = 0u;
+    uint32_t freq_hz = 0u;
+    {
+        std::lock_guard<std::recursive_mutex> lock(sound::g_lock);
+        sound::Voice* v = sound::Find(obj);
+        if (v) {
+            base_rate = v->rate;
+            freq_hz = static_cast<uint32_t>(std::clamp<double>(
+                48000.0 * std::pow(2.0, double(clamped) / 4096.0), 100.0, 192000.0));
+            v->freq = freq_hz;
+        }
     }
+    if (freq_hz) game::objlog::LogAudioPitch(obj, true, base_rate, pitch, freq_hz);
     ctx.eax = 0;
     ctx.esp += 12;
 }

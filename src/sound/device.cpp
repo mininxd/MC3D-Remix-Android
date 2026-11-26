@@ -1,4 +1,5 @@
 // IDirectSound: listener, effects image, work pump
+#include "game/object_logger.h"
 #include "sound/sound.h"
 #include "xbe/xbe.h"
 #include "xdk/layout.h"
@@ -151,6 +152,7 @@ HLE_STDCALL(IDirectSound_SetOrientation, 8) {
 }
 HLE_STDCALL(DirectSoundDoWork, 0) {
     g_pumped = NowMs();
+    game::objlog::RecordAudioPumpEvent(false);
     std::vector<Done> done;
     {
         std::lock_guard<std::recursive_mutex> lock(g_lock);

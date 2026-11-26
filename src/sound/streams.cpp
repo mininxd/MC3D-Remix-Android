@@ -1,4 +1,7 @@
 // CDirectSoundStream, the object carries the XDK's own vtable
+#include <cstdio>
+#include "game/guest_mem_safe.h"
+#include "game/object_logger.h"
 #include "sound/sound.h"
 #include "xdk/layout.h"
 
@@ -40,6 +43,8 @@ HLE_STDCALL(DirectSoundCreateStream, 2) {
     SetBins(v, R32(desc + kStreamDescMixBins));
     v.is3d = flags & kCaps3d;
     v.headroom = DefaultHeadroom(flags);
+    game::objlog::LogAudioVoice("CREATE", obj, true, v.tag, v.channels, v.rate, v.bits, v.is3d,
+                                v.nbins, v.bin, v.bin_mb, v.max_packets, v.callback);
     W32(a[1], obj);
     return 0;
 }
@@ -62,9 +67,14 @@ HLE_STDCALL(DirectSoundCreateStream, 2) {
 
 // the stream's callbacks still queued and those of its flushed packets, in order, go to the calling thread
 static void FlushStream(Voice& v) {
-    for (auto& pk : v.packets) Complete(v, pk, kFlushed);
+    for (auto& pk : v.packets) {
+        game::objlog::RecordAudioPacketEvent(2);
+        Complete(v, pk, kFlushed);
+    }
     v.packets.clear();
     v.pos = 0;
+    v.block = -1;
+    v.spare_block = -1;
     for (auto it = g_done.begin(); it != g_done.end();) {
         if (it->voice != v.obj) {
             ++it;
@@ -81,6 +91,9 @@ STREAM(SetFormat, 2) {
     ReadFormat(v, a[1]);
     v.freq = 0;  // the XDK sets the pitch back to the new format's own rate
     v.block = -1;
+    v.spare_block = -1;
+    game::objlog::LogAudioVoice("FORMAT", v.obj, true, v.tag, v.channels, v.rate, v.bits, v.is3d,
+                                v.nbins, v.bin, v.bin_mb, v.max_packets, v.callback);
     return 0;
 }
 STREAM(Release, 1) {
@@ -107,10 +120,42 @@ STREAM(Process, 3) {
     uint32_t in = a[1];
     if (!in) return 0;
     // XMEDIAPACKET: data, size, completed size, status, context
-    Packet pk{R32(in), R32(in + 4), R32(in + 8), R32(in + 12), R32(in + 16)};
+    Packet pk{};
+    pk.data = R32(in);
+    pk.size = R32(in + 4);
+    pk.completed_ptr = R32(in + 8);
+    pk.status_ptr = R32(in + 12);
+    pk.context = R32(in + 16);
+    pk.id = g_next_packet_id.fetch_add(1u, std::memory_order_relaxed);
     if (pk.completed_ptr) W32(pk.completed_ptr, 0);
     if (pk.status_ptr) W32(pk.status_ptr, kPacketPending);
-    v.packets.push_back(pk);
+
+    // Snapshot packet audio bytes immediately so guest XACT/radio ring-buffer reuse or disk-IO
+    // threads cannot overwrite sample data while the AAudio mixer thread is decoding it.
+    constexpr uint32_t kMaxSnapshotBytes = 2u * 1024u * 1024u;
+    if (pk.data && pk.size > 0u && pk.size <= kMaxSnapshotBytes &&
+        game::safe_mem::CanAccess(pk.data, pk.size)) {
+        pk.buf.resize(pk.size);
+        std::memcpy(pk.buf.data(), HostPtr(pk.data), pk.size);
+    } else if (pk.size > 0u) {
+        char msg[128];
+        std::snprintf(msg, sizeof(msg), "bad_packet data=0x%08X size=%u", pk.data, pk.size);
+        game::objlog::LogAudioIssue(true, "STREAM_BAD_PKT", v.obj, msg);
+    }
+
+    const uint32_t block_bytes = (v.tag == kFormatXboxAdpcm)
+        ? (kAdpcmBlockBytes * v.channels)
+        : std::max<uint32_t>(v.align, 1u);
+    if (pk.size > 0u && block_bytes > 0u && (pk.size % block_bytes) != 0u) {
+        game::objlog::RecordAudioPacketEvent(4);
+        char msg[128];
+        std::snprintf(msg, sizeof(msg), "unaligned_pkt size=%u align=%u fmt=0x%X ch=%u",
+                      pk.size, block_bytes, v.tag, v.channels);
+        game::objlog::LogAudioIssue(false, "STREAM_MISALIGN", v.obj, msg);
+    }
+
+    game::objlog::RecordAudioPacketEvent(0);
+    v.packets.push_back(std::move(pk));
     v.active = true;
     v.ending = false;
     return 0;
@@ -153,6 +198,8 @@ STREAM(SetMixBinVolumes, 2) {
 }
 STREAM(SetMixBins, 2) {
     SetBins(v, a[1]);
+    game::objlog::LogAudioVoice("MIXBINS", v.obj, true, v.tag, v.channels, v.rate, v.bits, v.is3d,
+                                v.nbins, v.bin, v.bin_mb, v.max_packets, v.callback);
     return 0;
 }
 STREAM(SetMaxDistance, 3) {

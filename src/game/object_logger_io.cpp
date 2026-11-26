@@ -57,11 +57,11 @@ void EnsureOpenLocked() {
         return;
     }
 
-    std::fprintf(g_fp, "=== MC3D-Remix Android 3D Object, Model & Material Accuracy Log ===\n");
+    std::fprintf(g_fp, "=== MC3D-Remix Android 3D Object, Particle, Neon & Audio Accuracy Log ===\n");
     std::fprintf(g_fp, "# Format: [SSSSS.MMM] [LEVEL ] [SECTION] key=value ...\n");
     std::fprintf(g_fp, "# Levels: [INFO  ] asset/summary  [OK    ] clean draw  [WARN  ] minor  [ERROR ] broken draw  [DANGER] critical\n");
-    std::fprintf(g_fp, "# Sections: [LOAD_MOD] [LOAD_TEX] [PAGE_TEX] [PAGE_SHDR] [OBJ3D] [UI2D] [SUMMARY]\n");
-    std::fprintf(g_fp, "# Filter examples: grep '\\[ERROR' / grep '\\[DANGER' / grep '\\[WARN' / grep '\\[OK'\n\n");
+    std::fprintf(g_fp, "# Sections: [LOAD_MOD] [LOAD_TEX] [PAGE_TEX] [PAGE_SHDR] [OBJ3D] [UI2D] [NEON] [PARTICLE] [AUDIO_VOICE] [AUDIO_PITCH] [AUDIO_WARN] [AUDIO_ERROR] [SUMMARY] [AUDIO_SUMMARY]\n");
+    std::fprintf(g_fp, "# Filter examples: grep '\\[NEON' / grep '\\[PARTICLE' / grep '\\[AUDIO' / grep '\\[ERROR' / grep '\\[WARN'\n\n");
     std::fflush(g_fp);
     LOGR("[OK] object_logs: opened %s (structured INFO/OK/WARN/ERROR/DANGER format)", chosen);
 }

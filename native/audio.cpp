@@ -3,11 +3,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <mutex>
 #include <vector>
 
 #include "audio/output.h"
 #include "core/log.h"
+#include "game/object_logger.h"
 
 namespace audio {
 
@@ -26,17 +28,40 @@ struct Pump {
     std::vector<float> out;  // stereo frames rendered, not yet handed to SDL
 };
 
+// Smooth soft-knee limiter so multi-voice gameplay mixes (radio + engine + SFX + reverb)
+// never hard-clip or distort on Android AAudio float output.
+float SoftLimit(float x, uint32_t& clipped, uint32_t& nans) {
+    if (!std::isfinite(x)) {
+        ++nans;
+        return 0.0f;
+    }
+    constexpr float kKnee = 0.80f;
+    constexpr float kHead = 0.18f;  // compresses [0.80 .. inf) smoothly into [0.80 .. 0.98)
+    const float ax = std::fabs(x);
+    if (ax <= kKnee) return x;
+    if (ax > 1.0f) ++clipped;
+    const float shaped = kKnee + kHead * std::tanh((ax - kKnee) / kHead);
+    return std::copysign(std::min(shaped, 0.995f), x);
+}
+
 // L = FL + kCentreFold C + BL and R = FR + kCentreFold C + BR without the sub; mono hears the average of the two
 void Fold(const float* in, uint32_t frames, bool mono, std::vector<float>& out) {
+    float peak_l = 0.0f;
+    float peak_r = 0.0f;
+    uint32_t clipped = 0u;
+    uint32_t nans = 0u;
     for (uint32_t i = 0; i < frames; i++) {
         const float* f = in + size_t(i) * kChannels;
         float c = f[Centre] * kCentreFold;
         float l = f[FrontLeft] + c + f[BackLeft];
         float r = f[FrontRight] + c + f[BackRight];
         if (mono) l = r = (l + r) * 0.5f;
-        out.push_back(l);
-        out.push_back(r);
+        if (std::isfinite(l)) peak_l = std::max(peak_l, std::fabs(l));
+        if (std::isfinite(r)) peak_r = std::max(peak_r, std::fabs(r));
+        out.push_back(SoftLimit(l, clipped, nans));
+        out.push_back(SoftLimit(r, clipped, nans));
     }
+    game::objlog::RecordAudioOutputStats(peak_l, peak_r, clipped, nans);
 }
 
 void SDLCALL Feed(void* user, SDL_AudioStream* stream, int additional, int) {

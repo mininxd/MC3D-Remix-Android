@@ -1,4 +1,5 @@
 // IDirectSoundBuffer
+#include "game/object_logger.h"
 #include "sound/sound.h"
 
 using namespace kernel;
@@ -27,6 +28,8 @@ static uint32_t NewBuffer(uint32_t desc, uint32_t out) {
         v.data = v.owned = mem::AllocContiguous(bytes, 0, 0xFFFFFFFF, 4);
         v.bytes = v.play_len = v.loop_len = bytes;
     }
+    game::objlog::LogAudioVoice("CREATE", obj, false, v.tag, v.channels, v.rate, v.bits, v.is3d,
+                                v.nbins, v.bin, v.bin_mb, 0u, 0u);
     W32(out, obj);
     return 0;
 }
@@ -151,6 +154,8 @@ BUFFER(SetMixBinVolumes, 2) {
 }
 BUFFER(SetMixBins, 2) {
     SetBins(v, a[1]);
+    game::objlog::LogAudioVoice("MIXBINS", v.obj, false, v.tag, v.channels, v.rate, v.bits, v.is3d,
+                                v.nbins, v.bin, v.bin_mb, 0u, 0u);
     return 0;
 }
 BUFFER(SetMaxDistance, 3) {
