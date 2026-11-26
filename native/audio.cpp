@@ -50,11 +50,12 @@ void Fold(const float* in, uint32_t frames, bool mono, std::vector<float>& out) 
     float peak_r = 0.0f;
     uint32_t clipped = 0u;
     uint32_t nans = 0u;
+    constexpr float kFoldHeadroom = 0.45f;
     for (uint32_t i = 0; i < frames; i++) {
         const float* f = in + size_t(i) * kChannels;
         float c = f[Centre] * kCentreFold;
-        float l = f[FrontLeft] + c + f[BackLeft];
-        float r = f[FrontRight] + c + f[BackRight];
+        float l = (f[FrontLeft] + c + f[BackLeft]) * kFoldHeadroom;
+        float r = (f[FrontRight] + c + f[BackRight]) * kFoldHeadroom;
         if (mono) l = r = (l + r) * 0.5f;
         if (std::isfinite(l)) peak_l = std::max(peak_l, std::fabs(l));
         if (std::isfinite(r)) peak_r = std::max(peak_r, std::fabs(r));

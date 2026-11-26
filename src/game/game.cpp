@@ -2,6 +2,7 @@
 #include "common/options.h"
 #include "core/log.h"
 #include "cpu/x86_ops.h"
+#include "game/cheats_hook.h"
 #include "game/guest_mem_safe.h"
 #include "game/object_logger.h"
 #include "kernel/kernel.h"
@@ -1555,6 +1556,7 @@ X86_FUNC(sub_0020B6F0) {
         }
     }
     __imp__sub_0020B6F0(ctx, base);
+    game::cheats::OnFrameTick();
 }
 
 // Native MC3D Sense-of-Speed / Radial Motion Blur control (mcFbGlow::RenderMotionBlur).

@@ -356,11 +356,11 @@ bool StreamFrame(Voice& v, float s[2]) {
         f = uint32_t(v.pos);
     }
     if (v.packets.empty()) {
-        if (v.active && !v.ending) {
+        if (v.active && !v.ending && v.pos > 0) {
             game::objlog::RecordAudioPacketEvent(3);
         }
         v.pos = 0;
-        if (v.ending) Deactivate(v);
+        if (v.ending || v.active) Deactivate(v);
         return false;
     }
     const Packet& pk = v.packets.front();
