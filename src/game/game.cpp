@@ -179,7 +179,7 @@ void Loaded() {
     });
 
     // Ordinal 24: ExQueryNonVolatileSetting (5 args, stdcall = 20 bytes stack)
-    // Supports European/PAL console configuration for Midnight Club 3: DUB Edition Remix (Europe).
+    // Auto-adapts EEPROM region profile (USA/NTSC-U vs Europe/PAL) from the booted default.xbe certificate.
     kernel::RegisterExport(24, "ExQueryNonVolatileSetting", [](X86Context& ctx, uint8_t*) {
         uint32_t index = kernel::R32(ctx.esp + 4);
         uint32_t type_out = kernel::R32(ctx.esp + 8);
@@ -187,24 +187,45 @@ void Loaded() {
         uint32_t len = kernel::R32(ctx.esp + 16);
         uint32_t result_len = kernel::R32(ctx.esp + 20);
 
+        // Read booted XBE certificate GameRegion from guest memory (0x00010000 header).
+        // USA / NTSC-U (0x1) and region-free USA builds (0x7) have bit 0 set; PAL-only Europe is 0x4.
+        static const bool kIsUsaRegion = []() {
+            uint32_t xbe_region = 4u;
+            if (game::safe_mem::CanAccess(0x00010118u, 4u)) {
+                const uint32_t cert_va = kernel::R32(0x00010118u);
+                if (cert_va >= 0x00010000u && game::safe_mem::CanAccess(cert_va + 0xA0u, 4u)) {
+                    xbe_region = kernel::R32(cert_va + 0xA0u);
+                }
+            }
+            const bool usa = (xbe_region & 0x00000001u) != 0u;
+            LOGR("[OK] kernel: EEPROM profile selected -> %s (XBE GameRegion=0x%X)",
+                 usa ? "USA/NTSC-U" : "Europe/PAL", xbe_region);
+            return usa;
+        }();
+
+        const uint32_t video_flags = kIsUsaRegion
+            ? (0x00010000u | 0x00080000u)                  // Widescreen + 480p (NTSC-U 60Hz)
+            : (0x00010000u | 0x00080000u | 0x00200000u);   // Widescreen + 480p + PAL60 (Europe)
+        const uint32_t dvd_region = kIsUsaRegion ? 1u : 2u;
+        const uint32_t av_region = kIsUsaRegion ? 0x00010100u : 0x00400200u;  // NTSC-M vs PAL-I
+        const uint32_t game_region = kIsUsaRegion ? 1u : 4u;                  // North America vs Europe
+
         uint32_t v = 0;
         switch (index) {
             case 7:   v = 1; break;                   // XC_LANGUAGE (1 = English)
-            case 8:                                   // XC_VIDEO_FLAGS (widescreen, 480p, PAL60)
-                v = 0x00010000u | 0x00080000u | 0x00200000u;
-                break;
+            case 8:   v = video_flags; break;         // XC_VIDEO_FLAGS
             case 9:   v = 0; break;                   // XC_AUDIO_FLAGS (stereo)
             case 0xA: v = 0; break;                   // XC_MAX_GAME_SAVE_BLOCKS (0 = unlimited / no parental restriction)
             case 0x11: v = 0; break;                  // XC_PARENTAL_CONTROL_GAMES (0 = all ratings permitted)
-            case 0x12: v = 2; break;                  // XC_DVD_REGION (2 = Europe / PAL)
+            case 0x12: v = dvd_region; break;         // XC_DVD_REGION (1 = USA, 2 = Europe)
             case 0x101:                               // XC_FACTORY_ETHERNET_ADDR (6-byte console MAC)
                 if (value && len >= 6) {
                     uint8_t mac[6] = {0x00, 0x50, 0xF2, 0x54, 0x00, 0x79};
                     std::memcpy(kernel::HostPtr(value), mac, 6);
                 }
                 break;
-            case 0x103: v = 0x00400200u; break;       // XC_FACTORY_AV_REGION (0x00400200 = PAL-I Europe)
-            case 0x104: v = 4; break;                  // XC_FACTORY_GAME_REGION (4 = Europe / Rest of World)
+            case 0x103: v = av_region; break;         // XC_FACTORY_AV_REGION (NTSC-M or PAL-I)
+            case 0x104: v = game_region; break;       // XC_FACTORY_GAME_REGION (1 = North America, 4 = Europe)
             default: break;
         }
 
@@ -213,14 +234,15 @@ void Loaded() {
             if (type_out) kernel::W32(type_out, 3); // REG_BINARY
             if (value && len >= 0x100) {
                 std::memset(kernel::HostPtr(value), 0, len);
-                kernel::W32(value + 0x2C, 4);                     // factory game region: 4 (Europe)
-                kernel::W32(value + 0x58, 0x00400200u);           // factory video standard: PAL-I
+                kernel::W32(value + 0x2C, game_region);           // factory game region
+                kernel::W32(value + 0x58, av_region);             // factory video standard
                 kernel::W32(value + 0xE8, 1);                     // language: English
-                kernel::W32(value + 0xEC, 0x00010000u | 0x00080000u | 0x00200000u); // video flags
+                kernel::W32(value + 0xEC, video_flags);           // video flags
                 kernel::W32(value + 0xF0, 0);                     // audio flags: stereo
             }
             if (result_len) kernel::W32(result_len, 0x100);
-            LOGI("kernel: ExQueryNonVolatileSetting(0xFFFF) -> full PAL EEPROM image");
+            LOGI("kernel: ExQueryNonVolatileSetting(0xFFFF) -> full %s EEPROM image",
+                 kIsUsaRegion ? "NTSC-U" : "PAL");
             kernel::Return(ctx, 0u, 5);
             return;
         }

@@ -10,13 +10,16 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <set>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -367,107 +370,213 @@ inline void DecodeColourPalette(const uint8_t* b, bool dxt1, uint32_t pal[4]) {
     }
 }
 
-// a level of DXT1, 3 or 5 blocks (bw x bh per slice, row_pitch bytes a block row) into w x h BGRA texels
-void DecodeDxt(Host host, const std::vector<uint8_t>& in, uint32_t row_pitch, uint32_t w, uint32_t h, uint32_t z,
-               std::vector<uint8_t>& out) {
-    uint32_t block = host == Host::BC1 ? 8 : 16;
-    uint32_t bw = std::max(1u, (w + 3) / 4), bh = std::max(1u, (h + 3) / 4);
-    size_t out_bytes = size_t(w) * h * z * 4;
-    out.resize(out_bytes);
-    if ((w & 3u) || (h & 3u)) std::memset(out.data(), 0, out_bytes);
-    auto* dst_all = reinterpret_cast<uint32_t*>(out.data());
-    uint32_t pal[4];
-    for (uint32_t s = 0; s < z; s++) {
-        uint32_t* dst_slice = dst_all + size_t(s) * w * h;
-        for (uint32_t by = 0; by < bh; by++) {
-            uint32_t max_y = std::min(4u, h - by * 4u);
-            for (uint32_t bx = 0; bx < bw; bx++) {
-                size_t at = (size_t(s) * bh + by) * row_pitch + size_t(bx) * block;
-                if (at + block > in.size()) {
-                    for (uint32_t y = 0; y < max_y; y++)
-                        std::memset(dst_slice + (by * 4u + y) * w + bx * 4u, 0, std::min(4u, w - bx * 4u) * 4u);
-                    continue;
-                }
-                const uint8_t* b = &in[at];
-                const uint8_t* cb = (host == Host::BC1) ? b : (b + 8);
-                DecodeColourPalette(cb, host == Host::BC1, pal);
-                uint32_t bits = uint32_t(cb[4]) | (uint32_t(cb[5]) << 8) | (uint32_t(cb[6]) << 16) |
-                                (uint32_t(cb[7]) << 24);
-                uint32_t max_x = std::min(4u, w - bx * 4u);
-                uint32_t* block_dst = dst_slice + size_t(by * 4u) * w + bx * 4u;
+// Lightweight persistent worker pool for parallel CPU DXT decoding on mobile GPUs without BC support (e.g. Mali-G57).
+class DxtWorkerPool {
+public:
+    ~DxtWorkerPool() { Shutdown(); }
 
-                if (host == Host::BC1) {
-                    if (max_x == 4u && max_y == 4u) {
-                        for (uint32_t y = 0; y < 4u; y++) {
-                            uint32_t* row = block_dst + y * w;
-                            row[0] = pal[bits & 3u];
-                            row[1] = pal[(bits >> 2) & 3u];
-                            row[2] = pal[(bits >> 4) & 3u];
-                            row[3] = pal[(bits >> 6) & 3u];
-                            bits >>= 8;
-                        }
-                    } else {
-                        for (uint32_t y = 0; y < max_y; y++) {
-                            uint32_t* row = block_dst + y * w;
-                            for (uint32_t x = 0; x < max_x; x++) row[x] = pal[(bits >> ((y * 4u + x) * 2u)) & 3u];
-                        }
-                    }
-                } else if (host == Host::BC2) {
-                    if (max_x == 4u && max_y == 4u) {
-                        for (uint32_t y = 0; y < 4u; y++) {
-                            uint32_t* row = block_dst + y * w;
-                            uint16_t ab = uint16_t(b[y * 2u]) | (uint16_t(b[y * 2u + 1u]) << 8);
-                            row[0] = (pal[bits & 3u] & 0x00FFFFFFu) | (uint32_t((ab & 15u) * 17u) << 24);
-                            row[1] = (pal[(bits >> 2) & 3u] & 0x00FFFFFFu) | (uint32_t(((ab >> 4) & 15u) * 17u) << 24);
-                            row[2] = (pal[(bits >> 4) & 3u] & 0x00FFFFFFu) | (uint32_t(((ab >> 8) & 15u) * 17u) << 24);
-                            row[3] = (pal[(bits >> 6) & 3u] & 0x00FFFFFFu) | (uint32_t(((ab >> 12) & 15u) * 17u) << 24);
-                            bits >>= 8;
-                        }
-                    } else {
-                        for (uint32_t y = 0; y < max_y; y++) {
-                            uint32_t* row = block_dst + y * w;
-                            for (uint32_t x = 0; x < max_x; x++) {
-                                uint32_t i = y * 4u + x;
-                                uint32_t a = ((b[i >> 1] >> ((i & 1u) * 4u)) & 15u) * 17u;
-                                row[x] = (pal[(bits >> (i * 2u)) & 3u] & 0x00FFFFFFu) | (a << 24);
-                            }
-                        }
+    void RunRange(uint32_t total_rows, const std::function<void(uint32_t, uint32_t)>& fn) {
+        EnsureStarted();
+        if (workers_.empty() || total_rows < 32u) {
+            fn(0, total_rows);
+            return;
+        }
+        const uint32_t parts = uint32_t(workers_.size()) + 1u;
+        const uint32_t chunk = (total_rows + parts - 1u) / parts;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            task_fn_ = &fn;
+            task_total_ = total_rows;
+            task_chunk_ = chunk;
+            next_worker_idx_ = 1u;
+            active_workers_ = uint32_t(workers_.size());
+            ++generation_;
+        }
+        cv_start_.notify_all();
+        // Calling thread executes slice 0 immediately.
+        fn(0, std::min(chunk, total_rows));
+        std::unique_lock<std::mutex> lk(mu_);
+        cv_done_.wait(lk, [&] { return active_workers_ == 0u; });
+        task_fn_ = nullptr;
+    }
+
+private:
+    void EnsureStarted() {
+        if (started_) return;
+        started_ = true;
+        unsigned hw = std::thread::hardware_concurrency();
+        unsigned n = hw >= 6u ? 3u : (hw >= 4u ? 2u : (hw >= 2u ? 1u : 0u));
+        workers_.reserve(n);
+        for (unsigned i = 0; i < n; ++i) {
+            workers_.emplace_back([this] { WorkerLoop(); });
+        }
+    }
+
+    void Shutdown() {
+        if (!started_) return;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            stop_ = true;
+        }
+        cv_start_.notify_all();
+        for (std::thread& t : workers_) {
+            if (t.joinable()) t.join();
+        }
+        workers_.clear();
+    }
+
+    void WorkerLoop() {
+        uint64_t seen_gen = 0;
+        for (;;) {
+            const std::function<void(uint32_t, uint32_t)>* fn = nullptr;
+            uint32_t begin = 0, end = 0;
+            {
+                std::unique_lock<std::mutex> lk(mu_);
+                cv_start_.wait(lk, [&] { return stop_ || generation_ != seen_gen; });
+                if (stop_) return;
+                seen_gen = generation_;
+                fn = task_fn_;
+                uint32_t idx = next_worker_idx_++;
+                begin = idx * task_chunk_;
+                end = std::min(begin + task_chunk_, task_total_);
+            }
+            if (fn && begin < end) (*fn)(begin, end);
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                if (--active_workers_ == 0u) cv_done_.notify_one();
+            }
+        }
+    }
+
+    bool started_ = false;
+    bool stop_ = false;
+    std::mutex mu_;
+    std::condition_variable cv_start_;
+    std::condition_variable cv_done_;
+    std::vector<std::thread> workers_;
+    const std::function<void(uint32_t, uint32_t)>* task_fn_ = nullptr;
+    uint32_t task_total_ = 0;
+    uint32_t task_chunk_ = 0;
+    uint32_t next_worker_idx_ = 0;
+    uint32_t active_workers_ = 0;
+    uint64_t generation_ = 0;
+};
+
+void DecodeDxtRows(Host host, const uint8_t* in, size_t in_size, uint32_t row_pitch, uint32_t w, uint32_t h,
+                   uint32_t s, uint32_t bw, uint32_t bh, uint32_t by_begin, uint32_t by_end, uint32_t* dst_slice) {
+    uint32_t block = host == Host::BC1 ? 8 : 16;
+    uint32_t pal[4];
+    for (uint32_t by = by_begin; by < by_end; by++) {
+        uint32_t max_y = std::min(4u, h - by * 4u);
+        for (uint32_t bx = 0; bx < bw; bx++) {
+            size_t at = (size_t(s) * bh + by) * row_pitch + size_t(bx) * block;
+            if (at + block > in_size) {
+                for (uint32_t y = 0; y < max_y; y++)
+                    std::memset(dst_slice + (by * 4u + y) * w + bx * 4u, 0, std::min(4u, w - bx * 4u) * 4u);
+                continue;
+            }
+            const uint8_t* b = &in[at];
+            const uint8_t* cb = (host == Host::BC1) ? b : (b + 8);
+            DecodeColourPalette(cb, host == Host::BC1, pal);
+            uint32_t bits = uint32_t(cb[4]) | (uint32_t(cb[5]) << 8) | (uint32_t(cb[6]) << 16) |
+                            (uint32_t(cb[7]) << 24);
+            uint32_t max_x = std::min(4u, w - bx * 4u);
+            uint32_t* block_dst = dst_slice + size_t(by * 4u) * w + bx * 4u;
+
+            if (host == Host::BC1) {
+                if (max_x == 4u && max_y == 4u) {
+                    for (uint32_t y = 0; y < 4u; y++) {
+                        uint32_t* row = block_dst + y * w;
+                        row[0] = pal[bits & 3u];
+                        row[1] = pal[(bits >> 2) & 3u];
+                        row[2] = pal[(bits >> 4) & 3u];
+                        row[3] = pal[(bits >> 6) & 3u];
+                        bits >>= 8;
                     }
                 } else {
-                    uint32_t a[8] = {b[0], b[1]};
-                    if (a[0] > a[1]) {
-                        for (uint32_t i = 1; i < 7u; i++) a[i + 1u] = (((7u - i) * a[0] + i * a[1]) * 9363u) >> 16;
-                    } else {
-                        for (uint32_t i = 1; i < 5u; i++) a[i + 1u] = (((5u - i) * a[0] + i * a[1]) * 13108u) >> 16;
-                        a[6] = 0;
-                        a[7] = 255u;
+                    for (uint32_t y = 0; y < max_y; y++) {
+                        uint32_t* row = block_dst + y * w;
+                        for (uint32_t x = 0; x < max_x; x++) row[x] = pal[(bits >> ((y * 4u + x) * 2u)) & 3u];
                     }
-                    uint64_t abits = uint64_t(b[2]) | (uint64_t(b[3]) << 8) | (uint64_t(b[4]) << 16) |
-                                     (uint64_t(b[5]) << 24) | (uint64_t(b[6]) << 32) | (uint64_t(b[7]) << 40);
-                    if (max_x == 4u && max_y == 4u) {
-                        for (uint32_t y = 0; y < 4u; y++) {
-                            uint32_t* row = block_dst + y * w;
-                            row[0] = (pal[bits & 3u] & 0x00FFFFFFu) | (a[abits & 7u] << 24);
-                            row[1] = (pal[(bits >> 2) & 3u] & 0x00FFFFFFu) | (a[(abits >> 3) & 7u] << 24);
-                            row[2] = (pal[(bits >> 4) & 3u] & 0x00FFFFFFu) | (a[(abits >> 6) & 7u] << 24);
-                            row[3] = (pal[(bits >> 6) & 3u] & 0x00FFFFFFu) | (a[(abits >> 9) & 7u] << 24);
-                            bits >>= 8;
-                            abits >>= 12;
+                }
+            } else if (host == Host::BC2) {
+                if (max_x == 4u && max_y == 4u) {
+                    for (uint32_t y = 0; y < 4u; y++) {
+                        uint32_t* row = block_dst + y * w;
+                        uint16_t ab = uint16_t(b[y * 2u]) | (uint16_t(b[y * 2u + 1u]) << 8);
+                        row[0] = (pal[bits & 3u] & 0x00FFFFFFu) | (uint32_t((ab & 15u) * 17u) << 24);
+                        row[1] = (pal[(bits >> 2) & 3u] & 0x00FFFFFFu) | (uint32_t(((ab >> 4) & 15u) * 17u) << 24);
+                        row[2] = (pal[(bits >> 4) & 3u] & 0x00FFFFFFu) | (uint32_t(((ab >> 8) & 15u) * 17u) << 24);
+                        row[3] = (pal[(bits >> 6) & 3u] & 0x00FFFFFFu) | (uint32_t(((ab >> 12) & 15u) * 17u) << 24);
+                        bits >>= 8;
+                    }
+                } else {
+                    for (uint32_t y = 0; y < max_y; y++) {
+                        uint32_t* row = block_dst + y * w;
+                        for (uint32_t x = 0; x < max_x; x++) {
+                            uint32_t i = y * 4u + x;
+                            uint32_t a = ((b[i >> 1] >> ((i & 1u) * 4u)) & 15u) * 17u;
+                            row[x] = (pal[(bits >> (i * 2u)) & 3u] & 0x00FFFFFFu) | (a << 24);
                         }
-                    } else {
-                        for (uint32_t y = 0; y < max_y; y++) {
-                            uint32_t* row = block_dst + y * w;
-                            for (uint32_t x = 0; x < max_x; x++) {
-                                uint32_t i = y * 4u + x;
-                                row[x] = (pal[(bits >> (i * 2u)) & 3u] & 0x00FFFFFFu) |
-                                         (a[(abits >> (i * 3u)) & 7u] << 24);
-                            }
+                    }
+                }
+            } else {
+                uint32_t a[8] = {b[0], b[1]};
+                if (a[0] > a[1]) {
+                    for (uint32_t i = 1; i < 7u; i++) a[i + 1u] = (((7u - i) * a[0] + i * a[1]) * 9363u) >> 16;
+                } else {
+                    for (uint32_t i = 1; i < 5u; i++) a[i + 1u] = (((5u - i) * a[0] + i * a[1]) * 13108u) >> 16;
+                    a[6] = 0;
+                    a[7] = 255u;
+                }
+                uint64_t abits = uint64_t(b[2]) | (uint64_t(b[3]) << 8) | (uint64_t(b[4]) << 16) |
+                                 (uint64_t(b[5]) << 24) | (uint64_t(b[6]) << 32) | (uint64_t(b[7]) << 40);
+                if (max_x == 4u && max_y == 4u) {
+                    for (uint32_t y = 0; y < 4u; y++) {
+                        uint32_t* row = block_dst + y * w;
+                        row[0] = (pal[bits & 3u] & 0x00FFFFFFu) | (a[abits & 7u] << 24);
+                        row[1] = (pal[(bits >> 2) & 3u] & 0x00FFFFFFu) | (a[(abits >> 3) & 7u] << 24);
+                        row[2] = (pal[(bits >> 4) & 3u] & 0x00FFFFFFu) | (a[(abits >> 6) & 7u] << 24);
+                        row[3] = (pal[(bits >> 6) & 3u] & 0x00FFFFFFu) | (a[(abits >> 9) & 7u] << 24);
+                        bits >>= 8;
+                        abits >>= 12;
+                    }
+                } else {
+                    for (uint32_t y = 0; y < max_y; y++) {
+                        uint32_t* row = block_dst + y * w;
+                        for (uint32_t x = 0; x < max_x; x++) {
+                            uint32_t i = y * 4u + x;
+                            row[x] = (pal[(bits >> (i * 2u)) & 3u] & 0x00FFFFFFu) |
+                                     (a[(abits >> (i * 3u)) & 7u] << 24);
                         }
                     }
                 }
             }
         }
     }
+}
+
+// a level of DXT1, 3 or 5 blocks (bw x bh per slice, row_pitch bytes a block row) into w x h BGRA texels
+bool DecodeDxt(Host host, const std::vector<uint8_t>& in, uint32_t row_pitch, uint32_t w, uint32_t h, uint32_t z,
+               std::vector<uint8_t>& out, DxtWorkerPool* pool) {
+    uint32_t bw = std::max(1u, (w + 3) / 4), bh = std::max(1u, (h + 3) / 4);
+    size_t out_bytes = size_t(w) * h * z * 4;
+    out.resize(out_bytes);
+    if ((w & 3u) || (h & 3u)) std::memset(out.data(), 0, out_bytes);
+    auto* dst_all = reinterpret_cast<uint32_t*>(out.data());
+    bool used_parallel = false;
+    for (uint32_t s = 0; s < z; s++) {
+        uint32_t* dst_slice = dst_all + size_t(s) * w * h;
+        if (pool && bh >= 32u && bw >= 16u) {
+            used_parallel = true;
+            pool->RunRange(bh, [&](uint32_t by0, uint32_t by1) {
+                DecodeDxtRows(host, in.data(), in.size(), row_pitch, w, h, s, bw, bh, by0, by1, dst_slice);
+            });
+        } else {
+            DecodeDxtRows(host, in.data(), in.size(), row_pitch, w, h, s, bw, bh, 0, bh, dst_slice);
+        }
+    }
+    return used_parallel;
 }
 
 // ---- device memory: 64 MB blocks per memory type, first fit inside them; big allocations get their own
@@ -634,8 +743,11 @@ struct Tex {
     bool decode = false;  // DXT decoded on the CPU
     uint32_t levels = 1;
     uint64_t sig = 0;
+    uint64_t fast_sig = 0;
+    uint64_t epoch = 0;
     uint64_t frame = 0;
     uint64_t palette = 0;
+    uint32_t stable_frames = 0;
 };
 
 struct PsoKey {
@@ -667,6 +779,8 @@ struct BlitOptions {
 
 struct DrawTextures {
     TexInfo info[4];
+    TextureDesc desc[4] = {};
+    bool valid[4] = {};
     VkImageView view[4] = {};
     VkFormat fmt[4] = {};
     uint32_t levels[4] = {1, 1, 1, 1};
@@ -715,7 +829,7 @@ std::string PointsHlsl(const std::string& src) {
 
 bool UnitTexcoords(const Assembled& a) {
     constexpr float kLo = -1e-4f, kHi = 1.0001f;
-    constexpr uint32_t kSmallDrawVertices = 4096;
+    constexpr uint32_t kSmallDrawVertices = 64;
     if (!a.vertices.empty() || !a.vertex_count || a.vertex_count > kSmallDrawVertices) return false;
     bool any = false;
     for (int r = 0; r < 16; r++) {
@@ -759,6 +873,32 @@ uint64_t MemSig(uint32_t data, uint32_t total) {
     for (uint32_t i = 0; i < kSigSamples; i++) {
         const uint8_t* sample = p + uint64_t(total - kSigSampleBytes) * i / (kSigSamples - 1);
         sig = Hash(sample, kSigSampleBytes, sig);
+    }
+    return sig;
+}
+
+// Ultra-lightweight 4-point (128-byte) signature for unchanged static guest textures.
+uint64_t FastMemSig(uint32_t data, uint32_t total) {
+    const uint8_t* p = static_cast<const uint8_t*>(kernel::HostPtr(data));
+    uint64_t sig = Hash(&total, sizeof(total));
+    if (total <= 256u) return Hash(p, total, sig);
+    constexpr uint32_t kFastSample = 32u;
+    const uint32_t span = total - kFastSample;
+    sig = Hash(p, kFastSample, sig);
+    sig = Hash(p + (span / 3u), kFastSample, sig);
+    sig = Hash(p + ((span * 2u) / 3u), kFastSample, sig);
+    sig = Hash(p + span, kFastSample, sig);
+    return sig;
+}
+
+// Fast 8-point content fingerprint for intra-frame static vertex/index buffer deduplication.
+uint64_t FastBufSig(const uint8_t* p, uint32_t total) {
+    uint64_t sig = Hash(&total, sizeof(total));
+    if (total <= 256u) return Hash(p, total, sig);
+    constexpr uint32_t kSample = 32u;
+    const uint32_t span = total - kSample;
+    for (uint32_t i = 0; i < 8u; ++i) {
+        sig = Hash(p + (uint64_t(span) * i / 7u), kSample, sig);
     }
     return sig;
 }
@@ -940,8 +1080,7 @@ void FillTexelConstants(int i, const TextureDesc& d, const DrawTextures& stages,
 
 void FillTextureConstants(const State& s, const DrawTextures& stages, DrawConstants& c) {
     for (int i = 0; i < 4; i++) {
-        TextureDesc d;
-        if (s.textures[size_t(i)] && Describe(s.textures[size_t(i)], d)) FillTexelConstants(i, d, stages, c);
+        if (stages.valid[i]) FillTexelConstants(i, stages.desc[i], stages, c);
         const auto& t = s.tss[size_t(i)];
         c.bump[i][0] = Bits(t[kTssBumpEnvMat00]);
         c.bump[i][1] = Bits(t[kTssBumpEnvMat01]);
@@ -980,16 +1119,54 @@ constexpr size_t kTsProjection = 3;
 constexpr size_t kTsTexture0 = 16;
 constexpr size_t kTsWorld = 256;
 
-void FillTransformConstants(const State& s, GuestExtent size, DrawConstants& c) {
-    float wv[16], wvp[16];
+void ComputeFixedMatrices(const State& s, GuestExtent size, float wv[16], float full[16]) {
+    float wvp[16];
     MatMul(s.transforms[kTsWorld].data(), s.transforms[kTsView].data(), wv);
     MatMul(wv, s.transforms[kTsProjection].data(), wvp);
     const auto& v = s.viewport;
     float sx = float(v.w) / size.w, sy = float(v.h) / size.h;
     float ox = (2.0f * v.x + v.w) / size.w - 1, oy = 1 - (2.0f * v.y + v.h) / size.h;
     float vpm[16] = {sx, 0, 0, 0, 0, sy, 0, 0, 0, 0, v.max_z - v.min_z, 0, ox, oy, v.min_z, 1};
-    float full[16];
     MatMul(wvp, vpm, full);
+}
+
+// Conservative clip-space frustum cull for fixed-function 3D draws (front-of-camera culling).
+// Exits on the very first visible vertex (1 dot-product on visible draws); only culls when
+// ALL vertices lie strictly outside the same clip plane (behind camera or outside viewport).
+bool IsFixedDrawOutsideFrustum(const Assembled& a, const float full[16]) {
+    if (!a.vertices.empty() || a.vertex_count < 3u || a.vertex_count > 256u) return false;
+    if (!(a.regs & 1u) || a.elements[0].format != DXGI_FORMAT_R32G32B32_FLOAT) return false;
+    const VertexElement& e = a.elements[0];
+    const VertexBuffer& vb = a.buffers[e.buffer];
+    if (!vb.src || !vb.stride || uint64_t(a.vertex_count) * vb.stride > vb.bytes) return false;
+    uint32_t all_out = 0x3Fu;
+    for (uint32_t v = 0; v < a.vertex_count; ++v) {
+        float p[3];
+        std::memcpy(p, vb.src + size_t(v) * vb.stride + e.offset, sizeof(p));
+        const float cx = p[0] * full[0] + p[1] * full[4] + p[2] * full[8] + full[12];
+        const float cy = p[0] * full[1] + p[1] * full[5] + p[2] * full[9] + full[13];
+        const float cz = p[0] * full[2] + p[1] * full[6] + p[2] * full[10] + full[14];
+        const float cw = p[0] * full[3] + p[1] * full[7] + p[2] * full[11] + full[15];
+        uint32_t out = 0u;
+        if (cw <= 1e-6f) {
+            out = (1u << 4);  // strictly behind near/camera plane
+        } else {
+            const float wx = cw * 1.05f;
+            const float wy = cw * 1.05f;
+            if (cx < -wx) out |= (1u << 0);
+            if (cx >  wx) out |= (1u << 1);
+            if (cy < -wy) out |= (1u << 2);
+            if (cy >  wy) out |= (1u << 3);
+            if (cz < -cw * 0.02f) out |= (1u << 4);
+            if (cz >  cw * 1.02f) out |= (1u << 5);
+        }
+        all_out &= out;
+        if (all_out == 0u) return false;
+    }
+    return all_out != 0u;
+}
+
+void FillTransformConstants(const State& s, const float wv[16], const float full[16], DrawConstants& c) {
     Transpose(full, c.wvp);
     Transpose(wv, c.wv);
     float n[16] = {};
@@ -1112,11 +1289,20 @@ private:
         uint8_t* cpu;
     };
     struct Frame {
+        struct CachedBuf {
+            Alloc alloc{};
+            uint64_t epoch = 0;
+            uint64_t sig = 0;
+        };
         VkCommandPool pool = VK_NULL_HANDLE;
         VkCommandBuffer cb = VK_NULL_HANDLE;
         Buffer upload;
         VkDeviceSize used = 0;
         Alloc dummy_vc{};
+        std::array<std::array<float, 4>, 192> last_vsc{};
+        Alloc last_vsc_alloc{};
+        bool has_last_vsc = false;
+        std::unordered_map<uint64_t, CachedBuf> buf_cache;
         uint64_t value = 0;  // the timeline's value once the GPU is past this frame
         std::vector<Image> images;
         std::vector<Buffer> buffers;
@@ -1167,6 +1353,7 @@ private:
         b = {};
     }
     Alloc Upload(VkDeviceSize size, VkDeviceSize align = 16);
+    Alloc UploadCached(const uint8_t* src, uint32_t bytes, VkDeviceSize align, bool allow_cache);
     Alloc Constants(const void* data, size_t bytes);
 
     // command recording
@@ -1179,9 +1366,11 @@ private:
     void ResetFrame(Frame& f);
     void Transition(Image& im, VkImageLayout to);
     void BeginRender(Image* color, Image* depth);
+    void BeginRenderClear(Image* color, Image* depth, bool clear_c, const float cc[4], bool clear_z, float z,
+                          bool clear_s, uint32_t stencil);
     void EndRender();
     // without dynamic rendering: render passes that only load and store, and framebuffers per pair of views
-    VkRenderPass Pass(VkFormat color, VkFormat depth, bool clear = false);
+    VkRenderPass Pass(VkFormat color, VkFormat depth, bool clear_c = false, bool clear_ds = false);
     VkFramebuffer Framebuffer(VkFormat color_fmt, VkFormat depth_fmt, VkImageView color, VkImageView depth,
                               uint32_t w, uint32_t h);
     void DropFramebuffers(VkImageView v);
@@ -1306,6 +1495,17 @@ private:
     Image* rend_depth_ = nullptr;
     uint64_t render_seq_ = 1;
     VkPipeline cmd_pipe_ = VK_NULL_HANDLE;
+    VkDescriptorSet cmd_set_ = VK_NULL_HANDLE;
+    VkDeviceSize cmd_vc_off_ = 0, cmd_dc_off_ = 0;
+    uint32_t cmd_vb_count_ = 0;
+    VkBuffer cmd_vbufs_[16] = {};
+    VkDeviceSize cmd_voffs_[16] = {};
+    VkBuffer cmd_ib_ = VK_NULL_HANDLE;
+    VkDeviceSize cmd_ib_off_ = 0;
+    VkIndexType cmd_ib_type_ = VK_INDEX_TYPE_UINT16;
+    VkImageView last_set_views_[4] = {};
+    VkSampler last_set_samplers_[4] = {};
+    VkDescriptorSet last_set_ = VK_NULL_HANDLE;
     bool has_vp_ = false, has_sc_ = false, has_blend_ = false, has_stencil_ = false;
     VkViewport cmd_vp_{};
     VkRect2D cmd_sc_{};
@@ -1313,6 +1513,13 @@ private:
     uint32_t cmd_stencil_ = 0;
     std::vector<uint8_t> upload_px_;
     std::vector<uint8_t> upload_decoded_;
+    DxtWorkerPool dxt_pool_;
+    uint64_t perf_vb_hits_ = 0;
+    uint64_t perf_vsc_hits_ = 0;
+    uint64_t perf_fast_tex_hits_ = 0;
+    uint64_t perf_clear_coalesced_ = 0;
+    uint64_t perf_frustum_culled_ = 0;
+    uint64_t perf_dxt_parallel_ = 0;
 
     std::unordered_map<uint64_t, VkShaderModule> modules_;
     std::unordered_map<uint64_t, uint64_t> shader_src_;
@@ -1850,6 +2057,14 @@ bool VulkanBackend::CreateBuffer(Buffer& b, VkDeviceSize size, VkBufferUsageFlag
 
 void VulkanBackend::Destroy(Image& im) {
     if (im.view) {
+        if (last_set_) {
+            for (int i = 0; i < 4; ++i) {
+                if (last_set_views_[i] == im.view) {
+                    last_set_ = VK_NULL_HANDLE;
+                    break;
+                }
+            }
+        }
         for (Frame& fr : frames_) {
             auto vit = fr.view_keys.find(im.view);
             if (vit != fr.view_keys.end()) {
@@ -1896,6 +2111,37 @@ VulkanBackend::Alloc VulkanBackend::Upload(VkDeviceSize size, VkDeviceSize align
     return {f->upload.buf, o, f->upload.mem.map + o};
 }
 
+VulkanBackend::Alloc VulkanBackend::UploadCached(const uint8_t* src, uint32_t bytes, VkDeviceSize align,
+                                                 bool allow_cache) {
+    const uint32_t alloc_bytes = std::max<uint32_t>(bytes, 4u);
+    if (allow_cache && src && bytes >= 256u && bytes <= (kUploadSize / 8) && kernel::g_base) {
+        const uintptr_t p = reinterpret_cast<uintptr_t>(src);
+        const uintptr_t base = reinterpret_cast<uintptr_t>(kernel::g_base);
+        if (p >= base && (p - base) < 0x100000000ull) {
+            const uint32_t guest_va = uint32_t(p - base);
+            const uint64_t key = (uint64_t(guest_va) << 32) | uint64_t(bytes);
+            const uint64_t ep = DirtyEpoch(guest_va);
+            const uint64_t sig = FastBufSig(src, bytes);
+            Frame& f = CurrentFrame();
+            auto it = f.buf_cache.find(key);
+            if (it != f.buf_cache.end() && it->second.epoch == ep && it->second.sig == sig) {
+                ++perf_vb_hits_;
+                return it->second.alloc;
+            }
+            Alloc a = Upload(alloc_bytes, align);
+            if (a.cpu) {
+                std::memcpy(a.cpu, src, bytes);
+                // Re-fetch CurrentFrame() in case Upload() flushed & reset the ring.
+                CurrentFrame().buf_cache[key] = {a, ep, sig};
+            }
+            return a;
+        }
+    }
+    Alloc a = Upload(alloc_bytes, align);
+    if (a.cpu && src && bytes) std::memcpy(a.cpu, src, bytes);
+    return a;
+}
+
 VulkanBackend::Alloc VulkanBackend::Constants(const void* data, size_t bytes) {
     Alloc a = Upload(kUboRange, kUboAlign);
     std::memcpy(a.cpu, data, std::min<size_t>(bytes, kUboRange));
@@ -1911,8 +2157,15 @@ void VulkanBackend::Begin() {
     rendering_ = false;
     rend_color_ = rend_depth_ = nullptr;
     ++render_seq_;
-    CurrentFrame().dummy_vc = {};
+    Frame& f = CurrentFrame();
+    f.dummy_vc = {};
+    f.has_last_vsc = false;
+    f.buf_cache.clear();
     cmd_pipe_ = VK_NULL_HANDLE;
+    cmd_set_ = VK_NULL_HANDLE;
+    cmd_vb_count_ = 0;
+    cmd_ib_ = VK_NULL_HANDLE;
+    last_set_ = VK_NULL_HANDLE;
     has_vp_ = has_sc_ = has_blend_ = has_stencil_ = false;
 }
 
@@ -1990,6 +2243,8 @@ void VulkanBackend::ResetFrame(Frame& f) {
     }
     f.used = 0;
     f.dummy_vc = {};
+    f.has_last_vsc = false;
+    f.buf_cache.clear();
 }
 
 // present: the frame's last commands, waiting on the acquired image and signalling its present semaphore
@@ -2116,6 +2371,90 @@ void VulkanBackend::BeginRender(Image* color, Image* depth) {
     begin_rendering_(Cb(), &ri);
 }
 
+void VulkanBackend::BeginRenderClear(Image* color, Image* depth, bool clear_c, const float cc[4], bool clear_z, float z,
+                                     bool clear_s, uint32_t stencil) {
+    EndRender();
+    if (color) Transition(*color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    if (depth) Transition(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    if ((color && color->cb_render_seq == render_seq_) || (depth && depth->cb_render_seq == render_seq_)) {
+        VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        mb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                           VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        VkPipelineStageFlags st = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                  VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                  VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        vkCmdPipelineBarrier(Cb(), st, st, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    }
+    if (color) color->cb_render_seq = render_seq_;
+    if (depth) depth->cb_render_seq = render_seq_;
+    rendering_ = true;
+    rend_color_ = color;
+    rend_depth_ = depth;
+    Image* any = color ? color : depth;
+    if (!dynamic_) {
+        VkFormat cf = color ? color->fmt : VK_FORMAT_UNDEFINED;
+        VkFormat df = depth ? depth->fmt : VK_FORMAT_UNDEFINED;
+        const bool clear_ds = depth && clear_z && (!depth->stencil || clear_s);
+        VkClearValue cvs[2] = {};
+        uint32_t cv_count = 0;
+        if (color) {
+            if (clear_c) std::memcpy(cvs[cv_count].color.float32, cc, sizeof(float) * 4);
+            ++cv_count;
+        }
+        if (depth) {
+            cvs[cv_count].depthStencil = {std::clamp(z, 0.0f, 1.0f), stencil & 0xFF};
+            ++cv_count;
+        }
+        VkRenderPassBeginInfo bi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+        bi.renderPass = Pass(cf, df, clear_c, clear_ds);
+        bi.framebuffer = Framebuffer(cf, df, color ? color->attach : VK_NULL_HANDLE,
+                                     depth ? depth->attach : VK_NULL_HANDLE, any->w, any->h);
+        bi.renderArea = {{0, 0}, {any->w, any->h}};
+        bi.clearValueCount = cv_count;
+        bi.pClearValues = cvs;
+        vkCmdBeginRenderPass(Cb(), &bi, VK_SUBPASS_CONTENTS_INLINE);
+        if (depth && !clear_ds && (clear_z || (clear_s && depth->stencil))) {
+            VkClearAttachment ca{};
+            ca.aspectMask = (clear_z ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) |
+                            (clear_s && depth->stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+            ca.clearValue.depthStencil = {std::clamp(z, 0.0f, 1.0f), stencil & 0xFF};
+            VkClearRect cr{{{0, 0}, {any->w, any->h}}, 0, 1};
+            vkCmdClearAttachments(Cb(), 1, &ca, 1, &cr);
+        }
+        return;
+    }
+    VkRenderingAttachmentInfoKHR ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR};
+    VkRenderingAttachmentInfoKHR da{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR};
+    VkRenderingAttachmentInfoKHR sa{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR};
+    VkRenderingInfoKHR ri{VK_STRUCTURE_TYPE_RENDERING_INFO_KHR};
+    ri.renderArea = {{0, 0}, {any->w, any->h}};
+    ri.layerCount = 1;
+    if (color) {
+        ca.imageView = color->attach;
+        ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        ca.loadOp = clear_c ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+        ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        if (clear_c) std::memcpy(ca.clearValue.color.float32, cc, sizeof(float) * 4);
+        ri.colorAttachmentCount = 1;
+        ri.pColorAttachments = &ca;
+    }
+    if (depth) {
+        da.imageView = depth->attach;
+        da.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        da.loadOp = clear_z ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+        da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        da.clearValue.depthStencil = {std::clamp(z, 0.0f, 1.0f), stencil & 0xFF};
+        ri.pDepthAttachment = &da;
+        if (depth->stencil) {
+            sa = da;
+            sa.loadOp = clear_s ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+            ri.pStencilAttachment = &sa;
+        }
+    }
+    begin_rendering_(Cb(), &ri);
+}
+
 void VulkanBackend::EndRender() {
     if (!rendering_) return;
     if (dynamic_)
@@ -2125,13 +2464,16 @@ void VulkanBackend::EndRender() {
     rendering_ = false;
     rend_color_ = rend_depth_ = nullptr;
     cmd_pipe_ = VK_NULL_HANDLE;
+    cmd_set_ = VK_NULL_HANDLE;
+    cmd_vb_count_ = 0;
+    cmd_ib_ = VK_NULL_HANDLE;
     has_vp_ = has_sc_ = has_blend_ = has_stencil_ = false;
 }
 
 // the layouts stay the attachment ones throughout, as with dynamic rendering: barriers outside do the transitions.
 // pipelines only need a compatible pass, which load ops are not part of
-VkRenderPass VulkanBackend::Pass(VkFormat color, VkFormat depth, bool clear) {
-    const uint64_t k[3] = {uint64_t(color), uint64_t(depth), uint64_t(clear)};
+VkRenderPass VulkanBackend::Pass(VkFormat color, VkFormat depth, bool clear_c, bool clear_ds) {
+    const uint64_t k[4] = {uint64_t(color), uint64_t(depth), uint64_t(clear_c), uint64_t(clear_ds)};
     uint64_t key = Hash(k, sizeof(k));
     if (auto it = passes_.find(key); it != passes_.end()) return it->second;
     VkAttachmentDescription at[2] = {};
@@ -2141,7 +2483,7 @@ VkRenderPass VulkanBackend::Pass(VkFormat color, VkFormat depth, bool clear) {
     sp.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     uint32_t n = 0;
     if (color != VK_FORMAT_UNDEFINED) {
-        at[n] = {0, color, VK_SAMPLE_COUNT_1_BIT, clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
+        at[n] = {0, color, VK_SAMPLE_COUNT_1_BIT, clear_c ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
                  VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE,
                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
         cr.attachment = n++;
@@ -2149,8 +2491,9 @@ VkRenderPass VulkanBackend::Pass(VkFormat color, VkFormat depth, bool clear) {
         sp.pColorAttachments = &cr;
     }
     if (depth != VK_FORMAT_UNDEFINED) {
-        at[n] = {0, depth, VK_SAMPLE_COUNT_1_BIT, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE,
-                 VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE,
+        at[n] = {0, depth, VK_SAMPLE_COUNT_1_BIT, clear_ds ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
+                 VK_ATTACHMENT_STORE_OP_STORE,
+                 clear_ds ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE,
                  VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
         dr.attachment = n++;
         sp.pDepthStencilAttachment = &dr;
@@ -2241,9 +2584,19 @@ void VulkanBackend::SetStencil(uint32_t ref) {
 // the draw's descriptor set: the ring at b0 and b1 (offsets bound with it), the views and samplers; cached per frame
 // and invalidated when a bound VkImageView is destroyed
 VkDescriptorSet VulkanBackend::Set(const VkImageView views[4], const VkSampler samplers[4]) {
+    if (last_set_ &&
+        std::memcmp(last_set_views_, views, sizeof(VkImageView) * 4) == 0 &&
+        std::memcmp(last_set_samplers_, samplers, sizeof(VkSampler) * 4) == 0) {
+        return last_set_;
+    }
     Frame& f = CurrentFrame();
     uint64_t key = Hash(views, sizeof(VkImageView) * 4, Hash(samplers, sizeof(VkSampler) * 4));
-    if (auto it = f.sets.find(key); it != f.sets.end()) return it->second;
+    if (auto it = f.sets.find(key); it != f.sets.end()) {
+        std::memcpy(last_set_views_, views, sizeof(VkImageView) * 4);
+        std::memcpy(last_set_samplers_, samplers, sizeof(VkSampler) * 4);
+        last_set_ = it->second;
+        return it->second;
+    }
     VkDescriptorSet set = VK_NULL_HANDLE;
     for (;;) {
         if (f.pool_at == f.pools.size()) {
@@ -2294,10 +2647,17 @@ VkDescriptorSet VulkanBackend::Set(const VkImageView views[4], const VkSampler s
     for (int i = 0; i < 4; i++) {
         if (views[i]) f.view_keys[views[i]].push_back(key);
     }
+    std::memcpy(last_set_views_, views, sizeof(VkImageView) * 4);
+    std::memcpy(last_set_samplers_, samplers, sizeof(VkSampler) * 4);
+    last_set_ = set;
     return set;
 }
 
 void VulkanBackend::BindSet(VkDescriptorSet set, VkDeviceSize vc, VkDeviceSize dc) {
+    if (set == cmd_set_ && vc == cmd_vc_off_ && dc == cmd_dc_off_) return;
+    cmd_set_ = set;
+    cmd_vc_off_ = vc;
+    cmd_dc_off_ = dc;
     uint32_t offs[2] = {uint32_t(vc), uint32_t(dc)};
     vkCmdBindDescriptorSets(Cb(), VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set, 2, offs);
 }
@@ -2918,7 +3278,7 @@ void VulkanBackend::UploadTexture(Tex& tx, const TextureDesc& d, const FormatInf
             uint32_t mw = std::max(tx.img.w >> l, 1u), mh = std::max(tx.img.h >> l, 1u), md = std::max(tx.img.d >> l, 1u);
             const std::vector<uint8_t>* src = &px;
             if (tx.decode) {
-                DecodeDxt(fi.host, px, pitch, mw, mh, md, decoded);
+                if (DecodeDxt(fi.host, px, pitch, mw, mh, md, decoded, &dxt_pool_)) ++perf_dxt_parallel_;
                 pitch = mw * 4;
                 src = &decoded;
             }
@@ -2926,14 +3286,20 @@ void VulkanBackend::UploadTexture(Tex& tx, const TextureDesc& d, const FormatInf
             uint32_t row = bc ? std::max(1u, (mw + 3) / 4) * block : mw * 4;
             uint32_t rows = bc ? std::max(1u, (mh + 3) / 4) : mh;
             size_t src_rows = pitch ? src->size() / pitch / md : 0;
-            Alloc a = Upload(VkDeviceSize(row) * rows * md, 16);
+            const VkDeviceSize total_bytes = VkDeviceSize(row) * rows * md;
+            Alloc a = Upload(total_bytes, 16);
             if (!a.cpu) continue;
-            for (uint32_t z = 0; z < md; z++)
-                for (uint32_t y = 0; y < rows; y++) {
-                    uint8_t* dst = a.cpu + (size_t(z) * rows + y) * row;
-                    if (y < src_rows) std::memcpy(dst, &(*src)[(size_t(z) * src_rows + y) * pitch], std::min(pitch, row));
-                    else std::memset(dst, 0, row);
-                }
+            if (pitch == row && src_rows >= rows && size_t(total_bytes) <= src->size()) {
+                // Single sequential streaming copy saturates ARM64 write-combining buffers.
+                std::memcpy(a.cpu, src->data(), size_t(total_bytes));
+            } else {
+                for (uint32_t z = 0; z < md; z++)
+                    for (uint32_t y = 0; y < rows; y++) {
+                        uint8_t* dst = a.cpu + (size_t(z) * rows + y) * row;
+                        if (y < src_rows) std::memcpy(dst, &(*src)[(size_t(z) * src_rows + y) * pitch], std::min(pitch, row));
+                        else std::memset(dst, 0, row);
+                    }
+            }
             VkBufferImageCopy c{a.off, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, l, f, 1}, {0, 0, 0}, {mw, mh, md}};
             vkCmdCopyBufferToImage(Cb(), a.buf, tx.img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
         }
@@ -2951,12 +3317,34 @@ VkImageView VulkanBackend::BindGuestTexture(const State& s, int stage, const Tex
     if (!same && !CreateTexture(tx, d, fi, key)) return VK_NULL_HANDLE;
     Tex& t = textures_[key];
     if (t.frame != presents_ + 1 || !same || t.palette != palette.hash) {
+        const bool pal_changed = (t.palette != palette.hash);
         t.frame = presents_ + 1;
         t.palette = palette.hash;
-        uint64_t sig = MemSig(d.data, TotalSize(d)) ^ DirtyEpoch(d.data) ^ palette.hash;
-        if (sig != t.sig || !same) {
-            t.sig = sig;
-            UploadTexture(t, d, fi, static_cast<const uint8_t*>(kernel::HostPtr(d.data)), palette.va ? palette.colours : nullptr);
+        const uint64_t ep = DirtyEpoch(d.data);
+        const uint32_t total = TotalSize(d);
+        bool need_full = !same || pal_changed || ep != t.epoch || t.stable_frames < 2u ||
+                         (((presents_ + (d.data >> 6)) & 15u) == 0u);
+        if (!need_full) {
+            const uint64_t fsig = FastMemSig(d.data, total);
+            if (fsig == t.fast_sig) {
+                ++t.stable_frames;
+                ++perf_fast_tex_hits_;
+            } else {
+                need_full = true;
+            }
+        }
+        if (need_full) {
+            const uint64_t sig = MemSig(d.data, total) ^ ep ^ palette.hash;
+            t.epoch = ep;
+            t.fast_sig = FastMemSig(d.data, total);
+            if (sig != t.sig || !same) {
+                t.sig = sig;
+                t.stable_frames = 0;
+                UploadTexture(t, d, fi, static_cast<const uint8_t*>(kernel::HostPtr(d.data)),
+                              palette.va ? palette.colours : nullptr);
+            } else {
+                ++t.stable_frames;
+            }
         }
     }
     Transition(t.img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -2969,6 +3357,7 @@ VkImageView VulkanBackend::BindGuestTexture(const State& s, int stage, const Tex
 VkImageView VulkanBackend::BindTexture(const State& s, int stage, DrawTextures& stages) {
     TexInfo& info = stages.info[stage];
     info = {};
+    stages.valid[stage] = false;
     stages.rt[stage] = false;
     stages.gw[stage] = 0;
     stages.k[stage] = 1;
@@ -2977,6 +3366,8 @@ VkImageView VulkanBackend::BindTexture(const State& s, int stage, DrawTextures& 
     stages.levels[stage] = 1;
     TextureDesc d;
     if (!s.textures[size_t(stage)] || !Describe(s.textures[size_t(stage)], d)) return VK_NULL_HANDLE;
+    stages.desc[stage] = d;
+    stages.valid[stage] = true;
     const FormatInfo& fi = Format(d.format);
     info.kind = TextureKind(d);
     info.rect = d.linear;
@@ -3084,12 +3475,23 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
     draw_ds_ = ds;
 
     DrawShaders sh = ClassifyShaders(s, a);
+    GuestExtent size;
+    SurfaceSize(draw_rt_ ? s.rt : s.zs, size.w, size.h);
+    float fixed_wv[16], fixed_full[16];
+    if (sh.fixed_transform) {
+        ComputeFixedMatrices(s, size, fixed_wv, fixed_full);
+        if (!a.pretransformed && s.rs[kRsVertexBlend] == 0 && a.topology != Topology::Points && !s.scissor_count &&
+            IsFixedDrawOutsideFrustum(a, fixed_full)) {
+            ++perf_frustum_culled_;
+            return;
+        }
+    }
     if (sh.prog) EnsureProgramHash(s);
     sh.vkey = VertexKey(s, a, sh);
     EnsureVertexShader(s, a, sh);
 
     DrawTextures stages;
-    if (!BindStageTextures(s, stages) || !draw_rt_ && !draw_ds_) return;
+    if (!BindStageTextures(s, stages) || (!draw_rt_ && !draw_ds_)) return;
     if (!game::Opt().bloom && GlowComposite(s, stages)) return;
     PixelKey pk = MakePixelKey(s, stages.info);
     sh.pkey = Hash(&pk, sizeof(pk));
@@ -3106,20 +3508,28 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
     for (uint32_t i = 0; i < a.buffer_count; i++) need += a.buffers[i].bytes + 16;
     need += VkDeviceSize(a.index_count) * 4 + 16;
     if (need < kUploadSize / 4 && CurrentFrame().used + need > kUploadSize) Submit(true, false);
-    GuestExtent size;
-    SurfaceSize(draw_rt_ ? s.rt : s.zs, size.w, size.h);
     DrawConstants c{};
     FillSurfaceConstants(s, size, c);
     FillFogConstants(s, c);
     FillCombinerConstants(s, c);
     FillTextureConstants(s, stages, c);
     if (sh.fixed_transform) {
-        FillTransformConstants(s, size, c);
+        FillTransformConstants(s, fixed_wv, fixed_full, c);
         FillLightConstants(s, sh.fk, c);
     }
     Alloc vc{};
     if (sh.prog) {
-        vc = Constants(s.vsc.data(), sizeof(s.vsc));
+        Frame& cur = CurrentFrame();
+        if (cur.has_last_vsc && std::memcmp(cur.last_vsc.data(), s.vsc.data(), sizeof(s.vsc)) == 0) {
+            vc = cur.last_vsc_alloc;
+            ++perf_vsc_hits_;
+        } else {
+            vc = Constants(s.vsc.data(), sizeof(s.vsc));
+            Frame& after = CurrentFrame();
+            after.last_vsc = s.vsc;
+            after.last_vsc_alloc = vc;
+            after.has_last_vsc = true;
+        }
     } else {
         Frame& cur = CurrentFrame();
         if (!cur.dummy_vc.cpu) {
@@ -3131,18 +3541,19 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
     Alloc dc = Constants(&c, sizeof(c));
     VkBuffer vbufs[16];
     VkDeviceSize voffs[16];
+    const bool raw_guest_verts = a.vertices.empty();
     for (uint32_t i = 0; i < a.buffer_count; i++) {
         const VertexBuffer& b = a.buffers[i];
-        Alloc v = Upload(std::max<uint32_t>(b.bytes, 4), 16);
-        if (b.src && b.bytes) std::memcpy(v.cpu, b.src, b.bytes);
+        const bool can_cache = raw_guest_verts && a.gathered[i].empty();
+        Alloc v = UploadCached(b.src, b.bytes, 16, can_cache);
         vbufs[i] = v.buf;
         voffs[i] = v.off;
     }
     Alloc ib{};
     if (a.index_count) {
         uint32_t ibytes = a.index_count * (a.index16 ? 2 : 4);
-        ib = Upload(ibytes, 4);
-        std::memcpy(ib.cpu, a.index_src, ibytes);
+        const bool can_cache_ib = a.index16 && a.indices.empty();
+        ib = UploadCached(static_cast<const uint8_t*>(a.index_src), ibytes, 4, can_cache_ib);
     }
     bool clamp = AnyStageWraps(s) && UnitTexcoords(a);
     VkSampler samplers[4];
@@ -3173,9 +3584,25 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
     Color(SimpleState(s, kMBlendColor), bf);
     SetBlend(bf);
     SetStencil(SimpleState(s, kMStencilRef) & 0xFF);
-    if (a.buffer_count) vkCmdBindVertexBuffers(Cb(), 0, a.buffer_count, vbufs, voffs);
+    if (a.buffer_count) {
+        bool same_vb = (cmd_vb_count_ == a.buffer_count) &&
+                       std::memcmp(cmd_vbufs_, vbufs, sizeof(VkBuffer) * a.buffer_count) == 0 &&
+                       std::memcmp(cmd_voffs_, voffs, sizeof(VkDeviceSize) * a.buffer_count) == 0;
+        if (!same_vb) {
+            cmd_vb_count_ = a.buffer_count;
+            std::memcpy(cmd_vbufs_, vbufs, sizeof(VkBuffer) * a.buffer_count);
+            std::memcpy(cmd_voffs_, voffs, sizeof(VkDeviceSize) * a.buffer_count);
+            vkCmdBindVertexBuffers(Cb(), 0, a.buffer_count, vbufs, voffs);
+        }
+    }
     if (a.index_count) {
-        vkCmdBindIndexBuffer(Cb(), ib.buf, ib.off, a.index16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+        const VkIndexType itype = a.index16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+        if (cmd_ib_ != ib.buf || cmd_ib_off_ != ib.off || cmd_ib_type_ != itype) {
+            cmd_ib_ = ib.buf;
+            cmd_ib_off_ = ib.off;
+            cmd_ib_type_ = itype;
+            vkCmdBindIndexBuffer(Cb(), ib.buf, ib.off, itype);
+        }
         vkCmdDrawIndexed(Cb(), a.index_count, 1, 0, a.base_vertex, 0);
     } else {
         vkCmdDraw(Cb(), a.draw_count, 1, 0, 0);
@@ -3251,6 +3678,44 @@ void VulkanBackend::Clear(const State& s, uint32_t count, const uint8_t* rects, 
                           float z, uint32_t stencil) {
     Target* rt = (flags & kClearTarget) ? EnsureTarget(s.rt, false) : nullptr;
     Target* ds = (flags & (kClearZ | kClearStencil)) ? EnsureTarget(s.zs, true) : nullptr;
+
+    // Fast tile-friendly full-screen clear path for Mali-G57: coalesces color + depth/stencil
+    // into a single LOAD_OP_CLEAR render pass so the GPU skips full-screen DRAM tile reloads
+    // and keeps the render pass open directly for the upcoming Draw() calls.
+    const uint8_t wmask = uint8_t((flags >> 4) & 0xF);
+    const bool clear_c = (rt != nullptr) && (wmask == 0xF);
+    const bool clear_z = (ds != nullptr) && ((flags & kClearZ) != 0);
+    const bool clear_s = (ds != nullptr) && ((flags & kClearStencil) != 0) && ds->img.stencil;
+    const bool can_coalesce_color = (rt == nullptr) || (wmask == 0xF);
+    const bool sizes_match = (!rt || !ds || (rt->w == ds->w && rt->h == ds->h));
+    if (!count && !rects && can_coalesce_color && sizes_match && (clear_c || clear_z || clear_s)) {
+        Target* ref_t = rt ? rt : ds;
+        const auto& v = s.viewport;
+        const VkRect2D full = ScaledRect(*ref_t, int(v.x), int(v.y), int(v.x + v.w), int(v.y + v.h));
+        if (full.offset.x == 0 && full.offset.y == 0 &&
+            full.extent.width == ref_t->w && full.extent.height == ref_t->h) {
+            Target* bind_rt = rt;
+            if (!bind_rt && ds && s.rt.header) {
+                if (Target* cur_rt = FindTarget(s.rt, false);
+                    cur_rt && cur_rt->w == ds->w && cur_rt->h == ds->h && DirtyEpoch(cur_rt->data) <= cur_rt->epoch) {
+                    bind_rt = cur_rt;
+                }
+            }
+            if (clear_c) {
+                rt->epoch = DirtyEpoch(rt->data);
+                rt->read.clear();
+                rt->drawn = true;
+            }
+            if (clear_z || clear_s) ds->drawn = true;
+            float cc[4] = {};
+            if (clear_c) Color(color, cc);
+            BeginRenderClear(bind_rt ? &bind_rt->img : nullptr, (clear_z || clear_s) ? &ds->img : nullptr,
+                             clear_c, cc, clear_z, z, clear_s, stencil);
+            ++perf_clear_coalesced_;
+            return;
+        }
+    }
+
     for (Target* t : {rt, ds})
         if (t) ClearTarget(*t, s, count, rects, flags, color, z, stencil);
 }
@@ -3602,8 +4067,8 @@ void VulkanBackend::UploadSkin() {
 
 void VulkanBackend::ReleaseOldTextures() {
     constexpr uint64_t kSweepEvery = 60;
-    constexpr size_t kTexturesKept = 1024;  // a phone has less memory than a PC: fewer kept
-    constexpr uint64_t kIdleFrames = 600;
+    constexpr size_t kTexturesKept = 2048;  // keep active open-world city textures warm to avoid re-decoding stalls
+    constexpr uint64_t kIdleFrames = 1800;
     if (presents_ % kSweepEvery != 0 || textures_.size() <= kTexturesKept) return;
     for (auto it = textures_.begin(); it != textures_.end();) {
         if (it->second.frame + kIdleFrames < presents_) {
@@ -3685,7 +4150,14 @@ void VulkanBackend::Present(const Surface& front) {
         fps_n_ = 0;
         fps_t_ = now;
     }
-    if (presents_ % 600 == 0) SavePipelineCache();
+    if (presents_ % 600 == 0) {
+        SavePipelineCache();
+        LOGR("[INFO] vkPerf: frame=%llu fps=%.1f tex=%zu vbHits=%llu vscHits=%llu fastTex=%llu clearCoalesce=%llu culled=%llu dxtPar=%llu",
+             (unsigned long long)presents_, fps_, textures_.size(),
+             (unsigned long long)perf_vb_hits_, (unsigned long long)perf_vsc_hits_,
+             (unsigned long long)perf_fast_tex_hits_, (unsigned long long)perf_clear_coalesced_,
+             (unsigned long long)perf_frustum_culled_, (unsigned long long)perf_dxt_parallel_);
+    }
     dynres::Frame();
     ApplySettings();
 }

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <fstream>
 
 #include "app/app.h"
@@ -132,6 +133,72 @@ bool ReadHostFile(const fs::path& path, std::vector<uint8_t>& out) {
     return true;
 }
 
+struct XbeCompatInfo {
+    bool compatible = false;
+    uint32_t title_id = 0;
+    uint32_t region = 0;
+    uint32_t version = 0;
+};
+
+uint32_t ReadLe32(const std::vector<uint8_t>& buf, size_t off) {
+    uint32_t v = 0;
+    std::memcpy(&v, buf.data() + off, sizeof(v));
+    return v;
+}
+
+const char* RegionLabel(uint32_t region) {
+    if (region == 0x00000004u) return "Europe/PAL";
+    if (region == 0x00000001u) return "USA/NTSC-U";
+    if (region == 0x00000007u) return "USA/Region-Free";
+    if (region & 0x00000001u) return "North America";
+    if (region & 0x00000004u) return "Europe/ROW";
+    return "Unknown";
+}
+
+// Both USA/NTSC-U (v5, retail or widescreen-patched) and Europe/PAL (v6) releases of
+// Midnight Club 3: DUB Edition Remix share identical section virtual addresses, sizes,
+// and .data layout, so both run natively on the recompiled binary without warnings.
+XbeCompatInfo InspectMc3dXbe(const std::vector<uint8_t>& xbe) {
+    XbeCompatInfo info{};
+    if (xbe.size() < 0x1000u) return info;
+    if (std::memcmp(xbe.data(), "XBEH", 4) != 0) return info;
+
+    const uint32_t base = ReadLe32(xbe, 0x104u);
+    const uint32_t image_size = ReadLe32(xbe, 0x10Cu);
+    const uint32_t cert_va = ReadLe32(xbe, 0x118u);
+    const uint32_t num_sections = ReadLe32(xbe, 0x11Cu);
+    const uint32_t sec_hdr_va = ReadLe32(xbe, 0x120u);
+    if (base != 0x00010000u || image_size != 0x0057A280u || num_sections == 0u || num_sections > 64u) return info;
+    if (cert_va < base || sec_hdr_va < base) return info;
+
+    const size_t cert_off = size_t(cert_va - base);
+    const size_t sec_off = size_t(sec_hdr_va - base);
+    if (cert_off + 0xB0u > xbe.size() || sec_off + size_t(num_sections) * 56u > xbe.size()) return info;
+
+    info.title_id = ReadLe32(xbe, cert_off + 0x08u);
+    info.region = ReadLe32(xbe, cert_off + 0xA0u);
+    info.version = ReadLe32(xbe, cert_off + 0xACu);
+    if (info.title_id != 0x54540079u) return info;
+
+    bool text_ok = false, rdata_ok = false, data_ok = false;
+    for (uint32_t i = 0; i < num_sections; ++i) {
+        const size_t off = sec_off + size_t(i) * 56u;
+        const uint32_t va = ReadLe32(xbe, off + 4u);
+        const uint32_t vsz = ReadLe32(xbe, off + 8u);
+        const uint32_t name_va = ReadLe32(xbe, off + 20u);
+        if (name_va < base) continue;
+        const size_t name_off = size_t(name_va - base);
+        if (name_off >= xbe.size()) continue;
+        const char* name = reinterpret_cast<const char*>(xbe.data() + name_off);
+        const size_t max_len = std::min<size_t>(16u, xbe.size() - name_off);
+        if (std::strncmp(name, ".text", max_len) == 0 && va == 0x00012000u && vsz == 0x0036811Cu) text_ok = true;
+        if (std::strncmp(name, ".rdata", max_len) == 0 && va == 0x004476E0u && vsz == 0x00060A58u) rdata_ok = true;
+        if (std::strncmp(name, ".data", max_len) == 0 && va == 0x004A8140u && vsz == 0x000C5D1Cu) data_ok = true;
+    }
+    info.compatible = text_ok && rdata_ok && data_ok;
+    return info;
+}
+
 std::string Utf8(const wchar_t* w) {
     std::string s;
     for (; w && *w; w++) s += *w < 0x80 ? char(*w) : '?';
@@ -247,14 +314,19 @@ int Search(GameFiles& game) {
     auto consider = [&](const fs::path& assets, const fs::path& name, std::vector<uint8_t> xbe,
                         std::unique_ptr<kernel::Disc> disc) {
         std::string sha = Sha1(xbe);
-        bool match = sha == kImageSha1;
-        LOGR("Game: %s in %s, sha1 %s%s", IMAGE_XBE, name.string().c_str(), sha.c_str(),
-             match ? "" : ", another release");
+        bool exact = sha == kImageSha1;
+        XbeCompatInfo info = InspectMc3dXbe(xbe);
+        bool match = exact || info.compatible;
         if (match) {
+            LOGR("[OK] Game: %s in %s, sha1 %s (%s, region=%s 0x%X, ver=%u)",
+                 IMAGE_XBE, name.string().c_str(), sha.c_str(),
+                 exact ? "exact build match" : "compatible MC3D Remix release",
+                 RegionLabel(info.region), info.region, info.version);
             game = {assets, std::move(xbe)};
             kernel::MountDisc(std::move(disc));
             return true;
         }
+        LOGR("Game: %s in %s, sha1 %s, another release", IMAGE_XBE, name.string().c_str(), sha.c_str());
         if (other_name.empty()) {
             other = {assets, std::move(xbe)};
             other_disc = std::move(disc);
