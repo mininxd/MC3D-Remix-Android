@@ -112,11 +112,17 @@ void ApplyArcadeSettings() {
 
 void ApplyUnlockFlags() {
     if (g_state.delivery.load(std::memory_order_relaxed)) {
-        if (safe_mem::CanAccess(kUnlockAllCitiesFlag1, 1u)) kernel::W8(kUnlockAllCitiesFlag1, 1u);
-        if (safe_mem::CanAccess(kUnlockAllCitiesFlag2, 1u)) kernel::W8(kUnlockAllCitiesFlag2, 1u);
+        if (safe_mem::CanAccess(kUnlockAllCitiesFlag1, 1u)) {
+            *static_cast<uint8_t*>(kernel::HostPtr(kUnlockAllCitiesFlag1)) = 1u;
+        }
+        if (safe_mem::CanAccess(kUnlockAllCitiesFlag2, 1u)) {
+            *static_cast<uint8_t*>(kernel::HostPtr(kUnlockAllCitiesFlag2)) = 1u;
+        }
     }
     if (g_state.secret_dealer.load(std::memory_order_relaxed)) {
-        if (safe_mem::CanAccess(kUnlockAllVehiclesFlag, 1u)) kernel::W8(kUnlockAllVehiclesFlag, 1u);
+        if (safe_mem::CanAccess(kUnlockAllVehiclesFlag, 1u)) {
+            *static_cast<uint8_t*>(kernel::HostPtr(kUnlockAllVehiclesFlag)) = 1u;
+        }
     }
 }
 
