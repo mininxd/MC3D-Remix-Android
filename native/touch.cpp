@@ -1052,19 +1052,17 @@ size_t HitButton(float x, float y) {
 }
 
 // ============================================================================
-// Exact NFSU2 RacingControlsView Floating Draggable Layout Editor Card
-// (563x96dp card, 44x80dp bordered hamburger drag handle, 6 Row-1 + 3 Row-2)
+// Floating Draggable Layout Editor Card
+// (462x96dp card, 44x80dp bordered hamburger drag handle, 5 Row-1 + 2 Row-2)
 // ============================================================================
 enum EditorBtn : int {
     kEdReset = 0,
     kEdMinus,
     kEdPlus,
     kEdSave,
-    kEdCancel,
     kEdTab,
     kEdHide,
     kEdSnap,
-    kEdOpacity,
     kEdCount,
 };
 constexpr float kMinRadius = 0.032f, kMaxRadius = 0.28f;
@@ -1083,9 +1081,8 @@ void ClampEditorCard(float w, float h) {
     const float s = UiScale(w, h);
     const float w_dp = w / s;
     const float h_dp = h / s;
-    // Exact NFSU2 RacingControlsView.clampToolbar(w, h)
-    const float min_cx = 310.0f / w_dp;
-    const float max_cx = std::max(min_cx, (w_dp - 265.0f) / w_dp);
+    const float min_cx = 237.0f / w_dp;
+    const float max_cx = std::max(min_cx, (w_dp - 237.0f) / w_dp);
     const float min_top = 6.0f / h_dp;
     const float max_top = std::max(min_top, (h_dp - 102.0f) / h_dp);
     g_bar_cx = std::clamp(g_bar_cx, min_cx, max_cx);
@@ -1108,20 +1105,18 @@ EditorCard ComputeEditorCard() {
         out[3] = y1 * s;
     };
 
-    // Exact NFSU2 RacingControlsView.java:781-811 coordinates!
-    set_dp(c.card,            cx - 305.0f, ty,         cx + 258.0f, ty + 96.0f);
-    set_dp(c.grip,            cx - 297.0f, ty + 8.0f,  cx - 253.0f, ty + 88.0f);
-    // Row 1 (height 38dp): RESET | - | + | SAVE | CANCEL | PLAY/MENU
-    set_dp(c.btns[kEdReset],  cx - 245.0f, ty + 8.0f,  cx - 155.0f, ty + 46.0f);
-    set_dp(c.btns[kEdMinus],  cx - 145.0f, ty + 8.0f,  cx - 105.0f, ty + 46.0f);
-    set_dp(c.btns[kEdPlus],   cx - 95.0f,  ty + 8.0f,  cx - 55.0f,  ty + 46.0f);
-    set_dp(c.btns[kEdSave],   cx - 45.0f,  ty + 8.0f,  cx + 50.0f,  ty + 46.0f);
-    set_dp(c.btns[kEdCancel], cx + 60.0f,  ty + 8.0f,  cx + 150.0f, ty + 46.0f);
-    set_dp(c.btns[kEdTab],    cx + 160.0f, ty + 8.0f,  cx + 250.0f, ty + 46.0f);
-    // Row 2 (height 38dp): HIDE/SHOW BUTTON | SNAP ON/OFF | OPACITY (xx%)
-    set_dp(c.btns[kEdHide],    cx - 205.0f, ty + 50.0f, cx - 75.0f,  ty + 88.0f);
-    set_dp(c.btns[kEdSnap],    cx - 65.0f,  ty + 50.0f, cx + 65.0f,  ty + 88.0f);
-    set_dp(c.btns[kEdOpacity], cx + 75.0f,  ty + 50.0f, cx + 205.0f, ty + 88.0f);
+    // Symmetric 462x96dp floating card with 44x80dp hamburger drag handle on the left
+    set_dp(c.card,           cx - 231.0f, ty,         cx + 231.0f, ty + 96.0f);
+    set_dp(c.grip,           cx - 223.0f, ty + 8.0f,  cx - 179.0f, ty + 88.0f);
+    // Row 1 (height 38dp): RESET | - | + | SAVE | IN GAME / MENU
+    set_dp(c.btns[kEdReset], cx - 171.0f, ty + 8.0f,  cx - 89.0f,  ty + 46.0f);
+    set_dp(c.btns[kEdMinus], cx - 81.0f,  ty + 8.0f,  cx - 39.0f,  ty + 46.0f);
+    set_dp(c.btns[kEdPlus],  cx - 31.0f,  ty + 8.0f,  cx + 11.0f,  ty + 46.0f);
+    set_dp(c.btns[kEdSave],  cx + 19.0f,  ty + 8.0f,  cx + 109.0f, ty + 46.0f);
+    set_dp(c.btns[kEdTab],   cx + 117.0f, ty + 8.0f,  cx + 223.0f, ty + 46.0f);
+    // Row 2 (height 38dp): HIDE/SHOW BUTTON | SNAP ON/OFF
+    set_dp(c.btns[kEdHide],  cx - 171.0f, ty + 50.0f, cx + 21.0f,  ty + 88.0f);
+    set_dp(c.btns[kEdSnap],  cx + 31.0f,  ty + 50.0f, cx + 223.0f, ty + 88.0f);
 
     return c;
 }
@@ -1228,9 +1223,6 @@ void EditDown(Finger& f, float x, float y) {
                 case kEdSave:
                     CloseEditor(true);
                     return;
-                case kEdCancel:
-                    CloseEditor(false);
-                    return;
                 case kEdTab:
                     g_edit_menu_tab = !g_edit_menu_tab;
                     g_selected = -1;
@@ -1250,15 +1242,6 @@ void EditDown(Finger& f, float x, float y) {
                         CloseEditor(true);
                     }
                     return;
-                case kEdOpacity: {
-                    // Exact NFSU2 quick opacity step right inside editor (100 -> 85 -> 70 -> 55 -> 40 -> 25 -> 100)
-                    const int pct = int(std::lround(g_opacity * 100.0f));
-                    int next = pct - 15;
-                    if (next < 25) next = 100;
-                    g_opacity = float(next) / 100.0f;
-                    g_edit_moved = true;
-                    return;
-                }
                 default:
                     return;
             }
@@ -1311,12 +1294,13 @@ void UpdateAnalogStickLocked(float x, float y) {
         dy /= mag;
     }
     auto shape_axis = [](float v) -> float {
-        constexpr float kDeadzone = 0.04f;
+        constexpr float kDeadzone = 0.02f;
         const float av = std::fabs(v);
         if (av <= kDeadzone) return 0.0f;
         const float norm = std::clamp((av - kDeadzone) / (1.0f - kDeadzone), 0.0f, 1.0f);
-        // Progressive NFSU2 S-curve: crisp center precision with responsive full lock
-        const float curved = norm * norm * (0.45f + 0.55f * norm) * 0.65f + norm * 0.35f;
+        // High-sensitivity mobile response: fast initial bite, reaches full steering lock around ~64% travel
+        const float boosted = std::clamp(norm * 1.55f, 0.0f, 1.0f);
+        const float curved = std::pow(boosted, 0.78f);
         return std::copysign(std::clamp(curved, 0.0f, 1.0f), v);
     };
     g_stick_raw_x = dx;
@@ -2150,8 +2134,8 @@ void Apply(int port, input::Pad& pad) {
         used = true;
     }
 
-    // Motorcycles automatically engage Weight Transfer when turning OR wheelie/tucking!
-    if (is_bike && (std::fabs(steer_f) >= 0.10f || (analog && std::fabs(g_stick_y) >= 0.14f))) {
+    // Motorcycles ALWAYS combine Weight Transfer when turning left/right (Arrow OR Analog) or wheelie/tucking!
+    if (is_bike && (steer != 0 || std::fabs(steer_f) >= 0.03f || (analog && std::fabs(g_stick_y) >= 0.08f))) {
         ApplyRemappedAction(pad, game::GameAction::WeightTransfer, 0, kAnalogB);
     }
 
@@ -2531,7 +2515,7 @@ void BuildOverlay(std::vector<Quad>& out) {
         const float lbl_h = 13.5f * s;
         const float sym_h = 22.0f * s;
 
-        // Row 1 (6 buttons): RESET | - | + | SAVE | CANCEL | PLAY/MENU
+        // Row 1 (5 buttons): RESET | - | + | SAVE | IN GAME / MENU
         draw_nfsu2_btn(kEdReset, "RESET", lbl_h,
                        0.094f, 0.125f, 0.157f, 0.88f,  1.0f, 1.0f, 1.0f, 0.27f,  1.0f, 1.0f, 1.0f, 0.72f);
         draw_nfsu2_btn(kEdMinus, "-", sym_h,
@@ -2544,12 +2528,10 @@ void BuildOverlay(std::vector<Quad>& out) {
                        1.0f, 1.0f, 1.0f, has_sel ? 1.00f : 0.42f);
         draw_nfsu2_btn(kEdSave, "SAVE", lbl_h,
                        0.094f, 0.188f, 0.110f, 0.88f,  0.533f, 0.878f, 0.376f, 0.67f,  0.784f, 0.941f, 0.533f, 1.00f);
-        draw_nfsu2_btn(kEdCancel, "CANCEL", lbl_h,
-                       0.094f, 0.125f, 0.157f, 0.88f,  1.0f, 1.0f, 1.0f, 0.27f,  1.0f, 1.0f, 1.0f, 0.72f);
-        draw_nfsu2_btn(kEdTab, g_edit_menu_tab ? "MENU" : "PLAY", lbl_h,
+        draw_nfsu2_btn(kEdTab, g_edit_menu_tab ? "MENU" : "IN GAME", lbl_h,
                        0.086f, 0.145f, 0.204f, 0.88f,  0.353f, 0.784f, 0.980f, 0.67f,  0.353f, 0.784f, 0.980f, 1.00f);
 
-        // Row 2 (3 centered 130dp wide buttons): HIDE/SHOW BUTTON | SNAP ON/OFF | OPACITY (xx%)
+        // Row 2 (2 balanced buttons): HIDE/SHOW BUTTON | SNAP ON/OFF
         const bool show_green = can_hide ? sel_hidden : g_controls_hidden;
         const char* hide_lbl = can_hide ? (sel_hidden ? "SHOW CTRL" : "HIDE CTRL")
                                         : (g_controls_hidden ? "SHOW BUTTON" : "HIDE BUTTON");
@@ -2561,11 +2543,6 @@ void BuildOverlay(std::vector<Quad>& out) {
                            0.157f, 0.125f, 0.094f, 0.88f,  1.000f, 0.718f, 0.302f, 0.67f,  1.000f, 0.718f, 0.302f, 1.00f);
         }
         draw_nfsu2_btn(kEdSnap, g_snap_grid ? "SNAP ON" : "SNAP OFF", lbl_h,
-                       0.086f, 0.145f, 0.204f, 0.88f,  0.353f, 0.784f, 0.980f, 0.67f,  0.353f, 0.784f, 0.980f, 1.00f);
-
-        char op_lbl[32];
-        std::snprintf(op_lbl, sizeof(op_lbl), "OPACITY (%d%%)", int(std::lround(g_opacity * 100.0f)));
-        draw_nfsu2_btn(kEdOpacity, op_lbl, lbl_h,
                        0.086f, 0.145f, 0.204f, 0.88f,  0.353f, 0.784f, 0.980f, 0.67f,  0.353f, 0.784f, 0.980f, 1.00f);
     }
 }

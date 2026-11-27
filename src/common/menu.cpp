@@ -184,7 +184,6 @@ constexpr Row kTouchRows[] = {
     {Kind::Value, kTouchOpacity, "Controls Opacity"},
     {Kind::Value, kAutoBurnout, "Auto Burnout"},
     {Kind::Action, kTouchEdit, "Edit Control Layout"},
-    {Kind::Action, kTouchReset, "Reset Controls Layout"},
 };
 
 // on the game's control setup page, under its own rows

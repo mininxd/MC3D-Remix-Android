@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
@@ -98,8 +99,16 @@ public class MC3DActivity extends SDLActivity {
     }
 
     @Override
+    public void setRequestedOrientation(int requestedOrientation) {
+        // Always honor sensorLandscape so both normal & flipped landscape work via accelerometer
+        // (SDL3's setOrientationBis otherwise locks non-resizable fullscreen windows to reverseLandscape).
+        super.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+    }
+
+    @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
 
         final Thread.UncaughtExceptionHandler defaultHandler = Thread.getDefaultUncaughtExceptionHandler();
         Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
@@ -231,6 +240,7 @@ public class MC3DActivity extends SDLActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
         resumed = true;
         askForGame();
         tellOfUpdate();
