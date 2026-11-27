@@ -519,16 +519,19 @@ void UpdateTouchTelemetry() {
         is_bike = (veh_p08 != 0u) && (safe_mem::Read32(veh_p08 + 0x3808u, 0u) == 2u);
 
         // Exact MC3D 3-2-1 race start countdown detection verified from mcRaceTimer::UpdateCountdown (sub_001C20E0):
-        // race_timer = [0x00557EEC]; [race_timer + 0x04] == 4 during 3-2-1 staging countdown while float
-        // [race_timer + 0x0C] counts up from -3.0s to 0.0s, flipping [race_timer + 0x04] to 5 at the exact GO! frame.
+        // race_timer = [0x00557EEC]; during a real pre-race 3-2-1 staging countdown:
+        //   - [race_timer + 0x04] == 4 (countdown state; flips to 5 on the exact GO! frame)
+        //   - [race_timer + 0x24] != 0 (show_countdown flag from !DontShowCountdown)
+        //   - float [race_timer + 0x0C] is strictly negative (-3.0s .. 0.0s), NEVER 0.0f (idle/Cruise)!
         const uint32_t race_timer = safe_mem::Read32(0x00557EECu, 0u);
-        if (race_timer != 0u && safe_mem::Read32(race_timer + 0x04u, 0u) == 0x04u) {
+        if (race_timer != 0u && safe_mem::Read32(race_timer + 0x04u, 0u) == 0x04u &&
+            safe_mem::Read8(race_timer + 0x24u, 0u) != 0u) {
             float t_sec = 0.0f;
             if (safe_mem::CanAccess(race_timer + 0x0Cu, 4u)) {
                 const uint32_t tbits = kernel::R32(race_timer + 0x0Cu);
                 std::memcpy(&t_sec, &tbits, sizeof(t_sec));
             }
-            race_countdown = std::isfinite(t_sec) && (t_sec <= 0.0f) && (speed_kmh < 8.0f);
+            race_countdown = std::isfinite(t_sec) && (t_sec < -0.02f) && (t_sec >= -10.0f) && (speed_kmh < 8.0f);
         }
 
         // NOS: only show when player has purchased nitrous on this vehicle (max_nos > 0).

@@ -494,7 +494,19 @@ namespace {
 
 using input::NowMs;
 
-enum class Role : uint8_t { None, Button, AnalogStick, RadioSwipe, GarageOrbit, GaragePinch, FmvHold, Drag, Pinch, ToolbarDrag };
+enum class Role : uint8_t {
+    None,
+    Button,
+    AnalogStick,
+    RadioSwipe,
+    GarageOrbit,
+    GaragePinch,
+    FmvHold,
+    Drag,
+    Pinch,
+    ToolbarDrag,
+    OpacitySlider,
+};
 
 // Controller press targets
 enum : int {
@@ -535,6 +547,7 @@ enum class SvgIcon : uint8_t {
     Map,
     FlashLights,
     LookBack,
+    EditLayout,
     DpadUp,
     DpadDown,
     DpadLeft,
@@ -572,6 +585,7 @@ constexpr SvgSpec kSvgSpecs[kSvgIconCount] = {
     {"map",             192, 192},
     {"flash-lights",    192, 192},
     {"look-back",       192, 192},
+    {"layout",          192, 192},
     {"dpad-up",         192, 192},
     {"dpad-down",       192, 192},
     {"dpad-left",       192, 192},
@@ -628,7 +642,7 @@ constexpr Button kButtons[] = {
 
     // NFSU2 top-right quick utility buttons (Mode Swap: Arrows <-> Analog, Edit: Floating Layout Card)
     {"steer_mode",  "Steer Mode",      SvgIcon::Count,          kModeSwap,     game::GameAction::Count,          When::AlwaysActive,   1.0f,           false, false},
-    {"edit_layout", "Layout Settings", SvgIcon::Count,          kEditBtn,      game::GameAction::Count,          When::AlwaysActive,   1.0f,           true,  false},
+    {"edit_layout", "Layout Settings", SvgIcon::EditLayout,     kEditBtn,      game::GameAction::Count,          When::AlwaysActive,   1.0f,           true,  false},
 
     // Menu & Garage minimal navigation controls (exact NFSU2 52dp D-Pad + 114x48dp wide pill OK/Back)
     {"dpad_up",     "D-Pad Up",        SvgIcon::DpadUp,         kBit + 0,      game::GameAction::Count,          When::MenusAndGarage, 1.0f,           true,  false},
@@ -818,6 +832,7 @@ float g_guide_mirror_x = -1.0f;// Active mirror symmetry partner guide (0..1, <0
 float g_bar_cx = 0.50f;        // Draggable NFSU2-style editor card center X (0..1)
 float g_bar_top = 0.032f;      // Draggable NFSU2-style editor card top Y (0..1)
 bool g_bar_dragging = false;   // Highlights card border in NFSU2 lime while dragging
+bool g_opacity_dragging = false;  // Highlights opacity slider while dragging
 Layout g_before{};
 float g_before_opacity = 0.85f;
 int g_selected = -1;
@@ -875,7 +890,7 @@ void LoadLayout() {
     g_layout = ComputeDefaultLayout(g_layout_w, g_layout_h);
     try {
         toml::table t = toml::parse_file(LayoutFile().string());
-        g_opacity = std::clamp(float(t["opacity"].value_or(double(g_opacity))), 0.2f, 1.0f);
+        g_opacity = std::clamp(float(t["opacity"].value_or(double(g_opacity))), 0.10f, 1.0f);
         g_scale = std::clamp(float(t["scale"].value_or(double(g_scale))), 0.5f, 1.5f);
         g_analog_stick = t["analog_stick"].value_or(false);
         g_controls_hidden = t["controls_hidden"].value_or(false);
@@ -1085,6 +1100,8 @@ struct EditorCard {
     float card[4];
     float grip[4];
     float btns[kEdCount][4];
+    float opacity_bar[4];
+    float slider_track[4];
 };
 
 void ClampEditorCard(float w, float h) {
@@ -1094,7 +1111,7 @@ void ClampEditorCard(float w, float h) {
     const float min_cx = 237.0f / w_dp;
     const float max_cx = std::max(min_cx, (w_dp - 237.0f) / w_dp);
     const float min_top = 6.0f / h_dp;
-    const float max_top = std::max(min_top, (h_dp - 102.0f) / h_dp);
+    const float max_top = std::max(min_top, (h_dp - 142.0f) / h_dp);
     g_bar_cx = std::clamp(g_bar_cx, min_cx, max_cx);
     g_bar_top = std::clamp(g_bar_top, min_top, max_top);
 }
@@ -1115,9 +1132,9 @@ EditorCard ComputeEditorCard() {
         out[3] = y1 * s;
     };
 
-    // Symmetric 462x96dp floating card with 44x80dp hamburger drag handle on the left
-    set_dp(c.card,           cx - 231.0f, ty,         cx + 231.0f, ty + 96.0f);
-    set_dp(c.grip,           cx - 223.0f, ty + 8.0f,  cx - 179.0f, ty + 88.0f);
+    // Symmetric 462x136dp floating card with 44x120dp hamburger drag handle on the left
+    set_dp(c.card,           cx - 231.0f, ty,         cx + 231.0f, ty + 136.0f);
+    set_dp(c.grip,           cx - 223.0f, ty + 8.0f,  cx - 179.0f, ty + 128.0f);
     // Row 1 (height 38dp): RESET | - | + | SAVE | IN GAME / MENU
     set_dp(c.btns[kEdReset], cx - 171.0f, ty + 8.0f,  cx - 89.0f,  ty + 46.0f);
     set_dp(c.btns[kEdMinus], cx - 81.0f,  ty + 8.0f,  cx - 39.0f,  ty + 46.0f);
@@ -1127,8 +1144,18 @@ EditorCard ComputeEditorCard() {
     // Row 2 (height 38dp): HIDE/SHOW BUTTON | SNAP ON/OFF
     set_dp(c.btns[kEdHide],  cx - 171.0f, ty + 50.0f, cx + 21.0f,  ty + 88.0f);
     set_dp(c.btns[kEdSnap],  cx + 31.0f,  ty + 50.0f, cx + 223.0f, ty + 88.0f);
+    // Row 3 (height 36dp): NFSU2-style interactive Opacity Slider (10% - 100%)
+    set_dp(c.opacity_bar,    cx - 171.0f, ty + 92.0f, cx + 223.0f, ty + 128.0f);
+    set_dp(c.slider_track,   cx - 84.0f,  ty + 107.0f, cx + 164.0f, ty + 113.0f);
 
     return c;
+}
+
+void UpdateOpacityFromSliderLocked(float x, const EditorCard& c) {
+    const float span = std::max(c.slider_track[2] - c.slider_track[0], 1.0f);
+    const float t = std::clamp((x - c.slider_track[0]) / span, 0.0f, 1.0f);
+    const int pct = std::clamp(int(std::lround(10.0f + t * 90.0f)), 10, 100);
+    g_opacity = float(pct) / 100.0f;
 }
 
 void OpenEditor() {
@@ -1140,6 +1167,7 @@ void OpenEditor() {
     g_bar_cx = 0.50f;
     g_bar_top = (16.0f * UiScale(Width(), Height())) / Height();
     g_bar_dragging = false;
+    g_opacity_dragging = false;
     g_editing = true;
 }
 
@@ -1153,6 +1181,7 @@ void CloseEditor(bool keep) {
     g_selected = -1;
     g_edit_moved = false;
     g_bar_dragging = false;
+    g_opacity_dragging = false;
     g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
     g_editing = false;
 }
@@ -1208,12 +1237,21 @@ void EditDown(Finger& f, float x, float y) {
             g_bar_dragging = true;
             return;
         }
+        // Row 3: Interactive Opacity Slider (10% - 100%)
+        if (in_rect(c.opacity_bar)) {
+            f.role = Role::OpacitySlider;
+            g_opacity_dragging = true;
+            g_edit_moved = true;
+            UpdateOpacityFromSliderLocked(x, c);
+            return;
+        }
         // Check action buttons inside card (exact NFSU2 RacingControlsView layout)
         for (int i = 0; i < kEdCount; ++i) {
             if (!in_rect(c.btns[i])) continue;
             switch (i) {
                 case kEdReset:
                     g_layout = ComputeDefaultLayout(Width(), Height());
+                    g_opacity = 0.85f;
                     g_selected = -1;
                     g_edit_moved = true;
                     g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
@@ -1411,6 +1449,11 @@ void FingerMove(SDL_FingerID id, float x, float y) {
             ClampEditorCard(w, h);
             continue;
         }
+        if (f.role == Role::OpacitySlider) {
+            const EditorCard c = ComputeEditorCard();
+            UpdateOpacityFromSliderLocked(x, c);
+            continue;
+        }
         if (f.role == Role::Drag) {
             Place& p = g_layout[f.button];
             float nx = std::clamp((x - f.x0) / w, 0.02f, 0.98f);
@@ -1589,6 +1632,10 @@ void FingerUp(SDL_FingerID id) {
     if (std::none_of(g_fingers.begin(), g_fingers.end(),
                      [](const Finger& f) { return f.role == Role::ToolbarDrag; })) {
         g_bar_dragging = false;
+    }
+    if (std::none_of(g_fingers.begin(), g_fingers.end(),
+                     [](const Finger& f) { return f.role == Role::OpacitySlider; })) {
+        g_opacity_dragging = false;
     }
     if (std::none_of(g_fingers.begin(), g_fingers.end(),
                      [](const Finger& f) { return f.role == Role::AnalogStick; })) {
@@ -2353,9 +2400,7 @@ void BuildOverlay(std::vector<Quad>& out) {
                                   (std::fabs(g_stick_raw_x) > 0.01f || std::fabs(g_stick_raw_y) > 0.01f);
         const bool is_bike = (ctx == game::UiContext::Gameplay) &&
                              game::Telemetry().is_bike.load(std::memory_order_relaxed);
-        const float eff_vis = (!editing && i == kIdxEditBtn)
-                                  ? std::max(0.40f, g_opacity) * fade_alpha
-                                  : vis;
+        const float eff_vis = vis;
 
         if (i == kIdxSteerStick) {
             // Native SDF Analog Steering Thumbstick (sleek thin Outline style + NFSU2 lime active glow)
@@ -2384,97 +2429,68 @@ void BuildOverlay(std::vector<Quad>& out) {
             EmitPanel(out, kx - knob_r, ky - knob_r, kx + knob_r, ky + knob_r,
                       0.96f, 0.97f, 1.00f, kf_a, knob_r,
                       th * 0.78f, rim_r, rim_g, rim_b, std::min(1.0f, eff_vis * 1.05f));
-        } else if (i == kIdxModeSwap || i == kIdxEditBtn) {
-            // Exact NFSU2 top-right circular buttons (sleek thin Outline style)
+        } else if (i == kIdxModeSwap) {
+            // Top-right Mode Swap button (clean transparent thin Outline matching SVG buttons & opacity)
             const float rad = std::min(dx1 - dx0, dy1 - dy0) * 0.5f;
-            const float fill_a = (on ? 0.42f : 0.28f) * eff_vis;
+            const float fill_a = (on ? 0.16f : 0.0f) * eff_vis;
             const float ink_r = on ? 0.784f : 1.0f;
             const float ink_g = on ? 0.941f : 1.0f;
             const float ink_b = on ? 0.533f : 1.0f;
-            const float rim_a = (on ? 0.98f : 0.88f) * eff_vis;
-            EmitPanel(out, dx0, dy0, dx1, dy1, 0.04f, 0.05f, 0.07f, fill_a, rad,
-                      th * 0.72f, ink_r, ink_g, ink_b, rim_a);
+            const float rim_a = (on ? 0.98f : 0.90f) * eff_vis;
+            EmitPanel(out, dx0, dy0, dx1, dy1, 1.0f, 1.0f, 1.0f, fill_a, rad,
+                      th * 0.65f, ink_r, ink_g, ink_b, rim_a);
 
-            if (i == kIdxModeSwap) {
-                if (EffectiveAnalogMode()) {
-                    // Analog stick icon: outer ring + solid center knob (exact NFSU2 RacingControlsView:1174-1176)
-                    const float outer_r = rad * 0.52f;
-                    const float inner_r = rad * 0.20f;
-                    EmitPanel(out, cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r,
-                              0, 0, 0, 0, outer_r, th * 0.72f, ink_r, ink_g, ink_b, 0.95f * eff_vis);
-                    EmitPanel(out, cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r,
-                              ink_r, ink_g, ink_b, 0.95f * eff_vis, inner_r);
-                } else {
-                    // Arrow steering icon: < > (exact NFSU2 RacingControlsView:1178-1179)
-                    EmitTextCentered(out, cx - rad * 0.24f, cy, rad * 0.82f, ink_r, ink_g, ink_b, 0.95f * eff_vis, "<");
-                    EmitTextCentered(out, cx + rad * 0.24f, cy, rad * 0.82f, ink_r, ink_g, ink_b, 0.95f * eff_vis, ">");
-                }
+            if (EffectiveAnalogMode()) {
+                const float outer_r = rad * 0.48f;
+                const float inner_r = rad * 0.17f;
+                EmitPanel(out, cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r,
+                          0, 0, 0, 0, outer_r, th * 0.65f, ink_r, ink_g, ink_b, 0.92f * eff_vis);
+                EmitPanel(out, cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r,
+                          ink_r, ink_g, ink_b, 0.92f * eff_vis, inner_r);
             } else {
-                // 3 horizontal sliders with alternating circular knobs (exact NFSU2 RacingControlsView:1183-1188)
-                const float sl_hw = rad * 0.48f;
-                const float sl_hh = std::max(1.5f, rad * 0.065f);
-                const float knob_r = rad * 0.145f;
-                for (int row = -1; row <= 1; ++row) {
-                    const float ry = cy + float(row) * rad * 0.34f;
-                    const float kx = cx + (row == 0 ? rad * 0.22f : -rad * 0.22f);
-                    EmitPanel(out, cx - sl_hw, ry - sl_hh, cx + sl_hw, ry + sl_hh,
-                              ink_r, ink_g, ink_b, 0.92f * eff_vis, sl_hh);
-                    EmitPanel(out, kx - knob_r, ry - knob_r, kx + knob_r, ry + knob_r,
-                              ink_r, ink_g, ink_b, 0.98f * eff_vis, knob_r);
-                }
+                EmitTextCentered(out, cx - rad * 0.23f, cy, rad * 0.78f, ink_r, ink_g, ink_b, 0.92f * eff_vis, "<");
+                EmitTextCentered(out, cx + rad * 0.23f, cy, rad * 0.78f, ink_r, ink_g, ink_b, 0.92f * eff_vis, ">");
             }
         } else {
-            // #1 UX: Live Auto-Burnout pulsing golden-amber launch cue on Gas pedal during 3-2-1 countdown!
-            const bool launch_cue = !editing && i == kIdxGas && ctx == game::UiContext::Gameplay &&
-                                    game::Opt().auto_burnout &&
-                                    game::Telemetry().race_countdown.load(std::memory_order_relaxed);
-            if (launch_cue) {
+            // Default Gas is always the clean primary white outline.
+            // ONLY when a race is genuinely about to start (3-2-1 countdown active) and Auto Burnout is enabled,
+            // render the green-colored Gas button (no floating BURNOUT/LAUNCH label).
+            const bool race_about_to_start =
+                !editing && i == kIdxGas && ctx == game::UiContext::Gameplay &&
+                game::Opt().auto_burnout &&
+                game::Telemetry().race_countdown.load(std::memory_order_relaxed);
+            if (race_about_to_start) {
                 const float pulse = 0.5f + 0.5f * std::sin(float(now % 6283u) * 0.008f);
-                const float glow_pad = th * (on ? 4.2f : (2.4f + pulse * 1.6f));
-                const float gr = on ? 0.784f : 1.000f;
-                const float gg = on ? 0.941f : 0.720f;
-                const float gb = on ? 0.533f : 0.180f;
-                const float ga = (on ? 0.96f : (0.52f + pulse * 0.40f)) * fade_alpha;
+                const float glow_pad = th * (on ? 3.2f : (2.0f + pulse * 1.2f));
+                const float gr = 0.30f;
+                const float gg = 0.96f;
+                const float gb = 0.48f;
+                const float ga = (on ? 0.92f : (0.55f + pulse * 0.32f)) * eff_vis;
                 EmitPanel(out, dx0 - glow_pad, dy0 - glow_pad, dx1 + glow_pad, dy1 + glow_pad,
-                          gr, gg, gb, (on ? 0.26f : (0.10f + pulse * 0.12f)) * fade_alpha,
-                          bw * 0.28f + glow_pad * 0.4f, th * 1.65f, gr, gg, gb, ga);
+                          gr, gg, gb, (on ? 0.20f : (0.08f + pulse * 0.08f)) * eff_vis,
+                          bw * 0.28f + glow_pad * 0.4f, th * 1.15f, gr, gg, gb, ga);
             }
 
             const AtlasUv& uv = g_atlas_uv[skin][static_cast<size_t>(icon)];
             if (atlas_ok && uv.valid) {
-                float tr = 1.0f, tg = 1.0f, tb = 1.0f, ta = std::min(1.0f, vis * (on ? 1.15f : 0.92f));
+                float tr = 1.0f, tg = 1.0f, tb = 1.0f, ta = std::min(1.0f, eff_vis * (on ? 1.15f : 0.92f));
                 if (kButtons[i].when == When::PlayTurbo && !editing) {
                     tr = on ? 1.0f : 0.48f;
                     tg = on ? 0.94f : 0.92f;
                     tb = on ? 0.72f : 1.0f;
-                    ta = std::min(1.0f, vis * 1.10f);
-                } else if (launch_cue) {
-                    tr = 1.0f;
-                    tg = on ? 0.98f : 0.90f;
-                    tb = on ? 0.65f : 0.55f;
-                    ta = std::min(1.0f, vis * 1.15f);
+                    ta = std::min(1.0f, eff_vis * 1.10f);
+                } else if (race_about_to_start) {
+                    tr = on ? 0.55f : 0.42f;
+                    tg = 1.00f;
+                    tb = on ? 0.65f : 0.54f;
+                    ta = std::min(1.0f, eff_vis * (on ? 1.15f : 1.00f));
                 }
                 out.push_back(Quad{dx0, dy0, dx1, dy1, uv.u0, uv.v0, uv.u1, uv.v1,
                                    tr, tg, tb, ta, 0, 0, 0, 0, 0, 0, 0u});
             } else {
                 EmitPanel(out, dx0, dy0, dx1, dy1,
-                          on ? 0.9f : 0.08f, on ? 0.9f : 0.09f, on ? 0.95f : 0.12f, (on ? 0.42f : 0.55f) * vis,
-                          std::min(bw, bh) * 0.25f, th, 1.0f, 1.0f, 1.0f, 0.8f * vis);
-            }
-
-            if (launch_cue) {
-                const float badge_w = std::max(bw * 1.18f, h * 0.165f);
-                const float badge_h = h * 0.044f;
-                const float badge_cy = dy0 + h * 0.010f;
-                const float br = on ? 0.784f : 1.000f;
-                const float bg = on ? 0.941f : 0.745f;
-                const float bb = on ? 0.533f : 0.220f;
-                EmitPanel(out, cx - badge_w * 0.5f, badge_cy - badge_h * 0.5f,
-                          cx + badge_w * 0.5f, badge_cy + badge_h * 0.5f,
-                          0.06f, 0.08f, 0.11f, 0.88f * fade_alpha, badge_h * 0.48f,
-                          th * 1.05f, br, bg, bb, 0.96f * fade_alpha);
-                EmitTextCentered(out, cx, badge_cy, h * 0.025f,
-                                 br, bg, bb, 0.98f * fade_alpha, on ? "BURNOUT" : "LAUNCH");
+                          on ? 0.9f : 0.08f, on ? 0.9f : 0.09f, on ? 0.95f : 0.12f, (on ? 0.42f : 0.55f) * eff_vis,
+                          std::min(bw, bh) * 0.25f, th, 1.0f, 1.0f, 1.0f, 0.8f * eff_vis);
             }
 
             // Animated clockwise circular progress ring while holding Map button (same style as FMV skip!)
@@ -2650,6 +2666,44 @@ void BuildOverlay(std::vector<Quad>& out) {
         }
         draw_nfsu2_btn(kEdSnap, g_snap_grid ? "SNAP ON" : "SNAP OFF", lbl_h,
                        0.086f, 0.145f, 0.204f, 0.88f,  0.353f, 0.784f, 0.980f, 0.67f,  0.353f, 0.784f, 0.980f, 1.00f);
+
+        // Row 3: Interactive NFSU2-style Opacity Slider (10% - 100%, live button transparency preview)
+        {
+            const float* ob = c.opacity_bar;
+            const float* trk = c.slider_track;
+            const float ocy = 0.5f * (ob[1] + ob[3]);
+            const float ac_r = g_opacity_dragging ? 0.784f : 0.353f;
+            const float ac_g = g_opacity_dragging ? 0.941f : 0.784f;
+            const float ac_b = g_opacity_dragging ? 0.533f : 0.980f;
+            EmitPanel(out, ob[0], ob[1], ob[2], ob[3],
+                      0.078f, 0.118f, 0.165f, 0.88f, btn_r,
+                      border_w, ac_r, ac_g, ac_b, g_opacity_dragging ? 0.92f : 0.55f);
+
+            const float op_lbl_cx = 0.5f * (ob[0] + trk[0]) - 2.0f * s;
+            EmitTextCentered(out, op_lbl_cx, ocy, 12.0f * s, ac_r, ac_g, ac_b, 0.96f, "OPACITY");
+
+            const float trk_r = 0.5f * (trk[3] - trk[1]);
+            const float t_val = std::clamp((g_opacity - 0.10f) / 0.90f, 0.0f, 1.0f);
+            const float knob_x = trk[0] + t_val * (trk[2] - trk[0]);
+            // Track background
+            EmitPanel(out, trk[0], trk[1], trk[2], trk[3],
+                      1.0f, 1.0f, 1.0f, 0.22f, trk_r);
+            // Active filled track
+            if (knob_x > trk[0] + 1.0f) {
+                EmitPanel(out, trk[0], trk[1], knob_x, trk[3],
+                          ac_r, ac_g, ac_b, 0.95f, trk_r);
+            }
+            // Crisp circular thumb knob
+            const float kr = (g_opacity_dragging ? 10.5f : 9.0f) * s;
+            EmitPanel(out, knob_x - kr, ocy - kr, knob_x + kr, ocy + kr,
+                      1.0f, 1.0f, 1.0f, 1.0f, kr,
+                      std::max(1.5f, 1.8f * s), ac_r, ac_g, ac_b, 1.0f);
+
+            char pct_buf[16];
+            std::snprintf(pct_buf, sizeof(pct_buf), "%d%%", int(std::lround(g_opacity * 100.0f)));
+            const float pct_cx = 0.5f * (trk[2] + ob[2]) + 2.0f * s;
+            EmitTextCentered(out, pct_cx, ocy, 12.5f * s, 1.0f, 1.0f, 1.0f, 0.96f, pct_buf);
+        }
     }
 }
 
@@ -2749,7 +2803,7 @@ uint32_t ControlsOpacity() {
 void StepOpacity(int step) {
     std::lock_guard lock(g_lock);
     EnsureLayout();
-    g_opacity = float(std::clamp(int(Percent(g_opacity)) + step * 5, 20, 100)) / 100.0f;
+    g_opacity = float(std::clamp(int(Percent(g_opacity)) + step * 5, 10, 100)) / 100.0f;
     SaveLayout();
 }
 
