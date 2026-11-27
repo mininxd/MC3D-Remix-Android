@@ -45,6 +45,7 @@ void StepOpacity(int step);
 uint32_t ControlsSize();
 void StepSize(int step);
 void EditLayout();
+void ResetLayout();
 const char* SkinName();
 void StepSkin(int step);
 const char* StickModeName();
@@ -155,7 +156,8 @@ enum RowId { kRenderResolution, kMaxFps, kVsync, kFpsCounter, kAniso, kReloadBlu
              kCheckUpdates, kTouchSensitivity, kLeftDeadzone, kRightDeadzone, kLeftSensitivity, kRightSensitivity,
              kScreenFilter, kGyroInvertX, kGyroInvertY, kTouchSkin, kCredit, kBloom,
              kFog, kAntiAliasing, kMotionBlur, kReflections, kTouchStick, kDynamicRes, kDynamicTarget, kDynamicMin,
-             kDynamicMax, kDynamicHold, kAutoUpdate, kDebugLogging, kBackupSaves, kRestoreSaves };
+             kDynamicMax, kDynamicHold, kAutoUpdate, kDebugLogging, kBackupSaves, kRestoreSaves,
+             kTouchControls, kTouchReset };
 
 using rows::Kind;
 using rows::Row;
@@ -182,20 +184,14 @@ constexpr Row kQualityRows[] = {
     {Kind::Value, kDebugLogging, "Debug Logging"},
 };
 
+// native Touchscreen Options rows
 constexpr Row kTouchRows[] = {
-    {Kind::Heading, -1, "TOUCH"},
-    {Kind::Value, kTouchSensitivity, "TOUCH SENSITIVITY"},
-    {Kind::Value, kTouchLayout, "CONTROLS LAYOUT"},
-    {Kind::Value, kTouchOpacity, "CONTROLS OPACITY"},
-    {Kind::Value, kTouchSize, "CONTROLS SIZE"},
-    {Kind::Value, kTouchSkin, "BUTTON STYLE"},
-    {Kind::Value, kTouchStick, "ANALOG STICK"},
-    {Kind::Value, kTouchEdit, "EDIT CONTROLS POSITION"},
-    {Kind::Heading, -1, "MOTION CONTROLS"},
-    {Kind::Value, kGyro, "GYROSCOPE"},
-    {Kind::Value, kGyroSensitivity, "GYRO SENSITIVITY"},
-    {Kind::Value, kGyroInvertX, "GYRO INVERT X"},
-    {Kind::Value, kGyroInvertY, "GYRO INVERT Y"},
+    {Kind::Value, kTouchControls, "Touch Controls"},
+    {Kind::Value, kTouchSkin, "Button Style"},
+    {Kind::Value, kTouchOpacity, "Controls Opacity"},
+    {Kind::Value, kTouchSize, "Controls Size"},
+    {Kind::Action, kTouchEdit, "Edit Controls Layout"},
+    {Kind::Action, kTouchReset, "Reset Controls Layout"},
 };
 
 // on the game's control setup page, under its own rows
@@ -280,6 +276,7 @@ bool* ToggleFlag(Settings& s, int id) {
         case kFog: return &o.fog;
         case kSkipIntros: return &o.skip_intros;
         case kDebugLogging: return &o.debug_logging;
+        case kTouchControls: return &o.touch_controls;
         case kInvertMouse: return &o.invert_mouse;
         case kHoldAim: return &o.hold_aim;
         case kDynamicRes: return &o.dynamic_resolution;
@@ -454,10 +451,22 @@ void StepInputRow(int id, int step, char (&text)[64]) {
             std::snprintf(text, sizeof(text), "%s", touch::StickModeName());
             break;
         case kTouchEdit:
-            // any step opens the editor over the screen
-            if (step) touch::EditLayout();
-            std::snprintf(text, sizeof(text), "OPEN");
+            // any click opens the interactive touch layout editor over the screen
+            if (step) {
+                o.touch_controls = true;
+                touch::EditLayout();
+            }
+            std::snprintf(text, sizeof(text), "Open");
             break;
+        case kTouchReset: {
+            static bool s_reset_done = false;
+            if (step) {
+                touch::ResetLayout();
+                s_reset_done = true;
+            }
+            std::snprintf(text, sizeof(text), "%s", s_reset_done ? "Done!" : "Default");
+            break;
+        }
         case kCheckUpdates:
             // any step asks; the answer comes in a dialog over the game
             if (step) host::CheckForUpdates();
@@ -614,7 +623,6 @@ std::string KeyText(std::string keys) {
     return keys;
 }
 
-constexpr int kTouchPage = 1;
 constexpr int kGeneralPage = 2;
 constexpr int kKeyboardPage = 3;
 constexpr int kCreditsPage = 5;
@@ -685,7 +693,7 @@ const rows::Row* rows::Page(int page, size_t* count) {
         *count = CreditRows().size();
         return CreditRows().data();
     }
-    if (page == kTouchPage) {
+    if (page == rows::kTouchPage) {
         *count = std::size(kTouchRows);
         return kTouchRows;
     }

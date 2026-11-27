@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Brake / Reverse (Filled White)">
+  <defs>
+    <mask id="m-brake" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect x="0" y="0" width="512" height="512" fill="#FFFFFF"/>
+      <g transform="scale(4)">
+    <rect x="31" y="40" width="66" height="10" rx="5" fill="#000000"/>
+    <rect x="31" y="59" width="66" height="10" rx="5" fill="#000000"/>
+    <rect x="31" y="78" width="66" height="10" rx="5" fill="#000000"/>
+      </g>
+    </mask>
+  </defs>
+  <g id="btn-brake">
+    <g mask="url(#m-brake)">
+      <g transform="scale(4)">
+        <rect x="12" y="24" width="104" height="80" rx="22" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="6"/>
+      </g>
+    </g>
+  </g>
+</svg>

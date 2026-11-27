@@ -21,6 +21,7 @@ struct Row {
     const char* label;
 };
 inline constexpr int kDisplayPage = 0;
+inline constexpr int kTouchPage = 1;
 inline constexpr int kQualityPage = 4;
 
 // 0 display, 1 touch controls, 2 general, 3 mouse and keyboard, 4 quality, 5 credits

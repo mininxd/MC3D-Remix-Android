@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Brake / Reverse (Outline)">
+  <g id="btn-brake" transform="scale(4)">
+    <rect x="12" y="24" width="104" height="80" rx="22" fill="none" stroke="#FFFFFF" stroke-width="6"/>
+    <rect x="31" y="40" width="66" height="10" rx="5" fill="#FFFFFF"/>
+    <rect x="31" y="59" width="66" height="10" rx="5" fill="#FFFFFF"/>
+    <rect x="31" y="78" width="66" height="10" rx="5" fill="#FFFFFF"/>
+  </g>
+</svg>

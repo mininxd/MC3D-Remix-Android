@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Start Button (Filled Dark)">
+  <defs>
+    <mask id="m-start" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect x="0" y="0" width="512" height="512" fill="#FFFFFF"/>
+      <g transform="scale(4)">
+    <circle cx="64" cy="64" r="39" fill="none" stroke="#000000" stroke-width="3.5"/>
+    <path d="M 55 47 L 82 64 L 55 81 Z" fill="#000000" stroke="#000000" stroke-width="8" stroke-linejoin="round"/>
+      </g>
+    </mask>
+  </defs>
+  <g id="btn-start">
+    <g mask="url(#m-start)">
+      <g transform="scale(4)">
+        <circle cx="64" cy="64" r="52" fill="#18181B" stroke="#18181B" stroke-width="6"/>
+      </g>
+    </g>
+  </g>
+</svg>

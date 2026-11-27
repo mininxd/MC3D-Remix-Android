@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Steer Left (Outline)">
+  <g id="btn-steer-left" transform="scale(4)">
+    <rect x="12" y="12" width="104" height="104" rx="28" fill="none" stroke="#FFFFFF" stroke-width="6"/>
+        <path d="M 41.0 64.0 L 77.0 42.0 L 77.0 86.0 Z" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="10" stroke-linejoin="round"/>
+  </g>
+</svg>

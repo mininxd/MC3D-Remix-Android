@@ -33,11 +33,13 @@ constexpr uint32_t kMenuMgrGlobalPtr = 0x0050F148u;
 constexpr uint32_t kFlashRootGlobalPtr = 0x0050F15Cu;
 constexpr uint32_t kFlashVarTitle = 0x0045B9F8u;        // "title"
 constexpr uint32_t kFlashVarSectionName = 0x0045772Cu;  // "sectionName"
+constexpr uint32_t kActionAudioOptions = 0x09u;
 constexpr uint32_t kActionCheatCodes = 0x32u;
 constexpr uint32_t kActionGameOptions = 0x41u;
 constexpr uint32_t kActionDisplayOptions = 0x7F4Bu;
 constexpr uint32_t kActionQualityOptions = 0x7F4Cu;
 constexpr uint32_t kActionCheatOptions = 0x7F4Du;
+constexpr uint32_t kActionTouchOptions = 0x7F4Eu;
 constexpr uint32_t kFnMenuAction = 0x00163830u;
 constexpr uint32_t kFnMainMenuNetworking = 0x0018C5A0u;
 constexpr uint32_t kFnSettingCallback = 0x0018DB10u;
@@ -51,6 +53,7 @@ enum class NativePage : int {
     Display = 1,
     Quality = 2,
     Cheats = 3,
+    Touch = 4,
 };
 
 std::atomic<int> g_native_page{static_cast<int>(NativePage::None)};
@@ -59,7 +62,12 @@ thread_local bool g_in_main_menu_populate = false;
 thread_local bool g_skipped_networking = false;
 
 thread_local bool g_in_options_populate = false;
+thread_local uint32_t g_options_shift = 0u;
+thread_local bool g_inserted_audio_subitems = false;
 thread_local bool g_inserted_cheat_options = false;
+thread_local uint32_t g_audio_handle = 0u;
+thread_local uint32_t g_audio_list_va = 0u;
+thread_local uint32_t g_audio_owner_va = 0u;
 thread_local uint32_t g_cheat_codes_handle = 0u;
 thread_local uint32_t g_cheat_codes_list_va = 0u;
 thread_local uint32_t g_cheat_codes_owner_va = 0u;
@@ -78,13 +86,21 @@ struct ScopedMainMenuPopulate {
 struct ScopedOptionsMenuPopulate {
     ScopedOptionsMenuPopulate() {
         g_in_options_populate = true;
+        g_options_shift = 0u;
+        g_inserted_audio_subitems = false;
         g_inserted_cheat_options = false;
+        g_audio_handle = 0u;
+        g_audio_list_va = 0u;
+        g_audio_owner_va = 0u;
         g_cheat_codes_handle = 0u;
         g_cheat_codes_list_va = 0u;
         g_cheat_codes_owner_va = 0u;
     }
     ~ScopedOptionsMenuPopulate() {
         g_in_options_populate = false;
+        g_audio_handle = 0u;
+        g_audio_list_va = 0u;
+        g_audio_owner_va = 0u;
         g_cheat_codes_handle = 0u;
         g_cheat_codes_list_va = 0u;
         g_cheat_codes_owner_va = 0u;
@@ -246,13 +262,16 @@ void AppendRootOptionItem(X86Context& ctx, uint8_t* base, uint32_t list_va, uint
     saved.Restore(ctx);
 }
 
-void AppendCustomOptionsItems(X86Context& ctx, uint8_t* base) {
+void AppendCustomOptionsFallback(X86Context& ctx, uint8_t* base) {
     uint32_t owner_va = 0u;
     const uint32_t list_va = GetOptionScreenList(&owner_va);
     if (!list_va || !owner_va || !game::safe_mem::CanAccess(owner_va, 4u)) return;
 
-    AppendRootOptionItem(ctx, base, list_va, owner_va, kActionDisplayOptions, "Display Options");
-    AppendRootOptionItem(ctx, base, list_va, owner_va, kActionQualityOptions, "Quality Options");
+    if (!g_inserted_audio_subitems) {
+        AppendRootOptionItem(ctx, base, list_va, owner_va, kActionDisplayOptions, "Display Options");
+        AppendRootOptionItem(ctx, base, list_va, owner_va, kActionQualityOptions, "Quality Options");
+        AppendRootOptionItem(ctx, base, list_va, owner_va, kActionTouchOptions, "Touchscreen Options");
+    }
     if (!g_inserted_cheat_options && game::cheats::HasAnyUnlockedCheat()) {
         AppendRootOptionItem(ctx, base, list_va, owner_va, kActionCheatOptions, "Cheat Options");
     }
@@ -294,7 +313,9 @@ void PopulateNativeOptionsList(X86Context& ctx, uint8_t* base, uint32_t screen_v
             g_entries[g_entry_count++] = entry;
         }
     } else {
-        const int app_page = (page == NativePage::Quality) ? app::rows::kQualityPage : app::rows::kDisplayPage;
+        int app_page = app::rows::kDisplayPage;
+        if (page == NativePage::Quality) app_page = app::rows::kQualityPage;
+        else if (page == NativePage::Touch) app_page = app::rows::kTouchPage;
         size_t total = 0;
         const app::rows::Row* rows = app::rows::Page(app_page, &total);
         for (size_t i = 0; i < total && g_entry_count < list_cap; ++i) {
@@ -368,15 +389,17 @@ void ApplyNativeScreenTitle(X86Context& ctx, uint8_t* base, NativePage page) {
 
     const uint32_t flash_root_va = game::safe_mem::Read32(kFlashRootGlobalPtr, 0u);
     // In Main Menu (bg_options.xbck), the narrow uppercase title slot wraps two-word titles.
-    // Use single-word "Display" / "Quality" / "Cheats" in Main Menu and full titles in Pause Menu.
+    // Use single-word titles in Main Menu and full titles in Pause Menu.
     const char* title = nullptr;
     if (flash_root_va) {
         if (page == NativePage::Display) title = "Display";
         else if (page == NativePage::Quality) title = "Quality";
+        else if (page == NativePage::Touch) title = "Touch";
         else title = "Cheats";
     } else {
         if (page == NativePage::Display) title = "Display Options";
         else if (page == NativePage::Quality) title = "Quality Options";
+        else if (page == NativePage::Touch) title = "Touchscreen Options";
         else title = "Cheat Options";
     }
 
@@ -426,7 +449,8 @@ extern "C" void sub_0018C770(X86Context& ctx, uint8_t* base) {
 
 // Intercept CMenuList::AddItem (sub_00348BE0: __thiscall ret 0x1C):
 //  - Main Menu: filter Networking row and keep indices contiguous.
-//  - Options Menu: detect CM_Cheat_Codes (0x32) so Cheat Options is inserted directly underneath it.
+//  - Options Menu: track Audio Options (0x09) and Cheat Codes (0x32) so custom submenus
+//    insert cleanly underneath them with contiguous row indices.
 extern "C" void sub_00348BE0(X86Context& ctx, uint8_t* base) {
     if (g_in_main_menu_populate) {
         const uint32_t cb_fn = game::safe_mem::Read32(ctx.esp + 20u, 0u);
@@ -443,18 +467,24 @@ extern "C" void sub_00348BE0(X86Context& ctx, uint8_t* base) {
             }
         }
     } else if (g_in_options_populate) {
-        if (g_inserted_cheat_options && game::safe_mem::CanAccess(ctx.esp + 4u, 4u)) {
-            X86_MEM32(ctx.esp + 4u) = X86_MEM32(ctx.esp + 4u) + 1u;
+        if (g_options_shift > 0u && game::safe_mem::CanAccess(ctx.esp + 4u, 4u)) {
+            X86_MEM32(ctx.esp + 4u) = X86_MEM32(ctx.esp + 4u) + g_options_shift;
         }
         const uint32_t cb_obj = game::safe_mem::Read32(ctx.esp + 16u, 0u);
         const uint32_t cb_fn = game::safe_mem::Read32(ctx.esp + 20u, 0u);
         const uint32_t stored_param = game::safe_mem::Read32(ctx.esp + 24u, 0u);
         const uint32_t list_va = ctx.ecx;
         __imp__sub_00348BE0(ctx, base);
-        if (cb_fn == kFnMenuAction && stored_param == kActionCheatCodes && ctx.eax != 0u) {
-            g_cheat_codes_handle = ctx.eax;
-            g_cheat_codes_list_va = list_va;
-            g_cheat_codes_owner_va = cb_obj;
+        if (cb_fn == kFnMenuAction && ctx.eax != 0u) {
+            if (stored_param == kActionAudioOptions) {
+                g_audio_handle = ctx.eax;
+                g_audio_list_va = list_va;
+                g_audio_owner_va = cb_obj;
+            } else if (stored_param == kActionCheatCodes) {
+                g_cheat_codes_handle = ctx.eax;
+                g_cheat_codes_list_va = list_va;
+                g_cheat_codes_owner_va = cb_obj;
+            }
         }
         return;
     }
@@ -463,7 +493,9 @@ extern "C" void sub_00348BE0(X86Context& ctx, uint8_t* base) {
 
 // Intercept CMenuList::SetItemText (sub_00348D70: __thiscall ret 0x0C):
 //  - Main Menu: skip label assignment for filtered Networking handle.
-//  - Options Menu: immediately insert "Cheat Options" directly after "Cheat Codes" when unlocked.
+//  - Options Menu:
+//      * Right after Audio Options -> insert Display Options, Quality Options, Touchscreen Options.
+//      * Right after Cheat Codes -> insert Cheat Options (when unlocked).
 extern "C" void sub_00348D70(X86Context& ctx, uint8_t* base) {
     const uint32_t handle = game::safe_mem::Read32(ctx.esp + 4u, 0u);
     if (g_in_main_menu_populate && handle == 0u) {
@@ -471,6 +503,21 @@ extern "C" void sub_00348D70(X86Context& ctx, uint8_t* base) {
         return;
     }
     __imp__sub_00348D70(ctx, base);
+
+    if (g_in_options_populate && !g_inserted_audio_subitems &&
+        g_audio_handle != 0u && handle == g_audio_handle) {
+        g_audio_handle = 0u;
+        if (g_audio_list_va && g_audio_owner_va) {
+            AppendRootOptionItem(ctx, base, g_audio_list_va, g_audio_owner_va,
+                                 kActionDisplayOptions, "Display Options");
+            AppendRootOptionItem(ctx, base, g_audio_list_va, g_audio_owner_va,
+                                 kActionQualityOptions, "Quality Options");
+            AppendRootOptionItem(ctx, base, g_audio_list_va, g_audio_owner_va,
+                                 kActionTouchOptions, "Touchscreen Options");
+            g_inserted_audio_subitems = true;
+            g_options_shift += 3u;
+        }
+    }
 
     if (g_in_options_populate && !g_inserted_cheat_options &&
         g_cheat_codes_handle != 0u && handle == g_cheat_codes_handle &&
@@ -480,6 +527,7 @@ extern "C" void sub_00348D70(X86Context& ctx, uint8_t* base) {
             AppendRootOptionItem(ctx, base, g_cheat_codes_list_va, g_cheat_codes_owner_va,
                                  kActionCheatOptions, "Cheat Options");
             g_inserted_cheat_options = true;
+            g_options_shift += 1u;
         }
     }
 }
@@ -491,41 +539,43 @@ extern "C" void sub_0018CAD0(X86Context& ctx, uint8_t* base) {
     ctx.esp += 4u;  // __thiscall ret 0
 }
 
-// Override Options menu populate: insert Cheat Options right after Cheat Codes (when unlocked)
-// and append Display Options and Quality Options items.
+// Override Options menu populate: insert Display/Quality/Touchscreen Options underneath Audio Options,
+// and Cheat Options underneath Cheat Codes (or at bottom in Pause Menu) when unlocked.
 extern "C" void sub_0018D610(X86Context& ctx, uint8_t* base) {
     g_native_page.store(static_cast<int>(NativePage::None));
-    bool inserted_inline = false;
+    bool inserted_audio = false;
+    bool inserted_cheat = false;
     {
         ScopedOptionsMenuPopulate guard;
         __imp__sub_0018D610(ctx, base);
-        inserted_inline = g_inserted_cheat_options;
+        inserted_audio = g_inserted_audio_subitems;
+        inserted_cheat = g_inserted_cheat_options;
     }
-    g_inserted_cheat_options = inserted_inline;
-    AppendCustomOptionsItems(ctx, base);
+    g_inserted_audio_subitems = inserted_audio;
+    g_inserted_cheat_options = inserted_cheat;
+    AppendCustomOptionsFallback(ctx, base);
+    g_inserted_audio_subitems = false;
     g_inserted_cheat_options = false;
 }
 
-// Route Display Options, Quality Options, and Cheat Options through mcMenuGameOptions host screen (0x41).
+// Route custom Options pages through mcMenuGameOptions host screen (0x41).
 extern "C" void sub_00163830(X86Context& ctx, uint8_t* base) {
     const uint32_t action = game::safe_mem::Read32(ctx.esp + 4u, 0u);
     if (action == kActionDisplayOptions) {
         g_native_page.store(static_cast<int>(NativePage::Display));
-        if (game::safe_mem::CanAccess(ctx.esp + 4u, 4u)) {
-            X86_MEM32(ctx.esp + 4u) = kActionGameOptions;
-        }
+        if (game::safe_mem::CanAccess(ctx.esp + 4u, 4u)) X86_MEM32(ctx.esp + 4u) = kActionGameOptions;
         LOGI("[OK] options_menu: entering native Display Options screen");
     } else if (action == kActionQualityOptions) {
         g_native_page.store(static_cast<int>(NativePage::Quality));
-        if (game::safe_mem::CanAccess(ctx.esp + 4u, 4u)) {
-            X86_MEM32(ctx.esp + 4u) = kActionGameOptions;
-        }
+        if (game::safe_mem::CanAccess(ctx.esp + 4u, 4u)) X86_MEM32(ctx.esp + 4u) = kActionGameOptions;
         LOGI("[OK] options_menu: entering native Quality Options screen");
+    } else if (action == kActionTouchOptions) {
+        g_native_page.store(static_cast<int>(NativePage::Touch));
+        if (game::safe_mem::CanAccess(ctx.esp + 4u, 4u)) X86_MEM32(ctx.esp + 4u) = kActionGameOptions;
+        LOGI("[OK] options_menu: entering native Touchscreen Options screen");
     } else if (action == kActionCheatOptions) {
         g_native_page.store(static_cast<int>(NativePage::Cheats));
-        if (game::safe_mem::CanAccess(ctx.esp + 4u, 4u)) {
-            X86_MEM32(ctx.esp + 4u) = kActionGameOptions;
-        }
+        if (game::safe_mem::CanAccess(ctx.esp + 4u, 4u)) X86_MEM32(ctx.esp + 4u) = kActionGameOptions;
         LOGI("[OK] options_menu: entering native Cheat Options screen");
     } else if (action == kActionGameOptions) {
         g_native_page.store(static_cast<int>(NativePage::None));
@@ -539,7 +589,7 @@ extern "C" void sub_00163C40(X86Context& ctx, uint8_t* base) {
     __imp__sub_00163C40(ctx, base);
 }
 
-// Populate mcMenuGameOptions with Display, Quality, or Cheat Options rows when active.
+// Populate mcMenuGameOptions with Display, Quality, Touchscreen, or Cheat Options rows when active.
 extern "C" void sub_0018DD50(X86Context& ctx, uint8_t* base) {
     const auto page = static_cast<NativePage>(g_native_page.load());
     if (page == NativePage::None) {

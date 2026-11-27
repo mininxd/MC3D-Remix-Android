@@ -1,12 +1,16 @@
-// Android's input on port 0 beside the controllers: the touch controls, and a keyboard and mouse when one is plugged
-// in. It is src/common/mouse_keyboard.h: the game's hooks (mouse look, the menu cursor, the key prompts, the bindings
-// on the options pages) read it. SDL's keys arrive as the virtual keys of common/keys.h.
-//
-// In play the left of the screen is a stick, a drag on the right turns the view as the mouse does and the buttons
-// press the controller's. In a menu a touch is the mouse cursor: a tap clicks, a drag on a slider slides it.
+// Android touch controls, keyboard/mouse bridge, SVG skin rasterizer (LunaSVG), and interactive layout editor.
+// Context-aware minimal mobile racing HUD for Midnight Club 3: DUB Edition Remix:
+//   - Main / Pause Menu : D-Pad + OK + Back
+//   - Garage            : D-Pad Left/Right + OK + Back (+ vertical swipe for upgrade lists)
+//   - Gameplay          : 1:2 Steer Left/Right (with thumb-slide), 1:2 Gas, 2:3 Brake, Handbrake,
+//                         dynamic NOS (only when purchased), dynamic Slipstream Turbo (only when filled & speed >= 10 km/h),
+//                         dynamic Special Ability (Zone/Agro/Roar), minimal top bar, and bottom-center Radio swipe.
 #include "common/mouse_keyboard.h"
 
 #include <SDL3/SDL.h>
+#include <imgui.h>
+#include <lunasvg.h>
+#include <toml++/toml.hpp>
 
 #include <algorithm>
 #include <array>
@@ -20,12 +24,10 @@
 #include <fstream>
 #include <iterator>
 #include <mutex>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
-
-#include <imgui.h>
-#include <toml++/toml.hpp>
 
 #include "app/app.h"
 #include "common/aspect.h"
@@ -34,6 +36,7 @@
 #include "common/options.h"
 #include "common/translations.h"
 #include "core/log.h"
+#include "game/touch_context.h"
 #include "host.h"
 
 namespace input {
@@ -42,29 +45,27 @@ namespace {
 
 std::atomic<int> g_dx{0};
 std::atomic<int> g_dy{0};
-std::atomic<int> g_touch_dx{0};  // the touch screen's look, scaled by its own sensitivity
+std::atomic<int> g_touch_dx{0};
 std::atomic<int> g_touch_dy{0};
-std::atomic<uint64_t> g_take_ms{0};     // TakeMouse, asked every tick in play
-std::atomic<uint64_t> g_capture_ms{0};  // PressedKey
+std::atomic<uint64_t> g_take_ms{0};
+std::atomic<uint64_t> g_capture_ms{0};
 std::atomic<bool> g_settle{false};
 std::atomic<uint64_t> g_confirm_until{0};
 std::atomic<bool> g_menu{false};
-std::atomic<bool> g_keyboard{false};  // the keyboard or mouse used last
-std::atomic<bool> g_touch{true};      // the touch controls used last, not a controller or the keys
+std::atomic<bool> g_keyboard{false};
+std::atomic<bool> g_touch{true};
 std::atomic<bool> g_text{false};
-std::atomic<bool> g_text_shown{false};  // the on-screen keyboard, main thread
+std::atomic<bool> g_text_shown{false};
 std::mutex g_chars_lock;
-std::u16string g_chars;  // typed, not yet taken
+std::u16string g_chars;
 constexpr size_t kMaxChars = 64;
 std::atomic<int> g_wheel{0};
 constexpr uint64_t kPlayMs = 250;
 constexpr uint64_t kTapMs = 80;
-constexpr uint64_t kCaptureMs = 250;  // PressedKey asked this recently: a key capture is up
-// The wheel binds as two keys, codes no key has. A notch holds what is bound to it for one tap.
+constexpr uint64_t kCaptureMs = 250;
 constexpr int kWheelUp = 0x0E;
 constexpr int kWheelDown = 0x0F;
-std::atomic<uint64_t> g_wheel_ms[2] = {};  // the last notch up, down
-// the keys and mouse buttons held, by virtual key
+std::atomic<uint64_t> g_wheel_ms[2] = {};
 std::array<std::atomic<bool>, 256> g_down{};
 
 uint64_t NowMs() {
@@ -72,8 +73,6 @@ uint64_t NowMs() {
     return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(since).count()) + 1;
 }
 
-// what an action presses: 0-7 analog A B X Y black white LT RT, 8-15 the buttons bits, 16-19 the move keys,
-// 20-23 the look keys
 struct Target {
     Action action;
     int button;
@@ -85,27 +84,27 @@ constexpr int kStart = 12;
 constexpr int kFirstMoveKey = 16;
 constexpr int kFirstLookKey = 20;
 constexpr int kStickMax = 32767;
-// the game's default controller layout, as src/common/mouse_keyboard.cpp has it
+
 constexpr Target kActions[] = {
     {{"move_forward", "MOVE FORWARD", "W"}, 16},
     {{"move_back", "MOVE BACK", "S"}, 17},
     {{"strafe_left", "STRAFE LEFT", "A"}, 18},
     {{"strafe_right", "STRAFE RIGHT", "D"}, 19},
     {{"walk", "WALK", "Alt"}, kWalk},
-    {{"crouch", "CROUCH", "C"}, 14},
-    {{"fire", "FIRE", "LMB"}, 7},
-    {{"aim", "AIM", "RMB"}, 15},
-    {{"melee", "MELEE", "V"}, 1},
-    {{"reload", "RELOAD", "R"}, 0},
-    {{"interact", "INTERACT", "F"}, 2},
-    {{"grenade", "THROW GRENADE", "G"}, 6},
-    {{"weapon_up", "CHANGE WEAPON UP", "E,Wheel Up"}, 11},
-    {{"weapon_down", "CHANGE WEAPON DOWN", "Q,Wheel Down"}, 10},
-    {{"suppressor", "TOGGLE SUPPRESSOR", "T"}, 3},
-    {{"firing_mode", "FIRING MODE / SCOPE ZOOM", "X"}, 8},
-    {{"health_pack", "HEALTH PACK", "H"}, 9},
-    {{"next_track", "NEXT MUSIC TRACK", "N"}, 5},
-    {{"back", "OBJECTIVES", "Tab"}, 13},
+    {{"crouch", "SPECIAL", "C"}, 14},
+    {{"fire", "GAS", "LMB"}, 7},
+    {{"aim", "LOOK", "RMB"}, 15},
+    {{"melee", "WEIGHT TRANSFER", "V"}, 1},
+    {{"reload", "HANDBRAKE", "R"}, 0},
+    {{"interact", "NITRO", "F"}, 2},
+    {{"grenade", "BRAKE", "G"}, 6},
+    {{"weapon_up", "RADIO NEXT", "E,Wheel Up"}, 11},
+    {{"weapon_down", "RADIO PREV", "Q,Wheel Down"}, 10},
+    {{"suppressor", "LOOK BACK", "T"}, 3},
+    {{"firing_mode", "DPAD UP", "X"}, 8},
+    {{"health_pack", "DPAD DOWN", "H"}, 9},
+    {{"next_track", "FLASH LIGHTS", "N"}, 5},
+    {{"back", "MAP", "Tab"}, 13},
     {{"pause", "PAUSE MENU", "Escape"}, 12},
     {{"hide_hud", "TOGGLE HUD", ""}, kHostKey},
     {{"settings_panel", "SETTINGS PANEL", "F10"}, kHostKey},
@@ -121,6 +120,7 @@ constexpr size_t HostAction(std::string_view id) {
     return i;
 }
 constexpr size_t kHudAction = HostAction("hide_hud");
+
 struct Name {
     int vk;
     const char* name;
@@ -148,8 +148,6 @@ constexpr Name kNames[] = {
     {VK_OEM_6, "RBracket"}, {VK_OEM_5, "Backslash"}, {VK_OEM_1, "Semicolon"}, {VK_OEM_7, "Quote"},
     {VK_OEM_COMMA, "Comma"}, {VK_OEM_PERIOD, "Period"}, {VK_OEM_2, "Slash"},
 };
-
-// not bindable: in the game's menus the arrows are the dpad, Enter accepts, Backspace backs out
 constexpr int kFixed[] = {VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_RETURN, VK_BACK};
 
 using Binds = std::array<std::vector<int>, kCount>;
@@ -210,7 +208,6 @@ bool HostKeyBound(size_t action, int vk) {
     return std::find(b.begin(), b.end(), vk) != b.end();
 }
 
-// keys held from before the game had the input wait for release; true once none is held
 bool UpdateSettle(const Binds& binds) {
     if (!g_settle) return true;
     for (auto& b : binds)
@@ -225,7 +222,7 @@ bool UpdateSettle(const Binds& binds) {
 struct Held {
     bool used = false;
     bool walk = false;
-    int stick[8] = {};  // move forward back left right, look up down left right
+    int stick[8] = {};
 };
 
 Held PressActions(const Binds& binds, bool play, Pad& p) {
@@ -260,7 +257,6 @@ Held PressActions(const Binds& binds, bool play, Pad& p) {
     return held;
 }
 
-// SDL's scancodes as the virtual keys (common/keys.h) the bindings name, by position as on a US keyboard
 int VkOf(SDL_Scancode s) {
     if (s >= SDL_SCANCODE_A && s <= SDL_SCANCODE_Z) return 'A' + (s - SDL_SCANCODE_A);
     if (s >= SDL_SCANCODE_1 && s <= SDL_SCANCODE_9) return '1' + (s - SDL_SCANCODE_1);
@@ -376,9 +372,7 @@ void SeenPad(const Pad& p) {
 }
 
 void SetMenu(bool menu) { g_menu = menu; }
-
 bool KeyboardActive() { return g_keyboard; }
-
 void TapConfirm() { g_confirm_until = NowMs() + kTapMs; }
 
 void SetTextEntry(bool on) {
@@ -398,11 +392,9 @@ std::u16string TakeChars() {
     return std::exchange(g_chars, {});
 }
 
-// a notch a call: notches that came together (a swipe's) step one menu tick each
 int TakeWheel() {
     int w = g_wheel.load();
-    while (w && !g_wheel.compare_exchange_weak(w, w > 0 ? w - 1 : w + 1)) {
-    }
+    while (w && !g_wheel.compare_exchange_weak(w, w > 0 ? w - 1 : w + 1)) {}
     return w > 0 ? 1 : w < 0 ? -1 : 0;
 }
 
@@ -495,179 +487,226 @@ bool HudKey(int vk) { return HostKeyBound(kHudAction, vk); }
 
 }  // namespace input
 
-
-// the touch controls
+// ============================================================================
+// MC3D Remix Mobile Touch Controls + SVG Skin Atlas (LunaSVG)
+// ============================================================================
 namespace touch {
 
 namespace {
 
 using input::NowMs;
 
-// what a finger on the screen does
-enum class Role : uint8_t { None, Stick, Look, Button, Cursor, Drag, Pinch };
+enum class Role : uint8_t { None, Button, RadioSwipe, GarageSwipe, Drag, Pinch };
 
-// a control of the touch layout: what it shows and presses, on the controller (analog 0-7, button bits from 8) or on
-// the host. Where it sits is the layout's, which the player edits and picks presets for
-enum : int { kGyro = -2, kPanel = -1, kAnalogA = 0, kAnalogB = 1, kAnalogX = 2, kAnalogY = 3, kAnalogLT = 6, kAnalogRT = 7 };
-constexpr int kBit = 8;  // kBit + n: buttons bit n (dpad up down left right, start, back, left thumb, right thumb)
-enum class Icon : uint8_t { Bullet, Scope, Mode, Reload, Crouch, Knife, Hand, Grenade, Swap, Health, Map, Pause, Gear, Back, Gyro, Move, Suppressor, Up, Down, Left, Right, Zoom, Enter };
-// Play while the player has the controls, Game outside the menus (cutscenes too), Menus in the menus and options,
-// Always in both
-enum class When : uint8_t { Play, Menus, Game, Always };
+// Controller press targets
+enum : int {
+    kSteerLeft = -10,
+    kSteerRight = -11,
+    kAnalogA = 0,
+    kAnalogB = 1,
+    kAnalogX = 2,
+    kAnalogY = 3,
+    kAnalogBlack = 4,
+    kAnalogWhite = 5,
+    kAnalogLT = 6,
+    kAnalogRT = 7,
+};
+constexpr int kBit = 8;  // 8=DUp, 9=DDown, 10=DLeft, 11=DRight, 12=Start, 13=Back, 14=L3, 15=R3
+
+enum class SvgIcon : uint8_t {
+    SteerLeft = 0,
+    SteerRight,
+    Gas,
+    Brake,
+    Handbrake,
+    Nitro,
+    Turbo,
+    Special,
+    SpecialZone,
+    SpecialAgro,
+    SpecialRoar,
+    Start,
+    Camera,
+    Map,
+    FlashLights,
+    LookBack,
+    DpadUp,
+    DpadDown,
+    DpadLeft,
+    DpadRight,
+    Ok,
+    Back,
+    Count,
+};
+
+constexpr size_t kSvgIconCount = static_cast<size_t>(SvgIcon::Count);
+
+struct SvgSpec {
+    const char* file;     // basename without .svg
+    uint32_t cell_w;      // rasterized width in atlas
+    uint32_t cell_h;      // rasterized height in atlas
+    float aspect_w_over_h; // drawn W/H aspect ratio
+};
+
+// Rectangular aspect ratios matching user's mobile UX spec:
+//   steer-left / steer-right / gas : 1:2 (W:H -> 0.50)
+//   brake                          : 2:3 (W:H -> 0.667)
+//   all other icons                : 1:1 (W:H -> 1.00)
+constexpr SvgSpec kSvgSpecs[kSvgIconCount] = {
+    {"steer-left",   128, 256, 0.50f},
+    {"steer-right",  128, 256, 0.50f},
+    {"gas",          128, 256, 0.50f},
+    {"brake",        170, 256, 2.0f / 3.0f},
+    {"handbrake",    192, 192, 1.0f},
+    {"nitro",        192, 192, 1.0f},
+    {"turbo",        192, 192, 1.0f},
+    {"special",      192, 192, 1.0f},
+    {"special-zone", 192, 192, 1.0f},
+    {"special-agro", 192, 192, 1.0f},
+    {"special-roar", 192, 192, 1.0f},
+    {"start",        192, 192, 1.0f},
+    {"camera",       192, 192, 1.0f},
+    {"map",          192, 192, 1.0f},
+    {"flash-lights", 192, 192, 1.0f},
+    {"look-back",    192, 192, 1.0f},
+    {"dpad-up",      192, 192, 1.0f},
+    {"dpad-down",    192, 192, 1.0f},
+    {"dpad-left",    192, 192, 1.0f},
+    {"dpad-right",   192, 192, 1.0f},
+    {"ok",           192, 192, 1.0f},
+    {"back",         192, 192, 1.0f},
+};
+
+enum Skin : uint32_t { kOutline = 0, kFilledWhite = 1, kFilledDark = 2, kSkins = 3 };
+constexpr const char* kSkinDirs[kSkins] = {"outline", "filled-white", "filled-dark"};
+constexpr const char* kSkinNames[kSkins] = {"Outline", "Filled White", "Filled Dark"};
+
+enum class When : uint8_t {
+    Play,           // Always in active driving gameplay
+    PlayNos,        // Dynamic: gameplay only when NOS purchased (max_nos > 0)
+    PlayTurbo,      // Dynamic: gameplay only when slipstream filled AND speed >= 10 km/h
+    PlaySpecial,    // Dynamic: gameplay only when special ability ready
+    MainMenuOnly,   // Main Menu / Pause Menu only (hidden in Garage)
+    MenusAndGarage, // Main Menu / Pause Menu AND Garage
+};
+
 struct Button {
-    const char* id;     // its key in layout.toml
-    const char* label;  // in the layout editor
-    Icon icon;
+    const char* id;
+    const char* label;
+    SvgIcon icon;
     int press;
     When when;
-    bool look = false;  // a drag from it turns the view as well, as a fire button does
-    bool keep = false;  // never hidden: the way back out of the menus
+    float w_over_h;  // width / height ratio (0.50 = 1:2, 0.667 = 2:3, 1.0 = 1:1)
+    bool keep = false;
+    bool steer_pair = false;  // supports seamless left<->right thumb slide
 };
-// the layout is set in the game's options (Recomp Settings, TOUCH): its preset, opacity, size, and the editor that
-// moves the controls, see the functions at the end
-constexpr Button kButtons[] = {
-    {"fire", "Fire", Icon::Bullet, kAnalogRT, When::Play, true},
-    {"fire_left", "Fire (left)", Icon::Bullet, kAnalogRT, When::Play, true},
-    {"aim", "Aim", Icon::Scope, kBit + 7, When::Play},
-    {"mode", "Firing mode", Icon::Mode, kBit + 0, When::Play},
-    {"melee", "Melee", Icon::Knife, kAnalogB, When::Play},
-    {"use", "Use", Icon::Hand, kAnalogX, When::Play},
-    {"grenade", "Grenade", Icon::Grenade, kAnalogLT, When::Play},
-    {"reload", "Reload", Icon::Reload, kAnalogA, When::Play},
-    {"crouch", "Crouch", Icon::Crouch, kBit + 6, When::Play},
-    {"weapon", "Weapon", Icon::Swap, kBit + 3, When::Play},
-    {"health", "Health pack", Icon::Health, kBit + 1, When::Play},
-    {"map", "Objectives", Icon::Map, kBit + 5, When::Play},
-    {"pause", "Pause", Icon::Pause, kBit + 4, When::Game},
-    {"gyro", "Gyroscope", Icon::Gyro, kGyro, When::Play},
-    {"back", "Back", Icon::Back, kAnalogB, When::Menus, false, true},
-    {"suppressor", "Suppressor", Icon::Suppressor, kAnalogY, When::Play},
-    // a dpad in the menus and the options, where a tap on a row is hard to aim
-    {"dpad_up", "Up", Icon::Up, kBit + 0, When::Menus},
-    {"dpad_down", "Down", Icon::Down, kBit + 1, When::Menus},
-    {"dpad_left", "Left", Icon::Left, kBit + 2, When::Menus},
-    {"dpad_right", "Right", Icon::Right, kBit + 3, When::Menus},
-    // the settings panel over the game, where its cheats give any weapon; a tap again closes it
-    {"panel", "Panel", Icon::Gear, kPanel, When::Always},
-    // confirm in the menus, as a pad's A, where a tap on the row is hard to aim
-    {"enter", "Enter", Icon::Enter, kAnalogA, When::Menus},
-    // the firing mode's button again, beside use while a scope is up: the scope's level, X2 or X5, and a tap switches
-    {"zoom", "Scope zoom", Icon::Zoom, kBit + 0, When::Play},
-};
-constexpr size_t kZoomButton = std::size(kButtons) - 1;
-constexpr float kScoped = 0.6f;  // game::g_zoom under this is a scope's, not a rifle's sights
-constexpr float kScopeX5 = 0.36f;  // and under this its X5, between X2's 0.5 and X5's 0.25
-constexpr size_t kButtonCount = std::size(kButtons);
-constexpr size_t kStick = kButtonCount;  // the stick's place, after the buttons'
 
-// where a control sits: its centre as shares of the screen's width and height, its radius in screen heights
+constexpr Button kButtons[] = {
+    // Gameplay driving controls
+    {"steer_left",  "Steer Left",       SvgIcon::SteerLeft,   kSteerLeft,    When::Play,           0.50f,       true,  true},
+    {"steer_right", "Steer Right",      SvgIcon::SteerRight,  kSteerRight,   When::Play,           0.50f,       true,  true},
+    {"gas",         "Gas",              SvgIcon::Gas,         kAnalogRT,     When::Play,           0.50f,       true,  false},
+    {"brake",       "Brake",            SvgIcon::Brake,       kAnalogLT,     When::Play,           2.0f / 3.0f, true,  false},
+    {"handbrake",   "Handbrake",        SvgIcon::Handbrake,   kAnalogA,      When::Play,           1.0f,        false, false},
+    {"nitro",       "Nitro",            SvgIcon::Nitro,       kAnalogX,      When::PlayNos,        1.0f,        false, false},
+    {"turbo",       "Slipstream Turbo", SvgIcon::Turbo,       kAnalogX,      When::PlayTurbo,      1.0f,        false, false},
+    {"special",     "Special Ability",  SvgIcon::Special,     kBit + 6,      When::PlaySpecial,    1.0f,        false, false},
+    {"pause",       "Pause",            SvgIcon::Start,       kBit + 4,      When::Play,           1.0f,        true,  false},
+    {"camera",      "Camera",           SvgIcon::Camera,      kAnalogBlack,  When::Play,           1.0f,        false, false},
+    {"map",         "Map",              SvgIcon::Map,         kBit + 5,      When::Play,           1.0f,        false, false},
+    {"flash",       "Flash Lights",     SvgIcon::FlashLights, kAnalogWhite,  When::Play,           1.0f,        false, false},
+    {"look_back",   "Look Back",        SvgIcon::LookBack,    kAnalogY,      When::Play,           1.0f,        false, false},
+
+    // Menu & Garage minimal navigation controls
+    {"dpad_up",     "D-Pad Up",         SvgIcon::DpadUp,      kBit + 0,      When::MainMenuOnly,   1.0f,        false, false},
+    {"dpad_down",   "D-Pad Down",       SvgIcon::DpadDown,    kBit + 1,      When::MainMenuOnly,   1.0f,        false, false},
+    {"dpad_left",   "D-Pad Left",       SvgIcon::DpadLeft,    kBit + 2,      When::MenusAndGarage, 1.0f,        true,  false},
+    {"dpad_right",  "D-Pad Right",      SvgIcon::DpadRight,   kBit + 3,      When::MenusAndGarage, 1.0f,        true,  false},
+    {"ok",          "OK",               SvgIcon::Ok,          kAnalogA,      When::MenusAndGarage, 1.0f,        true,  false},
+    {"back",        "Back",             SvgIcon::Back,        kAnalogB,      When::MenusAndGarage, 1.0f,        true,  false},
+};
+
+constexpr size_t kButtonCount = std::size(kButtons);
+constexpr size_t kIdxSteerLeft = 0;
+constexpr size_t kIdxSteerRight = 1;
+
+// Centre (x, y) in screen shares; r = half-height in screen heights (drawn H = 2*r*scale*H, W = H * w_over_h)
 struct Place {
     float x, y, r;
     bool hidden = false;
 };
-using Layout = std::array<Place, kButtonCount + 1>;
-// the thumbs alone: fire under the right thumb, the left fire beside the stick
-constexpr Layout kTwoFinger = {{
-    {0.924f, 0.66f, 0.095f}, {0.059f, 0.40f, 0.065f}, {0.969f, 0.40f, 0.065f}, {0.91f, 0.40f, 0.045f},
-    {0.843f, 0.56f, 0.05f}, {0.789f, 0.40f, 0.055f}, {0.784f, 0.70f, 0.05f}, {0.838f, 0.84f, 0.055f},
-    {0.964f, 0.88f, 0.05f}, {0.50f, 0.90f, 0.05f}, {0.559f, 0.90f, 0.045f}, {0.473f, 0.07f, 0.04f},
-    {0.527f, 0.07f, 0.04f}, {0.419f, 0.07f, 0.04f},
-    {0.036f, 0.08f, 0.045f}, {0.70f, 0.56f, 0.042f},
-    {0.11f, 0.60f, 0.048f}, {0.11f, 0.80f, 0.048f}, {0.064f, 0.70f, 0.048f}, {0.156f, 0.70f, 0.048f},
-    {0.581f, 0.07f, 0.04f},
-    {0.92f, 0.78f, 0.07f},
-    {0.715f, 0.40f, 0.05f},
-    {0.108f, 0.70f, 0.12f},
-}};
-// claw with the left index finger: fire at the top left, the right thumb turns and aims
-constexpr Layout kThreeFinger = {{
-    {0.90f, 0.68f, 0.08f}, {0.07f, 0.32f, 0.085f}, {0.955f, 0.42f, 0.06f}, {0.875f, 0.42f, 0.042f},
-    {0.80f, 0.60f, 0.045f}, {0.765f, 0.40f, 0.05f}, {0.745f, 0.76f, 0.045f}, {0.84f, 0.87f, 0.05f},
-    {0.955f, 0.88f, 0.05f}, {0.50f, 0.90f, 0.05f}, {0.559f, 0.90f, 0.045f}, {0.473f, 0.07f, 0.04f},
-    {0.527f, 0.07f, 0.04f}, {0.419f, 0.07f, 0.04f},
-    {0.036f, 0.08f, 0.045f}, {0.69f, 0.56f, 0.042f},
-    {0.11f, 0.60f, 0.048f}, {0.11f, 0.80f, 0.048f}, {0.064f, 0.70f, 0.048f}, {0.156f, 0.70f, 0.048f},
-    {0.581f, 0.07f, 0.04f},
-    {0.92f, 0.78f, 0.07f},
-    {0.69f, 0.40f, 0.045f},
-    {0.13f, 0.72f, 0.12f},
-}};
-// both index fingers on top: fire at the top left, aim and crouch at the top right
-constexpr Layout kFourFinger = {{
-    {0.90f, 0.70f, 0.075f}, {0.07f, 0.32f, 0.085f}, {0.93f, 0.30f, 0.07f}, {0.97f, 0.55f, 0.04f},
-    {0.78f, 0.55f, 0.045f}, {0.73f, 0.38f, 0.05f}, {0.72f, 0.75f, 0.045f}, {0.80f, 0.87f, 0.05f},
-    {0.83f, 0.24f, 0.05f}, {0.50f, 0.90f, 0.05f}, {0.559f, 0.90f, 0.045f}, {0.473f, 0.07f, 0.04f},
-    {0.527f, 0.07f, 0.04f}, {0.419f, 0.07f, 0.04f},
-    {0.036f, 0.08f, 0.045f}, {0.655f, 0.55f, 0.042f},
-    {0.11f, 0.60f, 0.048f}, {0.11f, 0.80f, 0.048f}, {0.064f, 0.70f, 0.048f}, {0.156f, 0.70f, 0.048f},
-    {0.581f, 0.07f, 0.04f},
-    {0.92f, 0.78f, 0.07f},
-    {0.655f, 0.38f, 0.045f},
-    {0.13f, 0.72f, 0.12f},
-}};
-struct Preset {
-    const char* id;
-    const char* label;
-    const Layout* places;
-};
-constexpr Preset kPresets[] = {
-    {"default", "DEFAULT", &kTwoFinger}, {"three", "3 FINGER", &kThreeFinger}, {"four", "4 FINGER", &kFourFinger}};
+using Layout = std::array<Place, kButtonCount>;
 
-constexpr float kStickZone = 0.42f;    // share of the width from the left a touch takes the stick in
-constexpr float kLookCounts = 1800.0f;  // mouse counts a swipe across the screen's width turns: 90 degrees
-constexpr uint64_t kShownMs = 8000;     // the controls hide this long after the last touch while a pad is plugged in
+constexpr Layout kDefaultLayout = {{
+    // Gameplay: tall 1:2 steering on bottom-left, tall 1:2 gas & 2:3 brake on bottom-right
+    {0.068f, 0.720f, 0.175f, false},  // steer_left  (1:2)
+    {0.184f, 0.720f, 0.175f, false},  // steer_right (1:2)
+    {0.932f, 0.720f, 0.185f, false},  // gas         (1:2)
+    {0.812f, 0.765f, 0.140f, false},  // brake       (2:3)
+    {0.812f, 0.485f, 0.066f, false},  // handbrake   (1:1)
+    {0.932f, 0.395f, 0.072f, false},  // nitro       (1:1, dynamic)
+    {0.700f, 0.560f, 0.074f, false},  // turbo       (1:1, dynamic)
+    {0.700f, 0.765f, 0.072f, false},  // special     (1:1, dynamic)
+    {0.500f, 0.082f, 0.048f, false},  // pause       (top center)
+    {0.422f, 0.082f, 0.046f, false},  // camera      (top left of pause)
+    {0.578f, 0.082f, 0.046f, false},  // map         (top right of pause)
+    {0.932f, 0.190f, 0.056f, false},  // flash       (upper right)
+    {0.344f, 0.082f, 0.046f, true},   // look_back   (hidden by default for minimal HUD; unhideable in editor)
 
-// a touch in the menus is a tap, a swipe up or down that scrolls, or the cursor held down (a slider dragged): which,
-// once it moved or stayed long enough to tell
-enum class MenuTouch : uint8_t { Undecided, Cursor, Scroll };
-constexpr float kMenuMove = 0.03f;     // screen heights a finger moves before it is a swipe or a drag
-constexpr float kScrollNotch = 0.05f;  // screen heights of a swipe a row scrolls, about a row of the menus
-constexpr uint64_t kHoldMs = 180;      // a finger still this long is the cursor held down
-constexpr int kMaxNotches = 8;         // notches a swipe runs ahead of the menu
+    // Menus & Garage: minimal D-Pad + OK + Back
+    {0.122f, 0.555f, 0.058f, false},  // dpad_up
+    {0.122f, 0.805f, 0.058f, false},  // dpad_down
+    {0.056f, 0.680f, 0.058f, false},  // dpad_left
+    {0.188f, 0.680f, 0.058f, false},  // dpad_right
+    {0.916f, 0.715f, 0.076f, false},  // ok
+    {0.798f, 0.800f, 0.066f, false},  // back
+}};
+
+constexpr uint64_t kShownMs = 8000;
+constexpr uint64_t kBackTapMs = 120;
+constexpr uint64_t kPulseMs = 105;
+constexpr uint64_t kToastMs = 800;
 
 struct Finger {
     SDL_FingerID id = 0;
     Role role = Role::None;
-    size_t button = 0;     // or kStick, dragged in the editor
-    float x0 = 0, y0 = 0;  // where it went down, pixels; in the editor, its offset from the control's centre
-    float x = 0, y = 0;    // where it is
-    MenuTouch menu = MenuTouch::Undecided;
+    size_t button = 0;
+    float x0 = 0, y0 = 0;
+    float x = 0, y = 0;
     uint64_t down_ms = 0;
-    float notch_y = 0;  // a scroll's place at its last notch
+    bool swipe_fired = false;
+    float notch_y = 0;
 };
 
 std::mutex g_lock;
 std::vector<Finger> g_fingers;
 bool g_pressed[kButtonCount] = {};
-float g_stick_x = 0, g_stick_y = 0;  // -1 to 1, y up
-float g_cursor_x = 0, g_cursor_y = 0;  // the menu cursor, pixels
-bool g_cursor_down = false;
-bool g_cursor_touch = false;  // the cursor follows a finger, not the mouse
-uint64_t g_cursor_tap_until = 0;  // a tap holds the cursor down this long, so the menu sees a click
 std::atomic<uint64_t> g_touch_ms{0};
-std::atomic<uint64_t> g_back_until{0};  // the back key's tap of Start or B lasts until then
-constexpr uint64_t kBackTapMs = 120;
+std::atomic<uint64_t> g_back_until{0};
 
-// the buttons' look: drawn as before, or the images of the skin bagasromadon made (issue #14), with the Xbox
-// controller's letters or without
-enum Skin : uint32_t { kClassic, kXbox, kClean, kSkins };
-constexpr const char* kSkinIds[] = {"classic", "xbox", "clean"};
-constexpr const char* kSkinNames[] = {"CLASSIC", "XBOX", "CLEAN"};
+// Radio swipe & Garage vertical swipe short pulses
+uint64_t g_pulse_until[4] = {};  // 0=DUp, 1=DDown, 2=DLeft (Radio Prev), 3=DRight (Radio Next)
+uint64_t g_radio_toast_until = 0;
+int g_radio_toast_dir = 0;       // -1 = prev, +1 = next
 
-// the layout in use, under g_lock
-Layout g_layout = kTwoFinger;
-uint32_t g_skin = kXbox;
-size_t g_preset = 0;
+Layout g_layout = kDefaultLayout;
+uint32_t g_skin = kOutline;
 float g_opacity = 0.85f;
-float g_scale = 1.0f;  // every control's size, on top of its own
-bool g_fixed_stick = false;  // the stick stays in its place, else it comes down under the thumb
+float g_scale = 1.0f;
 bool g_loaded = false;
-// the editor: the layout before it opened (for Cancel), the control picked
+
 std::atomic<bool> g_editing{false};
-Layout g_before = kTwoFinger;
+Layout g_before = kDefaultLayout;
 float g_before_opacity = 0.85f;
-size_t g_before_preset = 0;
 int g_selected = -1;
+
+// Atlas UV rects for each (skin, icon)
+struct AtlasUv {
+    float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+    bool valid = false;
+};
+AtlasUv g_atlas_uv[kSkins][kSvgIconCount]{};
+ImTextureID g_skin_texture = nullptr;
 
 float Width() {
     int w, h;
@@ -684,29 +723,26 @@ std::filesystem::path LayoutFile() { return app::ExeDir() / "layout.toml"; }
 
 void LoadLayout() {
     g_loaded = true;
+    g_layout = kDefaultLayout;
     try {
         toml::table t = toml::parse_file(LayoutFile().string());
-        std::string preset = t["preset"].value_or(std::string("default"));
-        for (size_t i = 0; i < std::size(kPresets); i++)
-            if (preset == kPresets[i].id) g_preset = i;
-        g_layout = *kPresets[g_preset].places;
         g_opacity = std::clamp(float(t["opacity"].value_or(double(g_opacity))), 0.2f, 1.0f);
         g_scale = std::clamp(float(t["scale"].value_or(double(g_scale))), 0.5f, 1.5f);
-        std::string skin = t["skin"].value_or(std::string(kSkinIds[g_skin]));
-        for (uint32_t i = 0; i < kSkins; i++)
-            if (skin == kSkinIds[i]) g_skin = i;
-        g_fixed_stick = t["stick"].value_or(std::string("floating")) == "fixed";
-        for (size_t i = 0; i <= kButtonCount; i++) {
-            // the menus' controls are not in the editor: always the preset's
-            if (i != kStick && kButtons[i].when == When::Menus) continue;
-            const char* id = i == kStick ? "stick" : kButtons[i].id;
-            const toml::table* p = t["controls"][id].as_table();
-            if (!p) continue;
-            Place& pl = g_layout[i];
-            pl.x = std::clamp(float((*p)["x"].value_or(double(pl.x))), 0.0f, 1.0f);
-            pl.y = std::clamp(float((*p)["y"].value_or(double(pl.y))), 0.0f, 1.0f);
-            pl.r = std::clamp(float((*p)["r"].value_or(double(pl.r))), 0.02f, 0.25f);
-            pl.hidden = (*p)["hidden"].value_or(false) && i != kStick && !kButtons[i].keep;
+        std::string skin = t["skin"].value_or(std::string(kSkinDirs[g_skin]));
+        for (uint32_t i = 0; i < kSkins; i++) {
+            if (skin == kSkinDirs[i]) g_skin = i;
+        }
+        // Only load per-button custom placement when saved with MC3D layout version >= 2
+        if (t["layout_version"].value_or(0) >= 2) {
+            for (size_t i = 0; i < kButtonCount; i++) {
+                const toml::table* p = t["controls"][kButtons[i].id].as_table();
+                if (!p) continue;
+                Place& pl = g_layout[i];
+                pl.x = std::clamp(float((*p)["x"].value_or(double(pl.x))), 0.02f, 0.98f);
+                pl.y = std::clamp(float((*p)["y"].value_or(double(pl.y))), 0.04f, 0.96f);
+                pl.r = std::clamp(float((*p)["r"].value_or(double(pl.r))), 0.03f, 0.28f);
+                pl.hidden = (*p)["hidden"].value_or(pl.hidden) && !kButtons[i].keep;
+            }
         }
     } catch (...) {
     }
@@ -714,13 +750,18 @@ void LoadLayout() {
 
 void SaveLayout() {
     toml::table controls;
-    for (size_t i = 0; i <= kButtonCount; i++) {
+    for (size_t i = 0; i < kButtonCount; i++) {
         const Place& p = g_layout[i];
-        controls.insert(i == kStick ? "stick" : kButtons[i].id,
+        controls.insert(kButtons[i].id,
                         toml::table{{"x", double(p.x)}, {"y", double(p.y)}, {"r", double(p.r)}, {"hidden", p.hidden}});
     }
-    toml::table t{{"preset", kPresets[g_preset].id}, {"opacity", double(g_opacity)}, {"scale", double(g_scale)},
-                  {"skin", kSkinIds[g_skin]}, {"stick", g_fixed_stick ? "fixed" : "floating"}, {"controls", controls}};
+    toml::table t{
+        {"layout_version", 2},
+        {"opacity", double(g_opacity)},
+        {"scale", double(g_scale)},
+        {"skin", kSkinDirs[g_skin]},
+        {"controls", controls},
+    };
     std::ofstream(LayoutFile()) << t << "\n";
 }
 
@@ -728,58 +769,94 @@ void EnsureLayout() {
     if (!g_loaded) LoadLayout();
 }
 
-void OpenEditor() {
-    g_before = g_layout;
-    g_before_opacity = g_opacity;
-    g_before_preset = g_preset;
-    g_selected = -1;
-    g_editing = true;
+game::UiContext CurrentUiContext() {
+    return static_cast<game::UiContext>(game::Telemetry().ui_context.load(std::memory_order_relaxed));
 }
 
-bool InMenus() { return input::g_menu; }
+bool IsMenuLike(game::UiContext ctx) {
+    return ctx == game::UiContext::MainMenu || ctx == game::UiContext::Garage;
+}
+
+bool IsGameplayButton(When w) {
+    return w == When::Play || w == When::PlayNos || w == When::PlayTurbo || w == When::PlaySpecial;
+}
 
 bool ButtonShown(size_t i) {
-    if (!game::Opt().touch_controls) return false;
+    if (!g_editing && !game::Opt().touch_controls) return false;
     const Button& b = kButtons[i];
-    if (b.press == kPanel) return false;
-    if (g_editing) return b.when != When::Menus;
+    if (g_editing) return IsGameplayButton(b.when);
     if (g_layout[i].hidden) return false;
-    if (i == kZoomButton && !(game::g_zoom < kScoped)) return false;
-    if (b.when == When::Always) return true;
-    if (b.when == When::Game) return !InMenus();
-    if (b.when == When::Menus) return InMenus();
-    // in play only while the player has the controls: none over a loading screen or a cutscene. A hint's pause stops
-    // the look but waits for a button (reload, health pack), so the HUD still drawing keeps them up
-    return !InMenus() && (input::Play() || game::HudShown());
+
+    const auto ctx = CurrentUiContext();
+    switch (b.when) {
+        case When::MainMenuOnly:
+            return ctx == game::UiContext::MainMenu;
+        case When::MenusAndGarage:
+            return ctx == game::UiContext::MainMenu || ctx == game::UiContext::Garage;
+        case When::Play:
+            return ctx == game::UiContext::Gameplay;
+        case When::PlayNos:
+            return ctx == game::UiContext::Gameplay &&
+                   game::Telemetry().has_nos.load(std::memory_order_relaxed);
+        case When::PlayTurbo:
+            return ctx == game::UiContext::Gameplay &&
+                   game::Telemetry().turbo_ready.load(std::memory_order_relaxed);
+        case When::PlaySpecial:
+            return ctx == game::UiContext::Gameplay &&
+                   game::Telemetry().special_ready.load(std::memory_order_relaxed);
+    }
+    return false;
 }
 
-void Centre(size_t i, float& cx, float& cy) {
-    cx = g_layout[i].x * Width();
-    cy = g_layout[i].y * Height();
+void ButtonRect(size_t i, float& x0, float& y0, float& x1, float& y1) {
+    const float cx = g_layout[i].x * Width();
+    const float cy = g_layout[i].y * Height();
+    const float half_h = g_layout[i].r * g_scale * Height();
+    const float half_w = half_h * kButtons[i].w_over_h;
+    x0 = cx - half_w;
+    y0 = cy - half_h;
+    x1 = cx + half_w;
+    y1 = cy + half_h;
 }
 
-float Radius(size_t i) { return g_layout[i].r * g_scale * Height(); }
+// Hit test with generous touch slack around rectangular & circular controls
+size_t HitButton(float x, float y) {
+    for (size_t i = 0; i < kButtonCount; i++) {
+        if (!ButtonShown(i)) continue;
+        float x0, y0, x1, y1;
+        ButtonRect(i, x0, y0, x1, y1);
+        const float cx = (x0 + x1) * 0.5f;
+        const float cy = (y0 + y1) * 0.5f;
+        const float hw = (x1 - x0) * 0.5f;
+        const float hh = (y1 - y0) * 0.5f;
+        if (kButtons[i].w_over_h < 0.95f) {
+            // Rectangular pedal / tall steering button: tight horizontal slack so Left & Right stay distinct
+            const float sx = hw * 1.12f;
+            const float sy = hh * 1.14f;
+            if (std::fabs(x - cx) <= sx && std::fabs(y - cy) <= sy) return i;
+        } else {
+            const float r = hh * 1.22f;
+            if ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r) return i;
+        }
+    }
+    return kButtonCount;
+}
 
-// the editor's bar at the top: Reset, smaller and bigger for the picked control, hide or show it, Cancel, Done, in
-// screen shares
+// Editor top bar
 constexpr const char* kBarLabels[] = {"RESET", "-", "+", "HIDE", "CANCEL", "DONE"};
 enum { kBarReset, kBarSmaller, kBarBigger, kBarHide, kBarCancel, kBarDone, kBarCount };
-constexpr float kBarY = 0.17f, kBarH = 0.09f, kBarW = 0.14f, kBarGap = 0.02f;
-constexpr float kBarSizeW = 0.07f;                       // the - and + buttons
-constexpr float kMinRadius = 0.02f, kMaxRadius = 0.25f;  // a control's own radius, in screen heights
-constexpr float kSizeStep = 1.1f;                        // a tap on - or +
+constexpr float kBarY = 0.16f, kBarH = 0.088f, kBarW = 0.135f, kBarGap = 0.018f;
+constexpr float kBarSizeW = 0.07f;
+constexpr float kMinRadius = 0.03f, kMaxRadius = 0.28f;
+constexpr float kSizeStep = 1.1f;
 
 float BarWidth(int i) { return i == kBarSmaller || i == kBarBigger ? kBarSizeW : kBarW; }
-
-// the picked control can be hidden: not the stick, nor the way back out of the menus
 bool Hideable(int i) { return i >= 0 && size_t(i) < kButtonCount && !kButtons[size_t(i)].keep; }
-
 const char* BarLabel(int i) {
     if (i == kBarHide && Hideable(g_selected) && g_layout[size_t(g_selected)].hidden) return "SHOW";
     return kBarLabels[i];
 }
 
-// the bar's button under a point, -1 for none
 int BarAt(float x, float y, float rect[4] = nullptr, int which = -1) {
     float w = Width(), h = Height();
     float total = (kBarCount - 1) * kBarGap;
@@ -790,7 +867,7 @@ int BarAt(float x, float y, float rect[4] = nullptr, int which = -1) {
         float x1 = x0 + BarWidth(i) * w, y1 = y0 + kBarH * h;
         left += BarWidth(i) + kBarGap;
         if (i == which && rect) {
-            rect[0] = x0, rect[1] = y0, rect[2] = x1, rect[3] = y1;
+            rect[0] = x0; rect[1] = y0; rect[2] = x1; rect[3] = y1;
             return i;
         }
         if (which < 0 && x >= x0 && x <= x1 && y >= y0 && y <= y1) return i;
@@ -798,10 +875,11 @@ int BarAt(float x, float y, float rect[4] = nullptr, int which = -1) {
     return -1;
 }
 
-void ApplyPreset(size_t i) {
-    g_preset = i;
-    g_layout = *kPresets[i].places;
+void OpenEditor() {
+    g_before = g_layout;
+    g_before_opacity = g_opacity;
     g_selected = -1;
+    g_editing = true;
 }
 
 void CloseEditor(bool keep) {
@@ -810,72 +888,39 @@ void CloseEditor(bool keep) {
     } else {
         g_layout = g_before;
         g_opacity = g_before_opacity;
-        g_preset = g_before_preset;
     }
     g_selected = -1;
     g_editing = false;
 }
 
-// the button under a point, kButtonCount for none
-size_t HitButton(float x, float y) {
-    for (size_t i = 0; i < kButtonCount; i++) {
-        if (!ButtonShown(i)) continue;
-        float cx, cy;
-        Centre(i, cx, cy);
-        float r = Radius(i) * 1.25f;  // a little slack around the drawn circle
-        if ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r) return i;
-    }
-    return kButtonCount;
-}
+void Resize(size_t i, float r) { g_layout[i].r = std::clamp(r, kMinRadius, kMaxRadius); }
 
-// on the stick's circle, with the buttons' slack: a fixed stick moved out of the left of the screen still takes it
-bool InStick(float x, float y) {
-    float cx = g_layout[kStick].x * Width(), cy = g_layout[kStick].y * Height(), r = Radius(kStick) * 1.25f;
-    return (x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r;
-}
-
-void UpdateStick(const Finger& f) {
-    float r = Radius(kStick);
-    float dx = (f.x - f.x0) / r, dy = (f.y - f.y0) / r;
-    float len = std::sqrt(dx * dx + dy * dy);
-    if (len > 1) {
-        dx /= len;
-        dy /= len;
-    }
-    g_stick_x = dx;
-    g_stick_y = -dy;
-}
-
-// a dpad arrow held in the menus: a step as it comes down, then steps at a calm pace once held a while; the game
-// steps on every poll the arrow is down, too quick to land on a row
-constexpr uint64_t kStepMs = 120, kRepeatAfterMs = 450, kRepeatMs = 180;
-
+constexpr uint64_t kStepMs = 110, kRepeatAfterMs = 420, kRepeatMs = 160;
 bool DpadStep(uint64_t held) {
     if (held < kStepMs) return true;
     return held >= kRepeatAfterMs && (held - kRepeatAfterMs) % kRepeatMs < kStepMs / 2;
 }
-
-bool Dpad(size_t i) { return kButtons[i].press >= kBit && kButtons[i].press < kBit + 4 && kButtons[i].when == When::Menus; }
+bool IsMenuDpad(size_t i) {
+    return (kButtons[i].when == When::MainMenuOnly || kButtons[i].when == When::MenusAndGarage) &&
+           kButtons[i].press >= kBit && kButtons[i].press < kBit + 4;
+}
 
 void Recount() {
     std::fill(std::begin(g_pressed), std::end(g_pressed), false);
-    bool stick = false;
+    const uint64_t now = NowMs();
     for (const Finger& f : g_fingers) {
-        if (f.role == Role::Button) g_pressed[f.button] = !Dpad(f.button) || DpadStep(NowMs() - f.down_ms);
-        if (f.role == Role::Stick) stick = true;
+        if (f.role == Role::Button && f.button < kButtonCount) {
+            g_pressed[f.button] = !IsMenuDpad(f.button) || DpadStep(now - f.down_ms);
+        }
     }
-    if (!stick) g_stick_x = g_stick_y = 0;
 }
 
-void Resize(size_t i, float r) { g_layout[i].r = std::clamp(r, kMinRadius, kMaxRadius); }
-
-// the editor: a touch on the bar resets, resizes the picked control, cancels or saves; a second finger while one
-// drags a control pinches it bigger or smaller; on a control picks it up to move it, anywhere else lets go of the pick
 void EditDown(Finger& f, float x, float y) {
     int bar = BarAt(x, y);
     switch (bar) {
         case kBarReset:
-            ApplyPreset(g_preset);
+            g_layout = kDefaultLayout;
+            g_selected = -1;
             return;
         case kBarSmaller:
         case kBarBigger:
@@ -898,7 +943,6 @@ void EditDown(Finger& f, float x, float y) {
     }
     for (const Finger& d : g_fingers) {
         if (d.role != Role::Drag) continue;
-        // the span between the fingers and the control's size as the pinch began
         f.role = Role::Pinch;
         f.button = d.button;
         f.x0 = std::max(std::hypot(x - d.x, y - d.y), 1.0f);
@@ -906,9 +950,7 @@ void EditDown(Finger& f, float x, float y) {
         return;
     }
     size_t b = HitButton(x, y);
-    float sx = g_layout[kStick].x * Width(), sy = g_layout[kStick].y * Height(), sr = Radius(kStick);
-    if (b == kButtonCount && (x - sx) * (x - sx) + (y - sy) * (y - sy) <= sr * sr) b = kStick;
-    if (b > kStick) {
+    if (b >= kButtonCount) {
         g_selected = -1;
         return;
     }
@@ -924,95 +966,49 @@ void FingerDown(SDL_FingerID id, float x, float y) {
     f.id = id;
     f.x0 = f.x = x;
     f.y0 = f.y = y;
+    f.down_ms = NowMs();
     if (g_editing) {
         EditDown(f, x, y);
         g_fingers.push_back(f);
         return;
     }
     input::g_touch = true;
-    size_t b = HitButton(x, y);
+    const size_t b = HitButton(x, y);
     if (b < kButtonCount) {
         f.role = Role::Button;
         f.button = b;
-        f.down_ms = NowMs();
-        if (kButtons[b].press == kGyro) gyro::NextMode();
-    } else if (InMenus()) {
-        // not the cursor yet: a tap clicks where it lifts, a swipe scrolls without moving the cursor
-        f.role = Role::Cursor;
-        f.menu = MenuTouch::Undecided;
-        f.down_ms = NowMs();
-        g_cursor_touch = true;
-    } else if (x < Width() * kStickZone || (g_fixed_stick && InStick(x, y))) {
-        f.role = Role::Stick;
-        // fixed: pushed from its own centre, at once wherever the thumb came down
-        if (g_fixed_stick) {
-            f.x0 = g_layout[kStick].x * Width();
-            f.y0 = g_layout[kStick].y * Height();
-            UpdateStick(f);
-        }
     } else {
-        f.role = Role::Look;
+        const auto ctx = CurrentUiContext();
+        const float w = Width();
+        const float h = Height();
+        if (ctx == game::UiContext::Gameplay && game::Opt().touch_controls &&
+            x >= w * 0.25f && x <= w * 0.75f && y >= h * 0.62f) {
+            // Bottom-center screen horizontal swipe adjusts radio station / track
+            f.role = Role::RadioSwipe;
+        } else if (ctx == game::UiContext::Garage && game::Opt().touch_controls) {
+            // Empty-screen vertical swipe in Garage pulses D-Pad Up/Down for upgrade lists
+            f.role = Role::GarageSwipe;
+            f.notch_y = y;
+        }
     }
     g_fingers.push_back(f);
     Recount();
 }
 
-// the finger becomes the cursor held down where it is
-void MenuHold(Finger& f) {
-    f.menu = MenuTouch::Cursor;
-    g_cursor_x = f.x;
-    g_cursor_y = f.y;
-    g_cursor_down = true;
-}
-
-// a finger in the menus moved: up or down past kMenuMove scrolls, sideways is the cursor dragging; a scroll gives a
-// wheel notch a kScrollNotch, a finger going up shows the rows below as on a phone's lists
-void MenuMove(Finger& f) {
-    float h = Height();
-    float dx = f.x - f.x0, dy = f.y - f.y0;
-    if (f.menu == MenuTouch::Undecided) {
-        if (std::fabs(dy) > kMenuMove * h && std::fabs(dy) >= std::fabs(dx)) {
-            f.menu = MenuTouch::Scroll;
-            f.notch_y = f.y0;
-        } else if (std::fabs(dx) > kMenuMove * h) {
-            MenuHold(f);
-        }
-    }
-    if (f.menu == MenuTouch::Cursor) {
-        g_cursor_x = f.x;
-        g_cursor_y = f.y;
-    }
-    if (f.menu != MenuTouch::Scroll) return;
-    float notch = kScrollNotch * h;
-    while (f.y <= f.notch_y - notch) {
-        f.notch_y -= notch;
-        if (input::g_wheel > -kMaxNotches) input::g_wheel--;
-    }
-    while (f.y >= f.notch_y + notch) {
-        f.notch_y += notch;
-        if (input::g_wheel < kMaxNotches) input::g_wheel++;
-    }
-}
-
-// a finger in the menus still since it came down: held long enough, it is the cursor held down (a slider dragged)
-void MenuHolds() {
-    uint64_t now = NowMs();
-    for (Finger& f : g_fingers)
-        if (f.role == Role::Cursor && f.menu == MenuTouch::Undecided && now - f.down_ms >= kHoldMs) MenuHold(f);
-}
-
 void FingerMove(SDL_FingerID id, float x, float y) {
+    const float w = Width();
+    const float h = Height();
+    const uint64_t now = NowMs();
+
     for (Finger& f : g_fingers) {
         if (f.id != id) continue;
-        float dx = x - f.x, dy = y - f.y;
         f.x = x;
         f.y = y;
         if (f.role == Role::Drag) {
             Place& p = g_layout[f.button];
-            p.x = std::clamp((x - f.x0) / Width(), 0.0f, 1.0f);
-            p.y = std::clamp((y - f.y0) / Height(), 0.0f, 1.0f);
+            p.x = std::clamp((x - f.x0) / w, 0.02f, 0.98f);
+            p.y = std::clamp((y - f.y0) / h, 0.04f, 0.96f);
         }
-        // a pinch sizes the control by the span between its two fingers, whichever moved
         if (f.role == Role::Drag || f.role == Role::Pinch) {
             for (const Finger& o : g_fingers) {
                 const Finger& pinch = f.role == Role::Pinch ? f : o;
@@ -1021,27 +1017,43 @@ void FingerMove(SDL_FingerID id, float x, float y) {
                 Resize(f.button, pinch.y0 * std::hypot(pinch.x - drag.x, pinch.y - drag.y) / pinch.x0);
             }
         }
-        if (f.role == Role::Stick) UpdateStick(f);
-        if (f.role == Role::Look || (f.role == Role::Button && kButtons[f.button].look)) {
-            float k = kLookCounts / Width();
-            input::g_touch_dx += int(std::lround(dx * k));
-            input::g_touch_dy += int(std::lround(dy * k));
+        if (f.role == Role::Button && f.button < kButtonCount && kButtons[f.button].steer_pair) {
+            // Smooth thumb slide between Steer Left and Steer Right without lifting!
+            const size_t hit = HitButton(x, y);
+            if (hit == kIdxSteerLeft || hit == kIdxSteerRight) {
+                f.button = hit;
+            }
         }
-        if (f.role == Role::Cursor) MenuMove(f);
+        if (f.role == Role::RadioSwipe && !f.swipe_fired) {
+            const float dx = x - f.x0;
+            const float dy = y - f.y0;
+            if (std::fabs(dx) >= w * 0.06f && std::fabs(dx) > std::fabs(dy) * 1.25f) {
+                f.swipe_fired = true;
+                if (dx > 0.0f) {
+                    g_pulse_until[3] = now + kPulseMs;  // D-Pad Right = Next Track
+                    g_radio_toast_dir = 1;
+                } else {
+                    g_pulse_until[2] = now + kPulseMs;  // D-Pad Left = Prev Track
+                    g_radio_toast_dir = -1;
+                }
+                g_radio_toast_until = now + kToastMs;
+            }
+        }
+        if (f.role == Role::GarageSwipe) {
+            const float notch = h * 0.065f;
+            if (y <= f.notch_y - notch) {
+                f.notch_y -= notch;
+                g_pulse_until[0] = now + kPulseMs;  // D-Pad Up
+            } else if (y >= f.notch_y + notch) {
+                f.notch_y += notch;
+                g_pulse_until[1] = now + kPulseMs;  // D-Pad Down
+            }
+        }
     }
+    Recount();
 }
 
 void FingerUp(SDL_FingerID id) {
-    for (const Finger& f : g_fingers) {
-        if (f.id != id || f.role != Role::Cursor) continue;
-        if (f.menu == MenuTouch::Undecided) {
-            // a tap: the cursor goes there and clicks
-            g_cursor_x = f.x;
-            g_cursor_y = f.y;
-            g_cursor_tap_until = NowMs() + input::kTapMs;
-        }
-        if (f.menu != MenuTouch::Scroll) g_cursor_down = false;
-    }
     std::erase_if(g_fingers, [id](const Finger& f) { return f.id == id; });
     Recount();
 }
@@ -1053,8 +1065,6 @@ bool PadPlugged() {
 }
 
 void KeyEvent(const SDL_KeyboardEvent& k) {
-    // Android's back key: out of the layout editor or the settings panel, else the game's pause menu (its options
-    // are the settings), in the game's menus back out of them
     if (k.scancode == SDL_SCANCODE_AC_BACK) {
         if (!k.down || k.repeat) return;
         std::lock_guard lock(g_lock);
@@ -1072,9 +1082,113 @@ void KeyEvent(const SDL_KeyboardEvent& k) {
     input::g_keyboard = true;
     input::g_touch = false;
     if (!k.repeat && input::HudKey(vk)) game::g_hide_hud = !game::g_hide_hud;
-    // a name being typed takes Backspace and Enter as WM_CHAR has them
     if (vk == VK_BACK) input::OnChar('\b');
     if (vk == VK_RETURN) input::OnChar('\r');
+}
+
+// ============================================================================
+// Live SVG Loader & Aspect-Preserving Container Expansion for 1:2 / 2:3 Pedals
+// ============================================================================
+
+void ReplaceAll(std::string& s, std::string_view from, std::string_view to) {
+    if (from.empty()) return;
+    size_t pos = 0;
+    while ((pos = s.find(from, pos)) != std::string::npos) {
+        s.replace(pos, from.size(), to);
+        pos += to.size();
+    }
+}
+
+// Expand stock 512x512 square SVGs for tall 1:2 (steer-left, steer-right, gas) and 2:3 (brake)
+// buttons so the outer rounded pill/pedal stretches cleanly while inner icons stay un-distorted 1:1.
+// Custom user-supplied SVGs that already use a non-square viewBox are rendered untouched.
+void AdaptRectangularSvg(SvgIcon icon, std::string& svg) {
+    if (svg.find("viewBox=\"0 0 512 512\"") == std::string::npos) return;
+
+    if (icon == SvgIcon::SteerLeft || icon == SvgIcon::SteerRight) {
+        ReplaceAll(svg, "viewBox=\"0 0 512 512\" width=\"512\" height=\"512\"",
+                        "viewBox=\"0 0 512 1024\" width=\"512\" height=\"1024\"");
+        ReplaceAll(svg, "width=\"512\" height=\"512\"", "width=\"512\" height=\"1024\"");
+        ReplaceAll(svg, "x=\"12\" y=\"12\" width=\"104\" height=\"104\"",
+                        "x=\"12\" y=\"12\" width=\"104\" height=\"232\"");
+        ReplaceAll(svg, "<path ", "<path transform=\"translate(0 64)\" ");
+    } else if (icon == SvgIcon::Gas) {
+        ReplaceAll(svg, "viewBox=\"0 0 512 512\" width=\"512\" height=\"512\"",
+                        "viewBox=\"0 0 512 1024\" width=\"512\" height=\"1024\"");
+        ReplaceAll(svg, "width=\"512\" height=\"512\"", "width=\"512\" height=\"1024\"");
+        ReplaceAll(svg, "x=\"28\" y=\"10\" width=\"72\" height=\"108\" rx=\"22\"",
+                        "x=\"12\" y=\"12\" width=\"104\" height=\"232\" rx=\"26\"");
+        ReplaceAll(svg, "<path ", "<path transform=\"translate(0 64)\" ");
+        ReplaceAll(svg, "<rect x=\"42\" ", "<rect transform=\"translate(0 64)\" x=\"42\" ");
+    } else if (icon == SvgIcon::Brake) {
+        ReplaceAll(svg, "viewBox=\"0 0 512 512\" width=\"512\" height=\"512\"",
+                        "viewBox=\"0 0 512 768\" width=\"512\" height=\"768\"");
+        ReplaceAll(svg, "width=\"512\" height=\"512\"", "width=\"512\" height=\"768\"");
+        ReplaceAll(svg, "x=\"12\" y=\"24\" width=\"104\" height=\"80\" rx=\"22\"",
+                        "x=\"12\" y=\"12\" width=\"104\" height=\"168\" rx=\"24\"");
+        ReplaceAll(svg, "<rect x=\"31\" ", "<rect transform=\"translate(0 32)\" x=\"31\" ");
+    }
+}
+
+bool ReadSvgFile(const char* skin_dir, const char* icon_name, std::string& out) {
+    // 1. User-configurable override on storage: <mc3dr>/skins/<skin>/<name>.svg
+    const auto user_path = app::ExeDir() / "skins" / skin_dir / (std::string(icon_name) + ".svg");
+    {
+        std::ifstream f(user_path, std::ios::binary);
+        if (f) {
+            out.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            if (!out.empty()) return true;
+        }
+    }
+    // 2. Bundled APK asset: assets/skins/mc3dr/<skin>/<name>.svg
+    const std::string asset_path = std::string("skins/mc3dr/") + skin_dir + "/" + icon_name + ".svg";
+    size_t sz = 0;
+    void* data = SDL_LoadFile(asset_path.c_str(), &sz);
+    if (!data || sz == 0) {
+        if (data) SDL_free(data);
+        return false;
+    }
+    out.assign(static_cast<const char*>(data), sz);
+    SDL_free(data);
+    return true;
+}
+
+SvgIcon ActiveIconForButton(size_t i) {
+    const Button& b = kButtons[i];
+    if (b.when == When::PlaySpecial && !g_editing) {
+        const int8_t st = game::Telemetry().special_type.load(std::memory_order_relaxed);
+        if (st == 0) return SvgIcon::SpecialZone;
+        if (st == 1) return SvgIcon::SpecialAgro;
+        if (st == 2) return SvgIcon::SpecialRoar;
+    }
+    return b.icon;
+}
+
+ImU32 Fade(int r, int g, int b, int a) {
+    return IM_COL32(r, g, b, int(float(a) * g_opacity));
+}
+
+void CentredText(ImDrawList* dl, ImVec2 at, float size, ImU32 colour, const char* text) {
+    ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(size, FLT_MAX, 0, text);
+    dl->AddText(ImGui::GetFont(), size, ImVec2(at.x - ts.x / 2, at.y - ts.y / 2), colour, text);
+}
+
+void DrawEditorBar(ImDrawList* dl, float th) {
+    float h = Height();
+    for (int i = 0; i < kBarCount; i++) {
+        float r[4];
+        BarAt(0, 0, r, i);
+        bool done = i == kBarDone;
+        bool size = i == kBarSmaller || i == kBarBigger;
+        int alpha = (size && g_selected < 0) || (i == kBarHide && !Hideable(g_selected)) ? 90 : 240;
+        dl->AddRectFilled(ImVec2(r[0], r[1]), ImVec2(r[2], r[3]),
+                          done ? IM_COL32(150, 115, 45, 235) : IM_COL32(20, 18, 14, 225), h * 0.015f);
+        dl->AddRect(ImVec2(r[0], r[1]), ImVec2(r[2], r[3]), IM_COL32(220, 180, 100, alpha), h * 0.015f, 0, th * 0.7f);
+        CentredText(dl, ImVec2((r[0] + r[2]) / 2, (r[1] + r[3]) / 2), h * (size ? 0.056f : 0.038f),
+                    IM_COL32(255, 255, 255, alpha), BarLabel(i));
+    }
+    CentredText(dl, ImVec2(Width() / 2, (kBarY + kBarH + 0.045f) * h), h * 0.033f, IM_COL32(255, 255, 255, 225),
+                "DRAG TO MOVE  |  PINCH OR -/+ TO RESIZE  |  TAP THEN HIDE/SHOW");
 }
 
 }  // namespace
@@ -1094,13 +1208,7 @@ bool OnEvent(const SDL_Event& e) {
             input::g_keyboard = true;
             input::g_touch = false;
             if (input::Active() && input::Play()) {
-                // the fractions carried over: a held mouse sends small moves, rounded each they were lost
                 AddLook(e.motion.xrel, e.motion.yrel);
-            } else {
-                std::lock_guard lock(g_lock);
-                g_cursor_x = e.motion.x;
-                g_cursor_y = e.motion.y;
-                g_cursor_touch = false;
             }
             return !app::MenuOpen();
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
@@ -1144,419 +1252,225 @@ bool OnEvent(const SDL_Event& e) {
 void Apply(int port, input::Pad& pad) {
     if (port != 0 || g_editing) return;
     std::lock_guard lock(g_lock);
-    Recount();  // a held dpad arrow's steps go by the clock
+    Recount();
+    const uint64_t now = NowMs();
     bool used = false;
+    int steer = 0;
+
     for (size_t i = 0; i < kButtonCount; i++) {
         if (!g_pressed[i]) continue;
-        int p = kButtons[i].press;
-        if (p < 0) continue;
+        const int p = kButtons[i].press;
         used = true;
-        if (p < kBit) pad.analog[p] = 0xFF;
-        else pad.buttons |= uint16_t(1u << (p - kBit));
+        if (p == kSteerLeft) {
+            steer -= 1;
+        } else if (p == kSteerRight) {
+            steer += 1;
+        } else if (p >= 0 && p < kBit) {
+            pad.analog[p] = 0xFF;
+        } else if (p >= kBit) {
+            pad.buttons |= uint16_t(1u << (p - kBit));
+        }
     }
-    if (NowMs() < g_back_until) {
+
+    if (steer != 0) {
+        pad.lx = (steer < 0) ? int16_t(-32767) : int16_t(32767);
+    }
+
+    // Radio swipe (D-Pad Left/Right) & Garage vertical swipe (D-Pad Up/Down) pulses
+    for (int bit = 0; bit < 4; ++bit) {
+        if (now < g_pulse_until[bit]) {
+            pad.buttons |= uint16_t(1u << bit);
+            used = true;
+        }
+    }
+
+    if (now < g_back_until) {
         used = true;
-        if (InMenus()) pad.analog[kAnalogB] = 0xFF;
-        else pad.buttons |= uint16_t(1u << 4);  // Start
+        if (IsMenuLike(CurrentUiContext())) pad.analog[kAnalogB] = 0xFF;
+        else pad.buttons |= uint16_t(1u << 4);  // Start (Pause)
     }
-    if (g_stick_x || g_stick_y) {
-        used = true;
-        pad.lx = int16_t(std::clamp(g_stick_x, -1.0f, 1.0f) * 32767.0f);
-        pad.ly = int16_t(std::clamp(g_stick_y, -1.0f, 1.0f) * 32767.0f);
-    }
+
     if (used) pad.connected = true;
 }
 
 bool Shown() { return !PadPlugged() || NowMs() - g_touch_ms < kShownMs; }
 
-namespace {
-
-constexpr float kPi = 3.14159265f;
-
-// an icon in white line art inside a button of radius r: points in units of r, from its centre, y down
-struct Pen {
-    ImDrawList* dl;
-    ImVec2 c;
-    float r;
-    ImU32 col;
-    float th;  // line thickness
-    ImVec2 P(float x, float y) const { return ImVec2(c.x + x * r, c.y + y * r); }
-    // a point turned by angle a about the centre
-    ImVec2 R(float x, float y, float a) const {
-        float s = std::sin(a), k = std::cos(a);
-        return P(x * k - y * s, x * s + y * k);
-    }
-    void Line(float x0, float y0, float x1, float y1) const { dl->AddLine(P(x0, y0), P(x1, y1), col, th); }
-    void Ring(float x, float y, float rad) const { dl->AddCircle(P(x, y), rad * r, col, 32, th); }
-    void Dot(float x, float y, float rad) const { dl->AddCircleFilled(P(x, y), rad * r, col, 24); }
-    void Box(float x0, float y0, float x1, float y1, float round = 0) const {
-        dl->AddRectFilled(P(x0, y0), P(x1, y1), col, round * r);
-    }
-    // a cartridge standing up, its tip at top
-    void Cartridge(float x, float y, float w, float len) const {
-        float tip = w * 0.5f;
-        dl->PathArcTo(P(x, y + tip), tip * r, kPi, 2 * kPi, 12);
-        dl->PathLineTo(P(x + tip, y + len));
-        dl->PathLineTo(P(x - tip, y + len));
-        dl->PathFillConvex(col);
-        dl->AddLine(P(x - tip, y + len * 0.42f), P(x + tip, y + len * 0.42f), IM_COL32(0, 0, 0, 120), th * 0.6f);
-    }
-    // an arrow along a line, its head at the end
-    void Arrow(float x0, float y0, float x1, float y1, float head) const {
-        Line(x0, y0, x1, y1);
-        float a = std::atan2(y1 - y0, x1 - x0);
-        for (float side : {-1.0f, 1.0f}) {
-            float b = a + kPi + side * 0.55f;
-            Line(x1, y1, x1 + std::cos(b) * head, y1 + std::sin(b) * head);
-        }
-    }
-};
-
-void DrawIcon(const Pen& p, Icon icon) {
-    switch (icon) {
-        case Icon::Bullet:
-            p.Cartridge(0, -0.48f, 0.34f, 0.96f);
-            break;
-        case Icon::Scope:
-            p.Ring(0, 0, 0.42f);
-            p.Line(-0.62f, 0, -0.16f, 0);
-            p.Line(0.16f, 0, 0.62f, 0);
-            p.Line(0, -0.62f, 0, -0.16f);
-            p.Line(0, 0.16f, 0, 0.62f);
-            p.Dot(0, 0, 0.05f);
-            break;
-        case Icon::Mode:  // three rounds: the firing mode
-            for (float x : {-0.3f, 0.0f, 0.3f}) p.Cartridge(x, -0.36f, 0.18f, 0.72f);
-            break;
-        case Icon::Reload: {
-            p.dl->PathArcTo(p.c, 0.42f * p.r, -0.35f * kPi, 1.25f * kPi, 28);
-            p.dl->PathStroke(p.col, 0, p.th);
-            float a = -0.35f * kPi;
-            float x = std::cos(a) * 0.42f, y = std::sin(a) * 0.42f;
-            p.dl->AddTriangleFilled(p.P(x + 0.2f, y - 0.06f), p.P(x - 0.08f, y - 0.18f), p.P(x + 0.02f, y + 0.18f), p.col);
-            break;
-        }
-        case Icon::Crouch:  // a figure down on one knee
-            p.Dot(0.12f, -0.5f, 0.13f);
-            p.Line(0.06f, -0.32f, -0.2f, 0.12f);
-            p.Line(-0.2f, 0.12f, 0.28f, 0.2f);
-            p.Line(0.28f, 0.2f, 0.18f, 0.58f);
-            p.Line(-0.2f, 0.12f, -0.36f, 0.56f);
-            p.Line(0.0f, -0.18f, 0.36f, -0.06f);
-            break;
-        case Icon::Knife: {
-            constexpr float a = -kPi / 4;
-            ImVec2 blade[] = {p.R(-0.08f, -0.13f, a), p.R(0.62f, -0.06f, a), p.R(0.48f, 0.12f, a), p.R(-0.08f, 0.12f, a)};
-            p.dl->AddConvexPolyFilled(blade, 4, p.col);
-            p.dl->AddLine(p.R(-0.12f, -0.22f, a), p.R(-0.12f, 0.21f, a), p.col, p.th * 1.2f);
-            p.dl->AddLine(p.R(-0.18f, 0, a), p.R(-0.6f, 0, a), p.col, p.th * 2.2f);
-            break;
-        }
-        case Icon::Hand:  // an open hand: use, pick up
-            p.Box(-0.3f, -0.05f, 0.3f, 0.5f, 0.12f);
-            for (int i = 0; i < 4; i++) {
-                float x = -0.24f + i * 0.16f;
-                p.Box(x - 0.055f, i == 0 || i == 3 ? -0.38f : -0.5f, x + 0.055f, 0.05f, 0.055f);
-            }
-            p.dl->AddLine(p.P(0.28f, 0.2f), p.P(0.52f, -0.08f), p.col, p.th * 2.2f);
-            break;
-        case Icon::Grenade:
-            p.Dot(0, 0.14f, 0.36f);
-            p.Box(-0.13f, -0.36f, 0.13f, -0.18f, 0.03f);
-            p.Line(0.1f, -0.32f, 0.36f, -0.08f);
-            p.Ring(-0.24f, -0.42f, 0.11f);
-            p.dl->AddLine(p.P(-0.36f, 0.1f), p.P(0.36f, 0.1f), IM_COL32(0, 0, 0, 120), p.th * 0.7f);
-            break;
-        case Icon::Swap:  // the next weapon
-            p.Arrow(-0.48f, -0.18f, 0.48f, -0.18f, 0.2f);
-            p.Arrow(0.48f, 0.2f, -0.48f, 0.2f, 0.2f);
-            break;
-        case Icon::Health:
-            p.Box(-0.13f, -0.46f, 0.13f, 0.46f, 0.04f);
-            p.Box(-0.46f, -0.13f, 0.46f, 0.13f, 0.04f);
-            break;
-        case Icon::Map: {
-            ImVec2 pts[] = {p.P(-0.55f, -0.36f), p.P(-0.18f, -0.5f), p.P(0.18f, -0.36f), p.P(0.55f, -0.5f),
-                            p.P(0.55f, 0.36f),   p.P(0.18f, 0.5f),   p.P(-0.18f, 0.36f), p.P(-0.55f, 0.5f)};
-            p.dl->AddPolyline(pts, 8, p.col, ImDrawFlags_Closed, p.th);
-            p.Line(-0.18f, -0.5f, -0.18f, 0.36f);
-            p.Line(0.18f, -0.36f, 0.18f, 0.5f);
-            break;
-        }
-        case Icon::Pause:
-            p.Box(-0.28f, -0.36f, -0.08f, 0.36f, 0.03f);
-            p.Box(0.08f, -0.36f, 0.28f, 0.36f, 0.03f);
-            break;
-        case Icon::Gear:
-            for (int i = 0; i < 8; i++) {
-                float a = i * kPi / 4;
-                p.dl->AddLine(p.R(0.3f, 0, a), p.R(0.52f, 0, a), p.col, p.th * 2.4f);
-            }
-            p.Dot(0, 0, 0.36f);
-            p.dl->AddCircleFilled(p.c, 0.15f * p.r, IM_COL32(0, 0, 0, 200), 20);
-            break;
-        case Icon::Gyro: {  // a phone on its side between two turning arrows
-            p.dl->AddRect(p.P(-0.32f, -0.2f), p.P(0.32f, 0.2f), p.col, 0.06f * p.r, 0, p.th);
-            p.Dot(0.24f, 0, 0.035f);
-            for (float side : {-1.0f, 1.0f}) {
-                float a0 = side < 0 ? 0.62f * kPi : -0.38f * kPi, a1 = a0 + 0.76f * kPi * 0.5f;
-                p.dl->PathArcTo(p.c, 0.5f * p.r, a0, a1, 12);
-                p.dl->PathStroke(p.col, 0, p.th);
-                ImVec2 tip = p.P(std::cos(a1) * 0.5f, std::sin(a1) * 0.5f);
-                float t = a1 + kPi / 2;
-                p.dl->AddTriangleFilled(tip, ImVec2(tip.x - std::cos(t - 0.5f) * 0.16f * p.r, tip.y - std::sin(t - 0.5f) * 0.16f * p.r),
-                                        ImVec2(tip.x - std::cos(t + 0.5f) * 0.16f * p.r, tip.y - std::sin(t + 0.5f) * 0.16f * p.r), p.col);
-            }
-            break;
-        }
-        case Icon::Move:  // four arrows out from the middle: move the controls
-            for (int i = 0; i < 4; i++) {
-                float a = i * kPi / 2, c = std::cos(a), sn = std::sin(a);
-                p.Arrow(c * 0.12f, sn * 0.12f, c * 0.5f, sn * 0.5f, 0.17f);
-            }
-            break;
-        case Icon::Suppressor:  // a silencer on a muzzle
-            p.Box(-0.18f, -0.17f, 0.56f, 0.17f, 0.08f);
-            p.Box(-0.56f, -0.08f, -0.18f, 0.08f, 0.02f);
-            for (float x : {0.04f, 0.22f, 0.40f})
-                p.dl->AddLine(p.P(x, -0.17f), p.P(x, 0.17f), IM_COL32(0, 0, 0, 140), p.th * 0.6f);
-            break;
-        case Icon::Enter:  // a return arrow: down the right, then back to the left
-            p.Line(0.38f, -0.4f, 0.38f, 0.14f);
-            p.Arrow(0.38f, 0.14f, -0.42f, 0.14f, 0.22f);
-            break;
-        case Icon::Back:
-        case Icon::Left:
-            p.Line(0.14f, -0.36f, -0.22f, 0);
-            p.Line(-0.22f, 0, 0.14f, 0.36f);
-            break;
-        case Icon::Right:
-            p.Line(-0.14f, -0.36f, 0.22f, 0);
-            p.Line(0.22f, 0, -0.14f, 0.36f);
-            break;
-        case Icon::Up:
-            p.Line(-0.36f, 0.14f, 0, -0.22f);
-            p.Line(0, -0.22f, 0.36f, 0.14f);
-            break;
-        case Icon::Down:
-            p.Line(-0.36f, -0.14f, 0, 0.22f);
-            p.Line(0, 0.22f, 0.36f, -0.14f);
-            break;
-        case Icon::Zoom: {  // the scope's level, X2 or X5: the turn scales by a half at X2, a quarter at X5, not a
-            // fifth, so by which it is nearer; the editor shows X2
-            const char* text = !g_editing && game::g_zoom < kScopeX5 ? "X5" : "X2";
-            float size = p.r * 0.8f;
-            ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(size, FLT_MAX, 0, text);
-            p.dl->AddText(ImGui::GetFont(), size, ImVec2(p.c.x - ts.x / 2, p.c.y - ts.y / 2), p.col, text);
-            break;
-        }
-    }
-}
-
-// a colour at the layout's opacity
-ImU32 Fade(int r, int g, int b, int a) { return IM_COL32(r, g, b, int(float(a) * g_opacity)); }
-
-// ---- the skins' images: one atlas, tools/make_skin.py's cells in SkinPart's order, the Xbox set then the clean one.
-// Each image is a cell wide and sits at its bottom, so a button's circle is the cell's width across
-
-enum SkinPart : int { kFire, kAim, kMode, kReload, kCrouch, kMelee, kUse, kGrenade, kWeapon, kHealth, kObjectives,
-                      kPause, kGyroPart, kBackPart, kSuppressor, kStickBase, kStickKnob, kSkinParts, kNoPart = -1 };
-constexpr float kSkinCellW = 192, kSkinCellH = 209;
-constexpr int kSkinColumns = 6;
-constexpr const char* kSkinFile = "skins/buttons.png";  // in the APK's assets
-ImTextureID g_skin_texture = nullptr;  // render thread
-float g_skin_w = 1, g_skin_h = 1;      // the atlas, pixels
-constexpr ImU32 kSkinInk = IM_COL32(178, 190, 170, 255);  // the skin's light grey green, for the icons it has none of
-
-SkinPart PartOf(Icon icon) {
-    switch (icon) {
-        case Icon::Bullet: return kFire;
-        case Icon::Scope: return kAim;
-        case Icon::Mode: return kMode;
-        case Icon::Reload: return kReload;
-        case Icon::Crouch: return kCrouch;
-        case Icon::Knife: return kMelee;
-        case Icon::Hand: return kUse;
-        case Icon::Grenade: return kGrenade;
-        case Icon::Swap: return kWeapon;
-        case Icon::Health: return kHealth;
-        case Icon::Map: return kObjectives;
-        case Icon::Pause: return kPause;
-        case Icon::Gyro: return kGyroPart;
-        case Icon::Back: return kBackPart;
-        case Icon::Suppressor: return kSuppressor;
-        default: return kNoPart;
-    }
-}
-
-// the skin's images in use: not CLASSIC, and the atlas loaded
-bool Skinned() { return g_skin != kClassic && g_skin_texture; }
-
-// a part of the skin in use, its circle of radius r about c
-void SkinImage(ImDrawList* dl, SkinPart part, ImVec2 c, float r, ImU32 tint) {
-    int i = int(g_skin == kClean ? kSkinParts : 0) + part;
-    float u = float(i % kSkinColumns) * kSkinCellW, v = float(i / kSkinColumns) * kSkinCellH;
-    float top = c.y + r - 2 * r * kSkinCellH / kSkinCellW;
-    dl->AddImage(g_skin_texture, ImVec2(c.x - r, top), ImVec2(c.x + r, c.y + r), ImVec2(u / g_skin_w, v / g_skin_h),
-                 ImVec2((u + kSkinCellW) / g_skin_w, (v + kSkinCellH) / g_skin_h), tint);
-}
-
-void DrawStick(ImDrawList* dl, float th) {
-    // at rest in its place, else where the thumb came down (its place too, when fixed)
-    float r = Radius(kStick);
-    ImVec2 at(g_layout[kStick].x * Width(), g_layout[kStick].y * Height());
-    bool held = false;
-    for (const Finger& f : g_fingers)
-        if (f.role == Role::Stick) {
-            at = ImVec2(f.x0, f.y0);
-            held = true;
-        }
-    if (Skinned()) {
-        // the ring with its arrows is the knob, about seven tenths of the base; it travels half the base's radius
-        constexpr float kKnob = 0.72f, kTravel = 0.5f;
-        SkinImage(dl, kStickBase, at, r, Fade(255, 255, 255, held ? 200 : 150));
-        ImVec2 knob(at.x + g_stick_x * r * kTravel, at.y - g_stick_y * r * kTravel);
-        SkinImage(dl, kStickKnob, knob, r * kKnob, Fade(255, 255, 255, held ? 255 : 200));
-        return;
-    }
-    dl->AddCircleFilled(at, r, Fade(0, 0, 0, held ? 80 : 55), 64);
-    dl->AddCircle(at, r, Fade(255, 255, 255, held ? 110 : 70), 64, th * 0.7f);
-    for (int i = 0; i < 4; i++) {  // the four directions
-        float a = i * kPi / 2;
-        ImVec2 tip(at.x + std::cos(a) * r * 0.86f, at.y + std::sin(a) * r * 0.86f);
-        ImVec2 l(at.x + std::cos(a + 0.12f) * r * 0.74f, at.y + std::sin(a + 0.12f) * r * 0.74f);
-        ImVec2 rr(at.x + std::cos(a - 0.12f) * r * 0.74f, at.y + std::sin(a - 0.12f) * r * 0.74f);
-        dl->AddTriangleFilled(tip, l, rr, Fade(255, 255, 255, held ? 140 : 90));
-    }
-    ImVec2 knob(at.x + g_stick_x * r, at.y - g_stick_y * r);
-    dl->AddCircleFilled(knob, r * 0.42f, Fade(255, 255, 255, held ? 120 : 75), 48);
-    dl->AddCircle(knob, r * 0.42f, Fade(255, 255, 255, held ? 180 : 110), 48, th * 0.7f);
-}
-
-// a text centred on a point, its height a share of the screen's
-void CentredText(ImDrawList* dl, ImVec2 at, float size, ImU32 colour, const char* text) {
-    ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(size, FLT_MAX, 0, text);
-    dl->AddText(ImGui::GetFont(), size, ImVec2(at.x - ts.x / 2, at.y - ts.y / 2), colour, text);
-}
-
-// the editor's bar, drawn as the controls are: Reset, Cancel, Done, and what to do under it
-void DrawEditorBar(ImDrawList* dl, float th) {
-    float h = Height();
-    for (int i = 0; i < kBarCount; i++) {
-        float r[4];
-        BarAt(0, 0, r, i);
-        bool done = i == kBarDone;
-        bool size = i == kBarSmaller || i == kBarBigger;
-        // - and + wait for a control to be picked, hide for one that can be
-        int alpha = (size && g_selected < 0) || (i == kBarHide && !Hideable(g_selected)) ? 90 : 240;
-        dl->AddRectFilled(ImVec2(r[0], r[1]), ImVec2(r[2], r[3]),
-                          done ? IM_COL32(150, 115, 45, 235) : IM_COL32(20, 18, 14, 225), h * 0.015f);
-        dl->AddRect(ImVec2(r[0], r[1]), ImVec2(r[2], r[3]), IM_COL32(220, 180, 100, alpha), h * 0.015f, 0, th * 0.7f);
-        CentredText(dl, ImVec2((r[0] + r[2]) / 2, (r[1] + r[3]) / 2), h * (size ? 0.06f : 0.042f),
-                    IM_COL32(255, 255, 255, alpha), app::Ui(BarLabel(i)).c_str());
-    }
-    CentredText(dl, ImVec2(Width() / 2, (kBarY + kBarH + 0.05f) * h), h * 0.036f, IM_COL32(255, 255, 255, 220),
-                app::Ui("DRAG TO MOVE, PINCH OR - + TO RESIZE").c_str());
-    CentredText(dl, ImVec2(Width() / 2, (kBarY + kBarH + 0.1f) * h), h * 0.036f, IM_COL32(255, 255, 255, 220),
-                app::Ui("TAP A CONTROL, THEN HIDE OR SHOW").c_str());
-}
-
-}  // namespace
-
 void Draw() {
     std::lock_guard lock(g_lock);
     EnsureLayout();
-    bool editing = g_editing;
-    if (!editing && !Shown()) return;
+    const bool editing = g_editing;
+    if (!editing && (!game::Opt().touch_controls || !Shown())) return;
+
     ImDrawList* dl = ImGui::GetForegroundDrawList();
-    float h = Height();
-    float th = std::max(2.0f, h / 360.0f);
-    if (editing) dl->AddRectFilled(ImVec2(0, 0), ImVec2(Width(), h), IM_COL32(0, 0, 0, 90));
+    const float w = Width();
+    const float h = Height();
+    const float th = std::max(2.0f, h / 360.0f);
+    if (editing) dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), IM_COL32(0, 0, 0, 105));
+
+    const uint32_t skin = std::min<uint32_t>(g_skin, kSkins - 1);
+
     for (size_t i = 0; i < kButtonCount; i++) {
-        const Button& b = kButtons[i];
         if (!ButtonShown(i)) continue;
-        float cx, cy;
-        Centre(i, cx, cy);
-        float r = Radius(i);
-        bool hidden = g_layout[i].hidden;
-        bool on = !editing && (g_pressed[i] || (b.press == kGyro && gyro::CurrentMode() != gyro::kOff));
-        int fade = hidden ? 40 : 100;  // a hidden control shows faint in the editor
-        if (Skinned()) {
-            // pressed in a little and lit; the icons the skin has none of (the menus' arrows, the scope's zoom) drawn
-            // on its plain circle in its colours
-            float k = on ? 0.92f : 1.0f;
-            ImU32 tint = Fade(255, 255, 255, on ? 255 : 215 * fade / 100);
-            SkinPart part = PartOf(b.icon);
-            SkinImage(dl, part == kNoPart ? kStickBase : part, ImVec2(cx, cy), r * k, tint);
-            if (part == kNoPart) {
-                ImU32 ink = (kSkinInk & ~IM_COL32_A_MASK) | (tint & IM_COL32_A_MASK);
-                DrawIcon({dl, ImVec2(cx, cy), r * k * 0.8f, ink, th * 1.4f}, b.icon);
+        float x0, y0, x1, y1;
+        ButtonRect(i, x0, y0, x1, y1);
+        const float cx = (x0 + x1) * 0.5f;
+        const float cy = (y0 + y1) * 0.5f;
+        const float bw = x1 - x0;
+        const float bh = y1 - y0;
+
+        const bool hidden = g_layout[i].hidden;
+        const bool on = !editing && g_pressed[i];
+        const int fade = hidden ? 40 : 100;
+        const float press_scale = on ? 0.94f : 1.0f;
+
+        const float dx0 = cx - bw * 0.5f * press_scale;
+        const float dy0 = cy - bh * 0.5f * press_scale;
+        const float dx1 = cx + bw * 0.5f * press_scale;
+        const float dy1 = cy + bh * 0.5f * press_scale;
+
+        const SvgIcon icon = ActiveIconForButton(i);
+        const AtlasUv& uv = g_atlas_uv[skin][static_cast<size_t>(icon)];
+
+        if (g_skin_texture && uv.valid) {
+            ImU32 tint;
+            if (kButtons[i].when == When::PlayTurbo && !editing) {
+                // Highlight ready Slipstream Turbo with warm electric cyan/gold tint
+                tint = on ? Fade(255, 240, 180, 255) : Fade(120, 235, 255, 245);
+            } else {
+                tint = Fade(255, 255, 255, on ? 255 : (225 * fade / 100));
             }
+            dl->AddImage(g_skin_texture, ImVec2(dx0, dy0), ImVec2(dx1, dy1),
+                         ImVec2(uv.u0, uv.v0), ImVec2(uv.u1, uv.v1), tint);
         } else {
-            dl->AddCircleFilled(ImVec2(cx, cy), r, on ? Fade(255, 255, 255, 70) : Fade(0, 0, 0, 80 * fade / 100), 48);
-            dl->AddCircle(ImVec2(cx, cy), r, Fade(255, 255, 255, 60 * fade / 100), 48, th * 0.6f);
-            DrawIcon({dl, ImVec2(cx, cy), r, on ? Fade(255, 255, 255, 230) : Fade(255, 255, 255, 180 * fade / 100), th},
-                     b.icon);
+            // Crisp fallback vector pill if SVG atlas unavailable
+            const float rounding = std::min(bw, bh) * 0.25f;
+            dl->AddRectFilled(ImVec2(dx0, dy0), ImVec2(dx1, dy1),
+                              on ? Fade(255, 255, 255, 95) : Fade(15, 15, 20, 120 * fade / 100), rounding);
+            dl->AddRect(ImVec2(dx0, dy0), ImVec2(dx1, dy1),
+                        Fade(255, 255, 255, 190 * fade / 100), rounding, 0, th);
+            CentredText(dl, ImVec2(cx, cy), std::min(bw, bh) * 0.24f,
+                        Fade(255, 255, 255, 220 * fade / 100), kButtons[i].label);
         }
-        if (b.press == kGyro) {
-            const char* mode = gyro::ModeName();
-            float fs = r * 0.55f;
-            ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0, mode);
-            dl->AddText(ImGui::GetFont(), fs, ImVec2(cx - ts.x / 2, cy + r * 1.08f), Fade(255, 255, 255, 180), mode);
-        }
-        if (editing && int(i) == g_selected) dl->AddCircle(ImVec2(cx, cy), r + th * 2, IM_COL32(255, 200, 60, 255), 48, th * 1.5f);
-        if (editing && hidden) {
-            float k = r * 0.6f;
-            dl->AddLine(ImVec2(cx - k, cy - k), ImVec2(cx + k, cy + k), IM_COL32(255, 80, 60, 220), th);
-            dl->AddLine(ImVec2(cx - k, cy + k), ImVec2(cx + k, cy - k), IM_COL32(255, 80, 60, 220), th);
+
+        if (editing) {
+            if (int(i) == g_selected) {
+                dl->AddRect(ImVec2(x0 - th * 2, y0 - th * 2), ImVec2(x1 + th * 2, y1 + th * 2),
+                            IM_COL32(255, 200, 60, 255), std::min(bw, bh) * 0.22f, 0, th * 1.5f);
+            }
+            if (hidden) {
+                dl->AddLine(ImVec2(x0 + bw * 0.2f, y0 + bh * 0.2f), ImVec2(x1 - bw * 0.2f, y1 - bh * 0.2f),
+                            IM_COL32(255, 80, 60, 220), th * 1.2f);
+                dl->AddLine(ImVec2(x0 + bw * 0.2f, y1 - bh * 0.2f), ImVec2(x1 - bw * 0.2f, y0 + bh * 0.2f),
+                            IM_COL32(255, 80, 60, 220), th * 1.2f);
+            }
+            CentredText(dl, ImVec2(cx, y1 + h * 0.020f), h * 0.022f, IM_COL32(255, 255, 255, 210), kButtons[i].label);
         }
     }
-    if (editing || (!InMenus() && !app::MenuOpen() && input::Play())) DrawStick(dl, th);
+
+    // Subtle fading Radio swipe toast at bottom-center during gameplay
+    const uint64_t now = NowMs();
+    if (!editing && CurrentUiContext() == game::UiContext::Gameplay && now < g_radio_toast_until) {
+        const float remain = float(g_radio_toast_until - now) / float(kToastMs);
+        const int alpha = int(std::clamp(remain * 1.5f, 0.0f, 1.0f) * 220.0f);
+        const char* msg = (g_radio_toast_dir > 0) ? "RADIO  >" : "<  RADIO";
+        const float ty = h * 0.88f;
+        const float fs = h * 0.036f;
+        const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0, msg);
+        dl->AddRectFilled(ImVec2(w * 0.5f - ts.x * 0.7f, ty - ts.y * 0.7f),
+                          ImVec2(w * 0.5f + ts.x * 0.7f, ty + ts.y * 0.7f),
+                          IM_COL32(15, 15, 20, alpha * 2 / 3), h * 0.018f);
+        CentredText(dl, ImVec2(w * 0.5f, ty), fs, IM_COL32(255, 255, 255, alpha), msg);
+    }
+
     if (editing) {
-        if (g_selected == int(kStick)) {
-            ImVec2 at(g_layout[kStick].x * Width(), g_layout[kStick].y * h);
-            dl->AddCircle(at, Radius(kStick) + th * 2, IM_COL32(255, 200, 60, 255), 64, th * 1.5f);
-        }
         DrawEditorBar(dl, th);
     }
 }
 
-// ---- the layout's settings, for the game's options (Recomp Settings, TOUCH); game thread, each saved at once
+// Rasterize all 3 SVG skins (outline, filled-white, filled-dark) into one Vulkan RGBA atlas using LunaSVG
+bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& out_w, uint32_t& out_h) {
+    constexpr uint32_t kAtlasW = 2048;
+    constexpr uint32_t kAtlasH = 2048;
+    constexpr uint32_t kPad = 4;
 
-namespace {
+    rgba.assign(size_t(kAtlasW) * kAtlasH * 4u, 0u);
+    uint32_t cur_x = kPad;
+    uint32_t cur_y = kPad;
+    uint32_t row_h = 0;
+    int loaded_count = 0;
 
-// the controls moved, resized or hidden away from the preset's places
-bool Custom() {
-    const Layout& preset = *kPresets[g_preset].places;
-    for (size_t i = 0; i <= kButtonCount; i++) {
-        const Place& a = g_layout[i];
-        const Place& b = preset[i];
-        if (std::fabs(a.x - b.x) > 1e-4f || std::fabs(a.y - b.y) > 1e-4f || std::fabs(a.r - b.r) > 1e-4f ||
-            a.hidden != b.hidden)
-            return true;
+    for (uint32_t s = 0; s < kSkins; ++s) {
+        for (size_t i = 0; i < kSvgIconCount; ++i) {
+            const auto icon = static_cast<SvgIcon>(i);
+            const SvgSpec& spec = kSvgSpecs[i];
+            g_atlas_uv[s][i] = AtlasUv{};
+
+            std::string svg;
+            if (!ReadSvgFile(kSkinDirs[s], spec.file, svg)) {
+                LOGW("touch: missing svg skins/mc3dr/%s/%s.svg", kSkinDirs[s], spec.file);
+                continue;
+            }
+            AdaptRectangularSvg(icon, svg);
+
+            auto doc = lunasvg::Document::loadFromData(svg.data(), svg.size());
+            if (!doc) {
+                LOGW("touch: failed to parse svg %s/%s.svg", kSkinDirs[s], spec.file);
+                continue;
+            }
+            auto bmp = doc->renderToBitmap(spec.cell_w, spec.cell_h, 0x00000000u);
+            if (!bmp.valid()) continue;
+            bmp.convertToRGBA();
+
+            if (cur_x + spec.cell_w + kPad > kAtlasW) {
+                cur_x = kPad;
+                cur_y += row_h + kPad;
+                row_h = 0;
+            }
+            if (cur_y + spec.cell_h + kPad > kAtlasH) {
+                LOGE("touch: SVG atlas overflow at %s/%s", kSkinDirs[s], spec.file);
+                break;
+            }
+
+            const uint8_t* src = bmp.data();
+            const uint32_t src_stride = bmp.stride();
+            for (uint32_t y = 0; y < spec.cell_h; ++y) {
+                uint8_t* dst = &rgba[(size_t(cur_y + y) * kAtlasW + cur_x) * 4u];
+                std::memcpy(dst, src + size_t(y) * src_stride, size_t(spec.cell_w) * 4u);
+            }
+
+            g_atlas_uv[s][i] = AtlasUv{
+                float(cur_x) / float(kAtlasW),
+                float(cur_y) / float(kAtlasH),
+                float(cur_x + spec.cell_w) / float(kAtlasW),
+                float(cur_y + spec.cell_h) / float(kAtlasH),
+                true,
+            };
+            cur_x += spec.cell_w + kPad;
+            row_h = std::max(row_h, spec.cell_h);
+            ++loaded_count;
+        }
     }
-    return false;
+
+    out_w = kAtlasW;
+    out_h = kAtlasH;
+    LOGI("[OK] touch: rasterized %d SVG button icons across %u skins into %ux%u atlas",
+         loaded_count, kSkins, out_w, out_h);
+    return loaded_count > 0;
 }
 
-uint32_t Percent(float f) { return uint32_t(std::lround(f * 100.0f)); }
+void SetSkinTexture(uint64_t texture) {
+    g_skin_texture = reinterpret_cast<ImTextureID>(uintptr_t(texture));
+}
 
+// ============================================================================
+// Options API (called from src/common/menu.cpp Touchscreen Options)
+// ============================================================================
+namespace {
+uint32_t Percent(float f) { return uint32_t(std::lround(f * 100.0f)); }
 }  // namespace
 
-const char* LayoutName() {
-    std::lock_guard lock(g_lock);
-    EnsureLayout();
-    return Custom() ? "CUSTOM" : kPresets[g_preset].label;
-}
-
-// the next or previous preset; from a custom layout first back to its own preset's places, or the one before
-void StepLayout(int step) {
-    std::lock_guard lock(g_lock);
-    EnsureLayout();
-    size_t n = std::size(kPresets);
-    size_t i = Custom() ? (step > 0 ? g_preset : (g_preset + n - 1) % n) : (g_preset + n + (step > 0 ? 1 : n - 1)) % n;
-    ApplyPreset(i);
-    SaveLayout();
-}
+const char* LayoutName() { return "DEFAULT"; }
+void StepLayout(int) {}
 
 uint32_t ControlsOpacity() {
     std::lock_guard lock(g_lock);
@@ -1564,7 +1478,6 @@ uint32_t ControlsOpacity() {
     return Percent(g_opacity);
 }
 
-// 20% to 100% in steps of 5
 void StepOpacity(int step) {
     std::lock_guard lock(g_lock);
     EnsureLayout();
@@ -1578,7 +1491,6 @@ uint32_t ControlsSize() {
     return Percent(g_scale);
 }
 
-// 50% to 150% in steps of 5
 void StepSize(int step) {
     std::lock_guard lock(g_lock);
     EnsureLayout();
@@ -1589,7 +1501,7 @@ void StepSize(int step) {
 const char* SkinName() {
     std::lock_guard lock(g_lock);
     EnsureLayout();
-    return kSkinNames[g_skin];
+    return kSkinNames[std::min<uint32_t>(g_skin, kSkins - 1)];
 }
 
 void StepSkin(int step) {
@@ -1599,53 +1511,27 @@ void StepSkin(int step) {
     SaveLayout();
 }
 
-const char* StickModeName() {
-    std::lock_guard lock(g_lock);
-    EnsureLayout();
-    return g_fixed_stick ? "FIXED" : "FLOATING";
-}
+const char* StickModeName() { return "BUTTONS"; }
+void StepStickMode(int) {}
 
-void StepStickMode(int) {
-    std::lock_guard lock(g_lock);
-    EnsureLayout();
-    g_fixed_stick ^= true;
-    SaveLayout();
-}
-
-bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& w, uint32_t& h) {
-    SDL_Surface* png = SDL_LoadPNG(kSkinFile);
-    SDL_Surface* s = png ? SDL_ConvertSurface(png, SDL_PIXELFORMAT_ABGR8888) : nullptr;  // R G B A in memory
-    SDL_DestroySurface(png);
-    if (!s) {
-        LOGE("touch: %s: %s", kSkinFile, SDL_GetError());
-        return false;
-    }
-    w = uint32_t(s->w);
-    h = uint32_t(s->h);
-    rgba.resize(size_t(w) * h * 4);
-    for (uint32_t y = 0; y < h; y++)
-        std::memcpy(&rgba[size_t(y) * w * 4], static_cast<const uint8_t*>(s->pixels) + size_t(y) * s->pitch, size_t(w) * 4);
-    SDL_DestroySurface(s);
-    g_skin_w = float(w);
-    g_skin_h = float(h);
-    return true;
-}
-
-void SetSkinTexture(uint64_t texture) { g_skin_texture = reinterpret_cast<ImTextureID>(uintptr_t(texture)); }
-
-// the controls over the screen to drag where they go, Done or Cancel in the bar at the top, Android's back cancels
 void EditLayout() {
     std::lock_guard lock(g_lock);
     EnsureLayout();
-    // the touch that picked the row is the menu's, not the editor's
     g_fingers.clear();
-    g_cursor_down = false;
     Recount();
     OpenEditor();
 }
 
+void ResetLayout() {
+    std::lock_guard lock(g_lock);
+    EnsureLayout();
+    g_layout = kDefaultLayout;
+    g_opacity = 0.85f;
+    g_scale = 1.0f;
+    SaveLayout();
+}
+
 void AddLook(float dx, float dy) {
-    // the fraction of a count carried to the next reading: slow turns add up
     static float rx = 0, ry = 0;
     rx += dx;
     ry += dy;
@@ -1657,41 +1543,18 @@ void AddLook(float dx, float dy) {
 }
 
 void PadUsed() { input::g_touch = false; }
-
-bool LookActive() { return !g_editing && input::Active() && input::Play() && !InMenus(); }
+bool LookActive() { return !g_editing && input::Active() && input::Play() && !IsMenuLike(CurrentUiContext()); }
 
 bool Firing() {
-    {
-        std::lock_guard lock(g_lock);
-        for (size_t i = 0; i < kButtonCount; i++)
-            if (g_pressed[i] && kButtons[i].press == kAnalogRT) return true;
+    std::lock_guard lock(g_lock);
+    for (size_t i = 0; i < kButtonCount; i++) {
+        if (g_pressed[i] && kButtons[i].press == kAnalogRT) return true;
     }
-    if (input::Down(VK_LBUTTON)) return true;
-
-    constexpr int kTriggerThreshold = 4096;
-    int n = 0;
-    bool firing = false;
-    if (SDL_JoystickID* ids = SDL_GetGamepads(&n)) {
-        for (int i = 0; i < n; i++) {
-            SDL_Gamepad* pad = SDL_GetGamepadFromID(ids[i]);
-            if (pad &&
-                SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) >
-                    kTriggerThreshold) {
-                firing = true;
-                break;
-            }
-        }
-        SDL_free(ids);
-    }
-    return firing;
+    return false;
 }
 
-// main thread, each turn of the event loop: the on-screen keyboard while a name is typed
 void Pump() {
     gyro::Pump();
-    // a mouse in play is captured as on a PC: no pointer over the picture and no screen edge to stop a turn. Let go
-    // in the menus, the panel, the background and once the touch screen is used; asked again whenever Android took
-    // it away
     SDL_Window* window = host::Window();
     bool capture = input::g_keyboard && !input::g_touch && LookActive();
     if (window && capture != SDL_GetWindowRelativeMouseMode(window)) SDL_SetWindowRelativeMouseMode(window, capture);
@@ -1706,31 +1569,8 @@ void Pump() {
 
 namespace input {
 
-bool CursorShown() { return g_menu && (g_keyboard || touch::g_cursor_touch); }
-
-bool Cursor(float& x, float& y, bool& down) {
-    if (!Active() || !CursorShown()) return false;
-    int w, h;
-    host::WindowPixels(w, h);
-    if (w <= 0 || h <= 0) return false;
-    float px, py;
-    bool touch_down;
-    {
-        std::lock_guard lock(touch::g_lock);
-        touch::MenuHolds();
-        px = touch::g_cursor_x;
-        py = touch::g_cursor_y;
-        touch_down = touch::g_cursor_touch && (touch::g_cursor_down || NowMs() < touch::g_cursor_tap_until);
-    }
-    // the frame is shown in the middle of the window
-    float aspect = game::Aspect();
-    float vw = std::min(float(w), float(h) * aspect);
-    float vh = vw / aspect;
-    x = (px - (float(w) - vw) / 2) / vw;
-    y = (py - (float(h) - vh) / 2) / vh;
-    down = touch_down || Down(VK_LBUTTON);
-    return true;
-}
+bool CursorShown() { return false; }
+bool Cursor(float&, float&, bool&) { return false; }
 
 bool LeftButton() {
     if (!Active() || g_settle) return false;
@@ -1740,21 +1580,14 @@ bool LeftButton() {
                        [](const touch::Finger& f) { return f.role != touch::Role::Button; });
 }
 
-}  // namespace input
-
-namespace input {
-
 bool TouchActive() { return g_touch; }
 
-// the touch control that presses the pad's button: 0-7 analog A B X Y black white LT RT, 8-15 the button bits
 std::string TouchName(int button) {
-    int press = button < touch::kBit ? button : touch::kBit + (button - touch::kBit);
     std::lock_guard lock(touch::g_lock);
     for (size_t i = 0; i < touch::kButtonCount; i++) {
         const touch::Button& b = touch::kButtons[i];
-        if (b.press != press || touch::g_layout[i].hidden) continue;
+        if (b.press != button || touch::g_layout[i].hidden) continue;
         std::string name = b.label;
-        if (size_t paren = name.find(" ("); paren != std::string::npos) name.resize(paren);
         std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return char(std::toupper(c)); });
         return name;
     }

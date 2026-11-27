@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Special: Agro (Ram) (Filled Dark)">
+  <defs>
+    <mask id="m-special-agro" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect x="0" y="0" width="512" height="512" fill="#FFFFFF"/>
+      <g transform="scale(4)">
+    <path d="M 64 31 L 91 41 Q 93 42 93 45 L 93 62 C 93 79 80 90 66 96 Q 64 97 62 96 C 48 90 35 79 35 62 L 35 45 Q 35 42 37 41 Z" fill="none" stroke="#000000" stroke-width="5.8" stroke-linejoin="round"/>
+    <path d="M 50 61 L 64 47 L 78 61" fill="none" stroke="#000000" stroke-width="6.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M 50 77 L 64 63 L 78 77" fill="none" stroke="#000000" stroke-width="6.2" stroke-linecap="round" stroke-linejoin="round"/>
+      </g>
+    </mask>
+  </defs>
+  <g id="btn-special-agro">
+    <g mask="url(#m-special-agro)">
+      <g transform="scale(4)">
+        <circle cx="64" cy="64" r="52" fill="#18181B" stroke="#18181B" stroke-width="6"/>
+      </g>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Handbrake (Filled Dark)">
+  <defs>
+    <mask id="m-handbrake" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect x="0" y="0" width="512" height="512" fill="#FFFFFF"/>
+      <g transform="scale(4)">
+    <line x1="31" y1="89.5" x2="96" y2="89.5" stroke="#000000" stroke-width="5.2" stroke-linecap="round"/>
+    <circle cx="42" cy="79.5" r="8" fill="none" stroke="#000000" stroke-width="5.4"/>
+    <circle cx="42" cy="79.5" r="2.8" fill="#000000"/>
+    <g transform="rotate(-34 42 79.5)">
+      <line x1="50" y1="79.5" x2="62.5" y2="79.5" stroke="#000000" stroke-width="5.6" stroke-linecap="round"/>
+      <rect x="61.5" y="72.5" width="33" height="14" rx="7" fill="none" stroke="#000000" stroke-width="5.4"/>
+      <line x1="94.5" y1="79.5" x2="100" y2="79.5" stroke="#000000" stroke-width="6.2" stroke-linecap="round"/>
+    </g>
+    <path d="M 69.43 49.53 A 41 41 0 0 0 47.71 39.40" fill="none" stroke="#000000" stroke-width="5.2" stroke-linecap="round"/>
+    <path d="M 55.21 31.90 L 46.51 39.90 L 56.71 45.90" fill="none" stroke="#000000" stroke-width="5.2" stroke-linecap="round" stroke-linejoin="round"/>
+      </g>
+    </mask>
+  </defs>
+  <g id="btn-handbrake">
+    <g mask="url(#m-handbrake)">
+      <g transform="scale(4)">
+        <circle cx="64" cy="64" r="52" fill="#18181B" stroke="#18181B" stroke-width="6"/>
+      </g>
+    </g>
+  </g>
+</svg>

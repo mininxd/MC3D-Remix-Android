@@ -61,7 +61,8 @@ void StepOpacity(int step);
 uint32_t ControlsSize();  // percent of each control's own size
 void StepSize(int step);
 void EditLayout();  // the controls over the screen to drag where they go
-const char* SkinName();  // the buttons' look: CLASSIC (drawn), XBOX or CLEAN (the skin's images)
+void ResetLayout(); // reset touch control positions, sizes, and visibility to default
+const char* SkinName();  // the buttons' look: OUTLINE, FILLED WHITE, FILLED DARK
 void StepSkin(int step);
 const char* StickModeName();  // FLOATING (under the thumb) or FIXED (in its place)
 void StepStickMode(int step);

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Slipstream Turbo (Filled Dark)">
+  <defs>
+    <mask id="m-turbo" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect x="0" y="0" width="512" height="512" fill="#FFFFFF"/>
+      <g transform="scale(4)">
+    <path d="M 58 41 L 92 41 A 3 3 0 0 1 95 44 L 95 54 A 3 3 0 0 1 92 57 L 81 57 A 25 25 0 1 1 58 41 Z" fill="none" stroke="#000000" stroke-width="5.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="58" cy="66" r="14.5" fill="none" stroke="#000000" stroke-width="3.8"/>
+    <circle cx="58" cy="66" r="4.8" fill="#000000"/>
+    <path d="M 62.80 66.00 Q 68.33 67.88 70.18 72.48" fill="none" stroke="#000000" stroke-width="3.2" stroke-linecap="round"/><path d="M 60.40 70.16 Q 61.54 75.89 58.48 79.79" fill="none" stroke="#000000" stroke-width="3.2" stroke-linecap="round"/><path d="M 55.60 70.16 Q 51.21 74.01 46.30 73.31" fill="none" stroke="#000000" stroke-width="3.2" stroke-linecap="round"/><path d="M 53.20 66.00 Q 47.67 64.12 45.82 59.52" fill="none" stroke="#000000" stroke-width="3.2" stroke-linecap="round"/><path d="M 55.60 61.84 Q 54.46 56.11 57.52 52.21" fill="none" stroke="#000000" stroke-width="3.2" stroke-linecap="round"/><path d="M 60.40 61.84 Q 64.79 57.99 69.70 58.69" fill="none" stroke="#000000" stroke-width="3.2" stroke-linecap="round"/>
+      </g>
+    </mask>
+  </defs>
+  <g id="btn-turbo">
+    <g mask="url(#m-turbo)">
+      <g transform="scale(4)">
+        <circle cx="64" cy="64" r="52" fill="#18181B" stroke="#18181B" stroke-width="6"/>
+      </g>
+    </g>
+  </g>
+</svg>

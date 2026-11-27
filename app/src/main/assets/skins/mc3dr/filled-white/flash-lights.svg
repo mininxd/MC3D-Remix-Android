@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Flash Headlights / Challenge (Filled White)">
+  <defs>
+    <mask id="m-flash-lights" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect x="0" y="0" width="512" height="512" fill="#FFFFFF"/>
+      <g transform="scale(4)">
+    <path d="M 65 42 C 87 42 96 51 96 64 C 96 77 87 86 65 86 C 61 73 61 55 65 42 Z" fill="none" stroke="#000000" stroke-width="5.8" stroke-linejoin="round"/>
+    <line x1="53" y1="51" x2="33" y2="44" stroke="#000000" stroke-width="5.8" stroke-linecap="round"/>
+    <line x1="52" y1="64" x2="30" y2="64" stroke="#000000" stroke-width="5.8" stroke-linecap="round"/>
+    <line x1="53" y1="77" x2="33" y2="84" stroke="#000000" stroke-width="5.8" stroke-linecap="round"/>
+      </g>
+    </mask>
+  </defs>
+  <g id="btn-flash-lights">
+    <g mask="url(#m-flash-lights)">
+      <g transform="scale(4)">
+        <circle cx="64" cy="64" r="52" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="6"/>
+      </g>
+    </g>
+  </g>
+</svg>

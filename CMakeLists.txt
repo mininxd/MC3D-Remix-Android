@@ -79,10 +79,13 @@ set(ENABLE_SPVREMAPPER OFF CACHE BOOL "" FORCE)
 set(GLSLANG_TESTS OFF CACHE BOOL "" FORCE)
 set(GLSLANG_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
 set(BUILD_EXTERNAL OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(LUNASVG_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(glslang GIT_REPOSITORY https://github.com/KhronosGroup/glslang.git GIT_TAG 16.0.0 GIT_SHALLOW TRUE)
 FetchContent_Declare(tomlplusplus GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git GIT_TAG v3.4.0 GIT_SHALLOW TRUE)
 FetchContent_Declare(imgui GIT_REPOSITORY https://github.com/ocornut/imgui.git GIT_TAG v1.91.0 GIT_SHALLOW TRUE)
-FetchContent_MakeAvailable(glslang tomlplusplus imgui)
+FetchContent_Declare(lunasvg GIT_REPOSITORY https://github.com/sammycage/lunasvg.git GIT_TAG v2.4.1 GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(glslang tomlplusplus imgui lunasvg)
 
 # the SDK's runtime but its Windows parts, and those the game replaces (src/sound, src/d3d)
 file(GLOB RUNTIME_SOURCES ${SDK}/runtime/*/*.cpp)
@@ -107,6 +110,6 @@ set_source_files_properties(${GEN_SOURCES} PROPERTIES
     COMPILE_OPTIONS "-O3;-ffp-contract=fast;-flto=thin;-w;-fno-strict-aliasing;-fsigned-char")
 set_source_files_properties(${NATIVE}/vk_shader.cpp PROPERTIES COMPILE_DEFINITIONS ENABLE_HLSL)
 target_link_libraries(main PRIVATE SDL3::SDL3 tomlplusplus::tomlplusplus glslang glslang-default-resource-limits
-                      vulkan android log)
+                      lunasvg vulkan android log)
 # 16 KB pages, as Android 15 devices may have
 target_link_options(main PRIVATE -flto=thin -Wl,-z,max-page-size=16384)

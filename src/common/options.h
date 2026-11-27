@@ -10,7 +10,7 @@ namespace game {
 inline constexpr const char* kLanguages[] = {"int", "fra", "deu", "ita", "esp"};
 
 struct Options {
-    bool touch_controls = false;  // gamepad like xbox is primary target, touch off by default
+    bool touch_controls = true;   // mobile touch controls (auto-hides when physical gamepad is active)
     bool skip_intros = false;
     bool fps_counter = false;
     uint32_t fmv_scale = 0;

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Burnout (Filled Dark)">
+  <defs>
+    <mask id="m-burnout" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect x="0" y="0" width="512" height="512" fill="#FFFFFF"/>
+      <g transform="scale(4)">
+    <circle cx="74" cy="68" r="19.5" fill="none" stroke="#000000" stroke-width="6.5"/>
+    <circle cx="74" cy="68" r="4.6" fill="#000000"/>
+    <line x1="74.00" y1="62.80" x2="74.00" y2="52.00" stroke="#000000" stroke-width="3.4" stroke-linecap="round"/><line x1="78.95" y1="66.39" x2="89.22" y2="63.06" stroke="#000000" stroke-width="3.4" stroke-linecap="round"/><line x1="77.06" y1="72.21" x2="83.40" y2="80.94" stroke="#000000" stroke-width="3.4" stroke-linecap="round"/><line x1="70.94" y1="72.21" x2="64.60" y2="80.94" stroke="#000000" stroke-width="3.4" stroke-linecap="round"/><line x1="69.05" y1="66.39" x2="58.78" y2="63.06" stroke="#000000" stroke-width="3.4" stroke-linecap="round"/>
+    <path d="M 57.68 47.12 A 26.5 26.5 0 0 1 91.73 48.31" fill="none" stroke="#000000" stroke-width="4.2" stroke-linecap="round"/>
+    <path d="M 84.73 47.11 L 91.73 48.31 L 90.53 41.31" fill="none" stroke="#000000" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <line x1="34" y1="90.5" x2="93" y2="90.5" stroke="#000000" stroke-width="5" stroke-linecap="round"/>
+    <path d="M 52 84.5 C 42 84.5 37 80.5 37 74.5 C 30 73.5 27 65.5 32 60.5 C 35 56.5 41 56.5 44 60.5 C 46 53.5 52.5 51.5 56.5 56.5" fill="none" stroke="#000000" stroke-width="4.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="38" cy="46.5" r="3.8" fill="#000000"/>
+      </g>
+    </mask>
+  </defs>
+  <g id="btn-burnout">
+    <g mask="url(#m-burnout)">
+      <g transform="scale(4)">
+        <circle cx="64" cy="64" r="52" fill="#18181B" stroke="#18181B" stroke-width="6"/>
+      </g>
+    </g>
+  </g>
+</svg>

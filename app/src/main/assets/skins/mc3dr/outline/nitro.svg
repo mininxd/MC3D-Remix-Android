@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Nitrous (Outline)">
+  <g id="btn-nitro" transform="scale(4)">
+    <circle cx="64" cy="64" r="52" fill="none" stroke="#FFFFFF" stroke-width="6"/>
+    <g transform="rotate(32 64 64) translate(0 1)">
+      <rect x="48" y="42" width="32" height="53" rx="14" fill="none" stroke="#FFFFFF" stroke-width="5.5"/>
+      <rect x="58" y="32" width="12" height="10" rx="3" fill="#FFFFFF"/>
+      <line x1="51" y1="30" x2="77" y2="30" stroke="#FFFFFF" stroke-width="5.5" stroke-linecap="round"/>
+      <path d="M 67 54 L 57 69.5 L 64.5 69.5 L 61 83.5 L 71 67 L 63.5 67 Z" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="2" stroke-linejoin="round"/>
+    </g>
+  </g>
+</svg>

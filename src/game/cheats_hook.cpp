@@ -1,4 +1,5 @@
 #include "game/cheats_hook.h"
+#include "game/touch_context.h"
 
 #include "app/app.h"
 #include "core/log.h"
@@ -10,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -682,7 +684,93 @@ void RunWithZeroCost(X86Context& ctx, uint8_t* base, Fn orig_fn) {
 
 }  // namespace
 
+void UpdateTouchTelemetry() {
+    auto& tel = game::Telemetry();
+
+    const uint32_t state_mgr = safe_mem::Read32(0x00557ED0u, 0u);
+    const uint32_t app_state = state_mgr ? safe_mem::Read32(state_mgr + 0x04u, 0u) : 0u;
+
+    const uint32_t menu_mgr = safe_mem::Read32(0x0050F148u, 0u);
+    const uint32_t menu_obj = menu_mgr ? safe_mem::Read32(menu_mgr + 0x0Cu, 0u) : 0u;
+    const uint32_t menu_owner = menu_obj ? safe_mem::Read32(menu_obj + 0x0Cu, 0u) : 0u;
+    const bool menu_visible = menu_owner && ((safe_mem::Read8(menu_owner + 0x44u, 0u) & 0x01u) != 0u);
+
+    const uint32_t car_mgr = safe_mem::Read32(0x00558814u, 0u);
+    const uint32_t player_car = car_mgr ? safe_mem::Read32(car_mgr + 0x08u, 0u) : 0u;
+
+    UiContext ctx = UiContext::MainMenu;
+    if (app_state == 0x03u) {
+        ctx = UiContext::Garage;
+    } else if (app_state == 0x06u) {
+        ctx = UiContext::Loading;
+    } else if (app_state == 0x02u) {
+        if (menu_visible) ctx = UiContext::MainMenu;
+        else if (player_car != 0u) ctx = UiContext::Gameplay;
+        else ctx = UiContext::Loading;
+    } else {
+        ctx = UiContext::MainMenu;
+    }
+    tel.ui_context.store(static_cast<uint8_t>(ctx), std::memory_order_relaxed);
+
+    bool has_nos = false;
+    bool turbo_ready = false;
+    bool special_ready = false;
+    int8_t special_type = -1;
+    float speed_kmh = 0.0f;
+
+    if (ctx == UiContext::Gameplay && player_car != 0u) {
+        const uint32_t veh_p14 = safe_mem::Read32(player_car + 0x14u, 0u);
+        const uint32_t veh_phys = veh_p14 ? safe_mem::Read32(veh_p14 + 0x08u, 0u) : 0u;
+        if (veh_phys && safe_mem::CanAccess(veh_phys + 0xB0u, 4u)) {
+            const uint32_t speed_bits = kernel::R32(veh_phys + 0xB0u);
+            float speed_mps = 0.0f;
+            std::memcpy(&speed_mps, &speed_bits, sizeof(speed_mps));
+            if (std::isfinite(speed_mps)) {
+                speed_kmh = std::fabs(speed_mps) * 3.6f;
+            }
+        }
+
+        // NOS: only show when player has purchased nitrous on this vehicle (max_nos > 0).
+        const uint32_t nitro = veh_phys ? safe_mem::Read32(veh_phys + 0x180u, 0u) : 0u;
+        if (nitro && safe_mem::CanAccess(nitro + 0x0Eu, 2u)) {
+            const int16_t max_nos = static_cast<int16_t>(kernel::R16(nitro + 0x0Eu));
+            has_nos = (max_nos > 0);
+        }
+
+        // Slipstream Turbo: only show when filled from slipstream (ready && speed >= 10 km/h, never during burnout).
+        const uint32_t turbo = veh_phys ? safe_mem::Read32(veh_phys + 0x184u, 0u) : 0u;
+        if (turbo && safe_mem::CanAccess(turbo + 0x24u, 8u)) {
+            const uint32_t fill_bits = kernel::R32(turbo + 0x24u);
+            float fill = 0.0f;
+            std::memcpy(&fill, &fill_bits, sizeof(fill));
+            const uint8_t firing = safe_mem::Read8(turbo + 0x28u, 0u);
+            const uint8_t avail = safe_mem::Read8(turbo + 0x29u, 0u);
+            turbo_ready = (avail != 0u) && (firing == 0u) && std::isfinite(fill) && (fill >= 0.99f) && (speed_kmh >= 10.0f);
+        }
+
+        // Special Ability (0 = Zone, 1 = Agro, 2 = Roar): show when available and charged/active.
+        if (safe_mem::CanAccess(player_car + 0xD4u, 0x28u)) {
+            const int32_t stype = static_cast<int32_t>(kernel::R32(player_car + 0xF8u));
+            const int32_t sstate = static_cast<int32_t>(kernel::R32(player_car + 0xF4u));
+            const uint32_t sfill_bits = kernel::R32(player_car + 0xD4u);
+            float sfill = 0.0f;
+            std::memcpy(&sfill, &sfill_bits, sizeof(sfill));
+            if (stype >= 0 && stype <= 2) {
+                special_type = static_cast<int8_t>(stype);
+                special_ready = (sstate == 3) || (std::isfinite(sfill) && sfill >= 0.25f);
+            }
+        }
+    }
+
+    tel.has_nos.store(has_nos, std::memory_order_relaxed);
+    tel.turbo_ready.store(turbo_ready, std::memory_order_relaxed);
+    tel.special_ready.store(special_ready, std::memory_order_relaxed);
+    tel.special_type.store(special_type, std::memory_order_relaxed);
+    tel.speed_kmh.store(speed_kmh, std::memory_order_relaxed);
+}
+
 void OnFrameTick() {
+    UpdateTouchTelemetry();
     SyncWithActiveSaveIfChanged();
     ApplyUnlockFlags();
     ApplyTrafficSettings();
