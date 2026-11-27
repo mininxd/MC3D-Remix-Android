@@ -773,6 +773,16 @@ uint64_t g_fmv_last_ms = 0;
 uint64_t g_fmv_skip_pulse_until = 0;
 bool g_fmv_skip_fired = false;
 
+// Map button hold-to-open-Full-Map (Back button) animated progress ring state (under g_lock)
+constexpr float kMapHoldFullMs = 450.0f;
+constexpr uint64_t kMapPulseMs = 150;
+float g_map_hold_progress = 0.0f;
+uint64_t g_map_hold_last_ms = 0;
+uint64_t g_map_tap_pulse_until = 0;
+uint64_t g_map_full_pulse_until = 0;
+bool g_map_hold_fired = false;
+bool g_map_was_down = false;
+
 // Analog steering stick, Bike auto-analog + weight transfer, & Garage 1-finger orbit state (under g_lock)
 bool g_analog_stick = false;
 bool g_last_is_bike = false;
@@ -1538,7 +1548,7 @@ void FingerMove(SDL_FingerID id, float x, float y) {
                 f.last_y = y;
                 f.last_move_ms = now;
 
-                const float dyaw = (dx / std::max(w, 1.0f)) * 4.4f;
+                const float dyaw = -(dx / std::max(w, 1.0f)) * 4.4f;
                 const float dpitch = (dy / std::max(h, 1.0f)) * 2.0f;
                 if (std::fabs(dyaw) > 1e-5f || std::fabs(dpitch) > 1e-5f) {
                     game::AddGarageTouchOrbit(dyaw, dpitch, 0.0f);
@@ -1777,9 +1787,8 @@ void EmitRing(std::vector<Quad>& out, float cx, float cy, float radius_px, float
                        0, 0, 1, 1, r, g, b, a, progress, thickness_px, br, bg, bb, ba, 2u});
 }
 
-void EmitTextCentered(std::vector<Quad>& out, float cx, float cy, float line_h,
-                      float r, float g, float b, float a, const char* text) {
-    if (!text || !text[0] || !g_skin_ready.load(std::memory_order_relaxed)) return;
+float MeasureTextWidth(float line_h, const char* text) {
+    if (!text || !text[0] || !g_skin_ready.load(std::memory_order_relaxed)) return 0.0f;
     const size_t len = std::strlen(text);
     const float tracking = line_h * 0.015f;
     float total_w = 0.0f;
@@ -1789,6 +1798,15 @@ void EmitTextCentered(std::vector<Quad>& out, float cx, float cy, float line_h,
         const GlyphUv& uv = g_font_uv[ch - 32u];
         total_w += uv.adv * line_h + ((i + 1u < len) ? tracking : 0.0f);
     }
+    return total_w;
+}
+
+void EmitTextCentered(std::vector<Quad>& out, float cx, float cy, float line_h,
+                      float r, float g, float b, float a, const char* text) {
+    if (!text || !text[0] || !g_skin_ready.load(std::memory_order_relaxed)) return;
+    const size_t len = std::strlen(text);
+    const float tracking = line_h * 0.015f;
+    const float total_w = MeasureTextWidth(line_h, text);
     float x = cx - total_w * 0.5f;
     const float baseline_y = cy + g_font_cap_center * line_h;
     for (size_t i = 0; i < len; ++i) {
@@ -1926,6 +1944,38 @@ void UpdateFmvHoldLocked(uint64_t now) {
         }
     } else {
         g_fmv_progress = std::max(0.0f, g_fmv_progress - float(dt_ms) / 220.0f);
+    }
+}
+
+void UpdateMapHoldLocked(uint64_t now) {
+    const auto ctx = CurrentUiContext();
+    if (ctx != game::UiContext::Gameplay || g_editing) {
+        g_map_hold_progress = 0.0f;
+        g_map_hold_last_ms = now;
+        g_map_hold_fired = false;
+        g_map_was_down = false;
+        return;
+    }
+    const uint64_t dt_ms = (g_map_hold_last_ms != 0 && now >= g_map_hold_last_ms)
+                               ? std::min<uint64_t>(now - g_map_hold_last_ms, 100u)
+                               : 16u;
+    g_map_hold_last_ms = now;
+
+    if (g_pressed[kIdxMap]) {
+        g_map_was_down = true;
+        g_map_hold_progress = std::min(1.0f, g_map_hold_progress + float(dt_ms) / kMapHoldFullMs);
+        if (g_map_hold_progress >= 1.0f && !g_map_hold_fired) {
+            g_map_hold_fired = true;
+            g_map_full_pulse_until = now + kMapPulseMs;
+            LOGI("[OK] touch: Map hold triggered Back button (Full Map)");
+        }
+    } else {
+        if (g_map_was_down && !g_map_hold_fired) {
+            g_map_tap_pulse_until = now + 100u;
+        }
+        g_map_was_down = false;
+        g_map_hold_fired = false;
+        g_map_hold_progress = std::max(0.0f, g_map_hold_progress - float(dt_ms) / 180.0f);
     }
 }
 
@@ -2088,6 +2138,7 @@ void Apply(int port, input::Pad& pad) {
     SyncBikeModeLocked(now);
     UpdateFmvHoldLocked(now);
     Recount();
+    UpdateMapHoldLocked(now);
     bool used = false;
     bool gas_held = false;
     int steer = 0;
@@ -2101,6 +2152,7 @@ void Apply(int port, input::Pad& pad) {
         const int p = kButtons[i].press;
         if (p == kModeSwap || p == kEditBtn || p == kSteerStick) continue;
         used = true;
+        if (i == kIdxMap) continue;  // Handled by tap (mini-map) vs hold (Xbox Back -> full map)
         if (kButtons[i].action == game::GameAction::Gas) gas_held = true;
         if (p == kSteerLeft) {
             steer -= 1;
@@ -2112,6 +2164,18 @@ void Apply(int port, input::Pad& pad) {
             ApplyRemappedAction(pad, game::GameAction::Handbrake, 0, kAnalogA);
         } else {
             ApplyRemappedAction(pad, kButtons[i].action, 0, p);
+        }
+    }
+
+    // Map button: short tap toggles mini-map (GameAction::Map); hold opens Full City Map via Xbox Back (1 << 5)
+    if (ctx == game::UiContext::Gameplay) {
+        if (now < g_map_tap_pulse_until) {
+            ApplyRemappedAction(pad, game::GameAction::Map, 0, kBit + 5);
+            used = true;
+        }
+        if (now < g_map_full_pulse_until) {
+            pad.buttons |= uint16_t(1u << 5);  // Xbox Back / Select -> Full City Map
+            used = true;
         }
     }
 
@@ -2183,6 +2247,7 @@ void BuildOverlay(std::vector<Quad>& out) {
     const uint64_t now = NowMs();
     SyncBikeModeLocked(now);
     UpdateFmvHoldLocked(now);
+    UpdateMapHoldLocked(now);
 
     const bool editing = g_editing;
     const float fade_alpha = CurrentFadeAlphaLocked(now);
@@ -2411,6 +2476,17 @@ void BuildOverlay(std::vector<Quad>& out) {
                 EmitTextCentered(out, cx, badge_cy, h * 0.025f,
                                  br, bg, bb, 0.98f * fade_alpha, on ? "BURNOUT" : "LAUNCH");
             }
+
+            // Animated clockwise circular progress ring while holding Map button (same style as FMV skip!)
+            if (!editing && i == kIdxMap && g_map_hold_progress > 0.01f) {
+                const float prog = g_map_hold_progress;
+                const float pulse = 1.0f + prog * 0.09f;
+                const float ring_r = std::max(bw, bh) * 0.5f * 1.24f * pulse;
+                const float vis_a = fade_alpha * std::max(0.65f, g_opacity);
+                EmitRing(out, cx, cy, ring_r, std::max(3.5f, h * 0.0075f), prog,
+                         1.0f, 0.88f, 0.38f, 0.98f * vis_a,
+                         1.0f, 1.0f, 1.0f, 0.32f * vis_a);
+            }
         }
 
         if (editing) {
@@ -2424,6 +2500,36 @@ void BuildOverlay(std::vector<Quad>& out) {
                 EmitPanel(out, x0, y0, x1, y1,
                           0.95f, 0.28f, 0.24f, 0.14f, std::min(bw, bh) * 0.24f,
                           th * 0.9f, 0.98f, 0.36f, 0.32f, 0.78f);
+            }
+
+            // Show crisp button name label while editing layout (Gas, Brake, Handbrake, Map, etc.)
+            const char* btn_lbl = kButtons[i].label;
+            if (btn_lbl && btn_lbl[0]) {
+                const float s = UiScale(w, h);
+                const float txt_h = std::clamp(11.0f * s, 14.0f, h * 0.026f);
+                const float tw = MeasureTextWidth(txt_h, btn_lbl);
+                const float pill_w = std::max(tw + 14.0f * s, 38.0f * s);
+                const float pill_h = txt_h * 1.48f;
+                const float margin = 4.0f * s;
+                const float lx = std::clamp(cx, pill_w * 0.5f + margin,
+                                            std::max(pill_w * 0.5f + margin, w - pill_w * 0.5f - margin));
+                float ly = y1 + pill_h * 0.5f + 4.0f * s;
+                if (ly + pill_h * 0.5f > h - margin) {
+                    ly = y0 - pill_h * 0.5f - 4.0f * s;
+                }
+                ly = std::clamp(ly, pill_h * 0.5f + margin,
+                                std::max(pill_h * 0.5f + margin, h - pill_h * 0.5f - margin));
+
+                const bool sel = (int(i) == g_selected);
+                const float br = sel ? 1.000f : (hidden ? 0.98f : 1.0f);
+                const float bg = sel ? 0.820f : (hidden ? 0.36f : 1.0f);
+                const float bb = sel ? 0.541f : (hidden ? 0.32f : 1.0f);
+                const float ba = sel ? 0.95f : (hidden ? 0.78f : 0.42f);
+                const float ta = sel ? 1.00f : (hidden ? 0.85f : 0.94f);
+                EmitPanel(out, lx - pill_w * 0.5f, ly - pill_h * 0.5f, lx + pill_w * 0.5f, ly + pill_h * 0.5f,
+                          0.055f, 0.075f, 0.110f, 0.88f, pill_h * 0.45f,
+                          std::max(1.2f, 1.1f * s), br, bg, bb, ba);
+                EmitTextCentered(out, lx, ly, txt_h, br, bg, bb, ta, btn_lbl);
             }
         }
     }
