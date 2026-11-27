@@ -1584,11 +1584,8 @@ X86_FUNC(sub_00044230) {
     __imp__sub_00044230(ctx, base);
 }
 
-// Dynamic 256x256 cubemap reflections control (sub_00332EF0 + sub_00332460).
-// Reflections option:
-//   0 = Off (seed initial cubemap only),
-//   1 = Half Rate (update cubemap every 2nd frame for higher FPS with dynamic reflections),
-//   2 = Full (every-frame high reflections).
+// Dynamic 256x256 cubemap reflections toggle (sub_00332EF0 + sub_00332460).
+// Reflections option: 0 = Off (seed initial cubemap only), >= 1 = On (full every-frame high reflections).
 namespace {
 uint32_t g_envmap_last_mgr = 0u;
 uint32_t g_envmap_frame = 0u;
@@ -1597,19 +1594,13 @@ bool g_envmap_run_pass = true;
 
 X86_EXTERN_FUNC(__imp__sub_00332EF0);
 X86_FUNC(sub_00332EF0) {
-    const uint32_t mode = game::Opt().reflections;
+    const bool enabled = game::Opt().reflections != 0u;
     if (ctx.ecx != g_envmap_last_mgr) {
         g_envmap_last_mgr = ctx.ecx;
         g_envmap_frame = 0u;
     }
     const uint32_t frame = g_envmap_frame++;
-    if (mode == 0u) {
-        g_envmap_run_pass = (frame < 2u);
-    } else if (mode == 1u) {
-        g_envmap_run_pass = (frame < 2u) || ((frame & 1u) == 0u);
-    } else {
-        g_envmap_run_pass = true;
-    }
+    g_envmap_run_pass = enabled || (frame < 2u);
     if (!g_envmap_run_pass) {
         ctx.esp += 4u;  // __thiscall ret 0
         return;
@@ -1619,7 +1610,7 @@ X86_FUNC(sub_00332EF0) {
 
 X86_EXTERN_FUNC(__imp__sub_00332460);
 X86_FUNC(sub_00332460) {
-    if (game::Opt().reflections < 2u && ctx.ecx == g_envmap_last_mgr && !g_envmap_run_pass) {
+    if (game::Opt().reflections == 0u && ctx.ecx == g_envmap_last_mgr && !g_envmap_run_pass) {
         ctx.esp += 4u;  // __thiscall ret 0
         return;
     }
