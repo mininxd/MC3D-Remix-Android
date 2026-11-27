@@ -5,6 +5,7 @@
 #include "game/cheats_hook.h"
 #include "game/guest_mem_safe.h"
 #include "game/object_logger.h"
+#include "game/touch_context.h"
 #include "kernel/kernel.h"
 #include "kernel/memory.h"
 #include "sound/sound.h"
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
