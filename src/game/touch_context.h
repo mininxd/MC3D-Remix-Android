@@ -55,6 +55,7 @@ struct TouchTelemetry {
     std::atomic<bool> is_bike{false};        // true when riding a Chopper (5) or Sport Bike (6)
     std::atomic<bool> race_intro{false};     // true during pre-race cinematic preview before 3-2-1 countdown
     std::atomic<bool> race_countdown{false}; // true during pre-race 3-2-1 staging countdown before GO!
+    std::atomic<bool> flash_challenge_ready{false}; // true when in range to flash high beams to challenge rival/event
     std::atomic<bool> in_save_screen{false}; // true on Load/Save Profile screen (show Delete trash icon)
     std::atomic<bool> in_city_map{false};    // true on Full City Map screen (show top-left < > city switch arrows)
     std::atomic<uint64_t> fmv_frame_ms{0};   // steady clock ms of last active Bink FMV frame

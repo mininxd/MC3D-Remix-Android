@@ -48,6 +48,7 @@ X86_EXTERN_FUNC(__imp__sub_000659D0);
 X86_EXTERN_FUNC(__imp__sub_00209000);
 X86_EXTERN_FUNC(__imp__sub_002090A0);
 X86_EXTERN_FUNC(__imp__sub_002C4A10);
+X86_EXTERN_FUNC(__imp__sub_002CA830);
 
 namespace game::cheats {
 namespace {
@@ -70,6 +71,7 @@ constexpr uint32_t kVehicleListCountAddr = 0x00557EB4u;
 std::atomic<uint32_t> g_full_map_obj{0};
 std::atomic<bool> g_full_map_open{false};
 std::atomic<uint32_t> g_button_prompts_table_va{0};
+std::atomic<uint64_t> g_flash_challenge_ms{0};
 
 bool IsControllerPromptClip(uint32_t name_va) {
     if (!name_va || !safe_mem::CanAccess(name_va, 2u)) return false;
@@ -648,6 +650,11 @@ void UpdateTouchTelemetry() {
     tel.is_bike.store(is_bike, std::memory_order_relaxed);
     tel.race_intro.store(race_intro, std::memory_order_relaxed);
     tel.race_countdown.store(race_countdown, std::memory_order_relaxed);
+    const uint64_t last_flash_ms = g_flash_challenge_ms.load(std::memory_order_relaxed);
+    const bool flash_challenge_ready = (ctx == UiContext::Gameplay) &&
+                                       (last_flash_ms != 0u) && (now_ms >= last_flash_ms) &&
+                                       ((now_ms - last_flash_ms) < 250u);
+    tel.flash_challenge_ready.store(flash_challenge_ready, std::memory_order_relaxed);
 
     // Sync active in-game Controller Configuration / Custom Remap table so remapped controls
     // automatically mirror onto touch buttons (sub_002693D0 -> [profile_mgr + 0x114 + 0x18], table @ 0x00558848).
@@ -1074,4 +1081,11 @@ X86_FUNC(sub_002C4A10) {
         return;
     }
     __imp__sub_002C4A10(ctx, base);
+}
+
+// Detect when MC3D is displaying the "flash to begin" / rival high-beam challenge prompt in Cruise.
+// sub_002CA830 is called exclusively by the 3 rival/event flash-to-begin HUD draw paths (0x1D7E67, 0x1D811C, 0x264286).
+X86_FUNC(sub_002CA830) {
+    game::cheats::g_flash_challenge_ms.store(game::cheats::SteadyNowMs(), std::memory_order_relaxed);
+    __imp__sub_002CA830(ctx, base);
 }
