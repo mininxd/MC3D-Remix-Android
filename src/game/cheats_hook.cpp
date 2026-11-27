@@ -59,9 +59,16 @@ constexpr uint32_t kVehicleListPtrAddr = 0x00557EB0u;
 constexpr uint32_t kVehicleListCountAddr = 0x00557EB4u;
 constexpr uint32_t kGameStateAddr = 0x0053F2D4u;
 
-constexpr uint32_t CheatBit(CheatId id) {
-    return 1u << static_cast<uint32_t>(id);
-}
+enum class CheatId : int {
+    Cash5000 = 0,
+    FullThrottle = 1,
+    SecretDealer = 2,
+    NoTraffic = 3,
+    ZeroCost = 4,
+    Arcade = 5,
+    Delivery = 6,
+    Count = 7,
+};
 
 struct CheatState {
     std::atomic<bool> full_throttle{false};
@@ -70,7 +77,6 @@ struct CheatState {
     std::atomic<bool> zero_cost{false};
     std::atomic<bool> arcade_powerups{false};
     std::atomic<bool> delivery{false};
-    std::atomic<uint32_t> unlocked_mask{0u};
 
     bool powerup_hud_loaded_by_cheat = false;
 };
@@ -78,16 +84,22 @@ struct CheatState {
 CheatState g_state;
 thread_local int g_zero_cost_depth = 0;
 
-struct SaveCheatRecord {
-    std::string savefile;
-    uint32_t activated_mask = 0u;
-    uint32_t typed_mask = 0u;
-};
-
-std::mutex g_db_mutex;
-bool g_db_loaded = false;
-std::vector<SaveCheatRecord> g_db_records;
+std::mutex g_save_mutex;
 std::string g_synced_save_name;
+std::atomic<bool> g_legacy_db_cleaned{false};
+
+const char* GetCheatCodeName(CheatId id) {
+    switch (id) {
+        case CheatId::Cash5000:     return "AMSSRBLHGSHARK";
+        case CheatId::FullThrottle: return "FULLTHROTTLE";
+        case CheatId::SecretDealer: return "SECRETDEALER";
+        case CheatId::NoTraffic:    return "GHOSTTOWN";
+        case CheatId::ZeroCost:     return "ZEROCOST";
+        case CheatId::Arcade:       return "ARCADE";
+        case CheatId::Delivery:     return "DELIVERY";
+        default:                    return "UNKNOWN";
+    }
+}
 
 std::string UpperTrim(const std::string& raw) {
     std::string out;
@@ -118,259 +130,26 @@ bool ParseCheatName(const std::string& raw, CheatId* out_id) {
     return false;
 }
 
-std::filesystem::path CheatDbPath() {
-    return app::ExeDir() / "saves_cheat.db";
-}
-
-// Minimal JSON string escaper/parser for saves_cheat.db:
-// [{"savefile": "player1", "activated_cheat": ["ZEROCOST"], "typed_cheat": ["ZEROCOST", "AMSSRBLHGSHARK"]}]
-std::string JsonEscape(const std::string& s) {
-    std::string out;
-    out.reserve(s.size() + 4);
-    for (unsigned char c : s) {
-        switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (c >= 0x20u && c < 0x7Fu) out.push_back(static_cast<char>(c));
-                break;
-        }
-    }
-    return out;
-}
-
-struct JsonReader {
-    const std::string& s;
-    size_t pos = 0;
-
-    void SkipWs() {
-        while (pos < s.size() && std::isspace(static_cast<unsigned char>(s[pos]))) ++pos;
-    }
-
-    bool Consume(char ch) {
-        SkipWs();
-        if (pos < s.size() && s[pos] == ch) {
-            ++pos;
-            return true;
-        }
-        return false;
-    }
-
-    bool ParseString(std::string& out) {
-        SkipWs();
-        if (pos >= s.size() || s[pos] != '"') return false;
-        ++pos;
-        out.clear();
-        while (pos < s.size()) {
-            char c = s[pos++];
-            if (c == '"') return true;
-            if (c == '\\' && pos < s.size()) {
-                char esc = s[pos++];
-                switch (esc) {
-                    case '"': out.push_back('"'); break;
-                    case '\\': out.push_back('\\'); break;
-                    case '/': out.push_back('/'); break;
-                    case 'n': out.push_back('\n'); break;
-                    case 'r': out.push_back('\r'); break;
-                    case 't': out.push_back('\t'); break;
-                    default: out.push_back(esc); break;
-                }
-            } else {
-                out.push_back(c);
-            }
-        }
-        return false;
-    }
-
-    bool ParseStringArray(std::vector<std::string>& out) {
-        out.clear();
-        if (!Consume('[')) return false;
-        if (Consume(']')) return true;
-        for (;;) {
-            std::string item;
-            if (!ParseString(item)) return false;
-            out.push_back(std::move(item));
-            if (Consume(',')) continue;
-            return Consume(']');
-        }
-    }
-
-    void SkipValue() {
-        SkipWs();
-        if (pos >= s.size()) return;
-        char c = s[pos];
-        if (c == '"') {
-            std::string tmp;
-            ParseString(tmp);
-            return;
-        }
-        if (c == '[' || c == '{') {
-            char open = c;
-            char close = (c == '[') ? ']' : '}';
-            int depth = 0;
-            bool in_str = false;
-            while (pos < s.size()) {
-                char ch = s[pos++];
-                if (in_str) {
-                    if (ch == '\\' && pos < s.size()) ++pos;
-                    else if (ch == '"') in_str = false;
-                } else {
-                    if (ch == '"') in_str = true;
-                    else if (ch == open) ++depth;
-                    else if (ch == close && --depth <= 0) return;
-                }
-            }
-            return;
-        }
-        while (pos < s.size() && s[pos] != ',' && s[pos] != '}' && s[pos] != ']') ++pos;
-    }
-};
-
-void LoadCheatDbLocked() {
-    if (g_db_loaded) return;
-    g_db_loaded = true;
-    g_db_records.clear();
-
-    const auto path = CheatDbPath();
-    std::ifstream f(path);
-    if (!f) return;
-    std::string data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    JsonReader r{data};
-    if (!r.Consume('[')) return;
-    if (r.Consume(']')) return;
-
-    while (r.pos < data.size()) {
-        if (!r.Consume('{')) break;
-        SaveCheatRecord rec;
-        if (!r.Consume('}')) {
-            for (;;) {
-                std::string key;
-                if (!r.ParseString(key)) break;
-                if (!r.Consume(':')) break;
-                if (key == "savefile") {
-                    r.ParseString(rec.savefile);
-                } else if (key == "activated_cheat") {
-                    std::vector<std::string> arr;
-                    if (r.ParseStringArray(arr)) {
-                        for (const auto& name : arr) {
-                            CheatId id;
-                            if (ParseCheatName(name, &id)) {
-                                rec.typed_mask |= CheatBit(id);
-                                if (id != CheatId::Cash5000) {
-                                    rec.activated_mask |= CheatBit(id);
-                                }
-                            }
-                        }
-                    }
-                } else if (key == "typed_cheat") {
-                    std::vector<std::string> arr;
-                    if (r.ParseStringArray(arr)) {
-                        for (const auto& name : arr) {
-                            CheatId id;
-                            if (ParseCheatName(name, &id)) {
-                                rec.typed_mask |= CheatBit(id);
-                            }
-                        }
-                    }
-                } else {
-                    r.SkipValue();
-                }
-                if (r.Consume(',')) continue;
-                r.Consume('}');
-                break;
-            }
-        }
-        rec.savefile = TrimString(rec.savefile);
-        rec.typed_mask |= rec.activated_mask;
-        if (!rec.savefile.empty()) {
-            g_db_records.push_back(std::move(rec));
-        }
-        if (r.Consume(',')) continue;
-        r.Consume(']');
-        break;
-    }
-    LOGI("[OK] cheats: loaded saves_cheat.db (%zu save entries)", g_db_records.size());
-}
-
-void AppendCheatArrayJson(std::string& out, uint32_t mask, bool include_cash) {
-    out += "[";
-    bool first = true;
-    for (int i = 0; i < static_cast<int>(CheatId::Count); ++i) {
-        const auto id = static_cast<CheatId>(i);
-        if (!include_cash && id == CheatId::Cash5000) continue;
-        if ((mask & CheatBit(id)) == 0u) continue;
-        if (!first) out += ", ";
-        first = false;
-        out += "\"";
-        out += GetCheatCodeName(id);
-        out += "\"";
-    }
-    out += "]";
-}
-
-void WriteCheatDbLocked() {
-    const auto path = CheatDbPath();
-    auto tmp = path;
-    tmp += ".tmp";
-
-    std::string out = "[\n";
-    for (size_t i = 0; i < g_db_records.size(); ++i) {
-        const auto& rec = g_db_records[i];
-        out += "  {\n";
-        out += "    \"savefile\": \"" + JsonEscape(rec.savefile) + "\",\n";
-        out += "    \"activated_cheat\": ";
-        AppendCheatArrayJson(out, rec.activated_mask, false);
-        out += ",\n";
-        out += "    \"typed_cheat\": ";
-        AppendCheatArrayJson(out, rec.typed_mask | rec.activated_mask, true);
-        out += "\n  }";
-        if (i + 1 < g_db_records.size()) out += ",";
-        out += "\n";
-    }
-    out += "]\n";
-
+void DeleteLegacyCheatDbOnce() {
+    if (g_legacy_db_cleaned.exchange(true, std::memory_order_relaxed)) return;
     std::error_code ec;
-    std::filesystem::create_directories(path.parent_path(), ec);
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (!f) {
-            LOGE("[ERR] cheats: failed to write %s", tmp.c_str());
-            return;
-        }
-        f.write(out.data(), static_cast<std::streamsize>(out.size()));
-        f.flush();
-        if (!f) return;
+    const auto db_path = app::ExeDir() / "saves_cheat.db";
+    if (std::filesystem::remove(db_path, ec)) {
+        LOGI("[OK] cheats: removed legacy dedicated saved cheat file saves_cheat.db");
     }
-    std::filesystem::rename(tmp, path, ec);
-    if (ec) {
-        std::filesystem::remove(path, ec);
-        ec.clear();
-        std::filesystem::rename(tmp, path, ec);
-    }
+    ec.clear();
+    auto tmp_path = db_path;
+    tmp_path += ".tmp";
+    std::filesystem::remove(tmp_path, ec);
 }
 
-uint32_t CurrentActivatedMask() {
-    uint32_t m = 0u;
-    if (g_state.full_throttle.load(std::memory_order_relaxed)) m |= CheatBit(CheatId::FullThrottle);
-    if (g_state.secret_dealer.load(std::memory_order_relaxed)) m |= CheatBit(CheatId::SecretDealer);
-    if (g_state.no_traffic.load(std::memory_order_relaxed)) m |= CheatBit(CheatId::NoTraffic);
-    if (g_state.zero_cost.load(std::memory_order_relaxed)) m |= CheatBit(CheatId::ZeroCost);
-    if (g_state.arcade_powerups.load(std::memory_order_relaxed)) m |= CheatBit(CheatId::Arcade);
-    if (g_state.delivery.load(std::memory_order_relaxed)) m |= CheatBit(CheatId::Delivery);
-    return m;
-}
-
-void ApplyMasksToLiveState(uint32_t activated_mask, uint32_t typed_mask) {
-    g_state.full_throttle.store((activated_mask & CheatBit(CheatId::FullThrottle)) != 0u, std::memory_order_relaxed);
-    g_state.secret_dealer.store((activated_mask & CheatBit(CheatId::SecretDealer)) != 0u, std::memory_order_relaxed);
-    g_state.no_traffic.store((activated_mask & CheatBit(CheatId::NoTraffic)) != 0u, std::memory_order_relaxed);
-    g_state.zero_cost.store((activated_mask & CheatBit(CheatId::ZeroCost)) != 0u, std::memory_order_relaxed);
-    g_state.arcade_powerups.store((activated_mask & CheatBit(CheatId::Arcade)) != 0u, std::memory_order_relaxed);
-    g_state.delivery.store((activated_mask & CheatBit(CheatId::Delivery)) != 0u, std::memory_order_relaxed);
-    g_state.unlocked_mask.store(typed_mask | activated_mask, std::memory_order_relaxed);
+void ClearAllSessionCheats() {
+    g_state.full_throttle.store(false, std::memory_order_relaxed);
+    g_state.secret_dealer.store(false, std::memory_order_relaxed);
+    g_state.no_traffic.store(false, std::memory_order_relaxed);
+    g_state.zero_cost.store(false, std::memory_order_relaxed);
+    g_state.arcade_powerups.store(false, std::memory_order_relaxed);
+    g_state.delivery.store(false, std::memory_order_relaxed);
 }
 
 std::string ReadGuestActiveSaveName() {
@@ -380,55 +159,19 @@ std::string ReadGuestActiveSaveName() {
     return TrimString(safe_mem::ReadSanitizedCString(mgr + kSaveMgrNameOffset, 64));
 }
 
-void PersistCurrentSaveStateLocked(const std::string& save_name) {
-    if (save_name.empty()) return;
-    LoadCheatDbLocked();
-    const uint32_t active_mask = CurrentActivatedMask();
-    const uint32_t typed_mask = g_state.unlocked_mask.load(std::memory_order_relaxed) | active_mask;
-
-    auto it = std::find_if(g_db_records.begin(), g_db_records.end(),
-                           [&](const SaveCheatRecord& r) { return r.savefile == save_name; });
-    if (it != g_db_records.end()) {
-        it->activated_mask = active_mask;
-        it->typed_mask = typed_mask;
-    } else if (typed_mask != 0u || active_mask != 0u) {
-        g_db_records.push_back(SaveCheatRecord{save_name, active_mask, typed_mask});
-    } else {
-        return;
-    }
-    WriteCheatDbLocked();
-}
-
-void SyncWithActiveSaveIfChanged() {
+// Session-only cheats: never persisted across restarts, and automatically cleared when switching/unloading saves.
+void ResetCheatsOnSaveSwitch() {
+    DeleteLegacyCheatDbOnce();
     const std::string active_save = ReadGuestActiveSaveName();
-    std::lock_guard<std::mutex> lock(g_db_mutex);
-    LoadCheatDbLocked();
+    std::lock_guard<std::mutex> lock(g_save_mutex);
     if (active_save == g_synced_save_name) return;
 
     const std::string prev_save = g_synced_save_name;
     g_synced_save_name = active_save;
-
-    if (active_save.empty()) {
-        // Save unloaded / back to fresh state: clear active & unlocked cheats so next save starts clean.
-        ApplyMasksToLiveState(0u, 0u);
-        LOGI("[OK] cheats: active save cleared (was '%s'), reset cheat state", prev_save.c_str());
-        return;
-    }
-
-    auto it = std::find_if(g_db_records.begin(), g_db_records.end(),
-                           [&](const SaveCheatRecord& r) { return r.savefile == active_save; });
-    if (it != g_db_records.end()) {
-        ApplyMasksToLiveState(it->activated_mask, it->typed_mask);
-        LOGI("[OK] cheats: synced save '%s' from saves_cheat.db (active=0x%X typed=0x%X)",
-             active_save.c_str(), it->activated_mask, it->typed_mask);
-    } else if (prev_save.empty() && g_state.unlocked_mask.load(std::memory_order_relaxed) != 0u) {
-        // Brand-new career saved for the first time after typing cheats in this unsaved session.
-        PersistCurrentSaveStateLocked(active_save);
-        LOGI("[OK] cheats: bound unsaved session cheats to new save '%s'", active_save.c_str());
-    } else {
-        // Switched to a different save (e.g. player2) with no saved cheats: start completely clean!
-        ApplyMasksToLiveState(0u, 0u);
-        LOGI("[OK] cheats: switched to clean save '%s' (no saved cheats)", active_save.c_str());
+    if (active_save.empty() || !prev_save.empty()) {
+        ClearAllSessionCheats();
+        LOGI("[OK] cheats: save changed ('%s' -> '%s'), all session cheats reset OFF",
+             prev_save.c_str(), active_save.c_str());
     }
 }
 
@@ -623,24 +366,13 @@ std::atomic<bool>* FlagForCheat(CheatId id) {
     }
 }
 
-void MarkUnlockedAndPersist(CheatId id) {
-    g_state.unlocked_mask.fetch_or(CheatBit(id), std::memory_order_relaxed);
-    const std::string active_save = ReadGuestActiveSaveName();
-    std::lock_guard<std::mutex> lock(g_db_mutex);
-    if (!active_save.empty()) {
-        g_synced_save_name = active_save;
-        PersistCurrentSaveStateLocked(active_save);
-    }
-}
-
 bool TryHandleCheatCode(const std::string& raw) {
-    SyncWithActiveSaveIfChanged();
+    ResetCheatsOnSaveSwitch();
     CheatId id;
     if (!ParseCheatName(raw, &id)) return false;
 
     if (id == CheatId::Cash5000) {
         const bool ok = AddCash(5000);
-        MarkUnlockedAndPersist(id);
         LOGI("[OK] cheats: AMSSRBLHGSHARK -> +5000 cash (%s)", ok ? "applied" : "no-profile");
         return true;
     }
@@ -654,9 +386,7 @@ bool TryHandleCheatCode(const std::string& raw) {
         else if (id == CheatId::Arcade) ApplyArcadeSettings();
         else if (id == CheatId::Delivery) ApplyUnlockFlags();
     }
-    MarkUnlockedAndPersist(id);
-    LOGI("[OK] cheats: %s -> %s (save='%s')", GetCheatCodeName(id), on ? "ON" : "OFF",
-         ReadGuestActiveSaveName().c_str());
+    LOGI("[OK] cheats: %s -> %s (session-only)", GetCheatCodeName(id), on ? "ON" : "OFF");
     return true;
 }
 
@@ -904,94 +634,11 @@ void UpdateTouchTelemetry() {
 
 void OnFrameTick() {
     UpdateTouchTelemetry();
-    SyncWithActiveSaveIfChanged();
+    ResetCheatsOnSaveSwitch();
     ApplyUnlockFlags();
     ApplyTrafficSettings();
     ApplyArcadeSettings();
     ApplyFullThrottleNos();
-}
-
-void ReloadCheatDb() {
-    {
-        std::lock_guard<std::mutex> lock(g_db_mutex);
-        g_db_loaded = false;
-        g_synced_save_name.clear();
-    }
-    SyncWithActiveSaveIfChanged();
-}
-
-bool HasAnyUnlockedCheat() {
-    SyncWithActiveSaveIfChanged();
-    return g_state.unlocked_mask.load(std::memory_order_relaxed) != 0u;
-}
-
-bool IsCheatUnlocked(CheatId id) {
-    SyncWithActiveSaveIfChanged();
-    return (g_state.unlocked_mask.load(std::memory_order_relaxed) & CheatBit(id)) != 0u;
-}
-
-bool IsCheatActive(CheatId id) {
-    auto* flag = FlagForCheat(id);
-    return flag ? flag->load(std::memory_order_relaxed) : false;
-}
-
-bool ToggleCheat(CheatId id) {
-    SyncWithActiveSaveIfChanged();
-    auto* flag = FlagForCheat(id);
-    if (!flag) return false;
-    const bool on = !flag->load(std::memory_order_relaxed);
-    flag->store(on, std::memory_order_relaxed);
-    if (on) {
-        if (id == CheatId::NoTraffic) ApplyTrafficSettings();
-        else if (id == CheatId::Arcade) ApplyArcadeSettings();
-        else if (id == CheatId::Delivery) ApplyUnlockFlags();
-    }
-    MarkUnlockedAndPersist(id);
-    LOGI("[OK] cheats: menu toggled %s -> %s", GetCheatCodeName(id), on ? "ON" : "OFF");
-    return on;
-}
-
-bool TriggerCashCheat() {
-    SyncWithActiveSaveIfChanged();
-    const bool ok = AddCash(5000);
-    LOGI("[OK] cheats: menu clicked AMSSRBLHGSHARK -> +5000 cash (%s)", ok ? "applied" : "no-profile");
-    return ok;
-}
-
-int32_t GetCurrentCash() {
-    const uint32_t prof = GetProfilePtr();
-    if (!prof || !safe_mem::CanAccess(prof + kProfileCashOffset, 4u)) return -1;
-    return static_cast<int32_t>(kernel::R32(prof + kProfileCashOffset));
-}
-
-std::string GetActiveSaveName() {
-    return ReadGuestActiveSaveName();
-}
-
-const char* GetCheatCodeName(CheatId id) {
-    switch (id) {
-        case CheatId::Cash5000:     return "AMSSRBLHGSHARK";
-        case CheatId::FullThrottle: return "FULLTHROTTLE";
-        case CheatId::SecretDealer: return "SECRETDEALER";
-        case CheatId::NoTraffic:    return "GHOSTTOWN";
-        case CheatId::ZeroCost:     return "ZEROCOST";
-        case CheatId::Arcade:       return "ARCADE";
-        case CheatId::Delivery:     return "DELIVERY";
-        default:                    return "UNKNOWN";
-    }
-}
-
-const char* GetCheatMenuLabel(CheatId id) {
-    switch (id) {
-        case CheatId::Cash5000:     return "Add $5,000 Cash";
-        case CheatId::FullThrottle: return "Full Throttle (NOS)";
-        case CheatId::SecretDealer: return "Secret Dealer (REMIX)";
-        case CheatId::NoTraffic:    return "Ghost Town (No Traffic)";
-        case CheatId::ZeroCost:     return "Zero Cost (Free Shop)";
-        case CheatId::Arcade:       return "Arcade Powerups";
-        case CheatId::Delivery:     return "Delivery (All Cities)";
-        default:                    return "Cheat";
-    }
 }
 
 }  // namespace game::cheats
@@ -1020,10 +667,10 @@ void NotifyFmvFrame() {
 }  // namespace game
 
 // Active savegame name setter: __thiscall void sub_000197C0(const char* name) [ret 0x04].
-// Immediately sync saves_cheat.db whenever a savefile is loaded or saved.
+// Reset session cheats cleanly whenever switching or unloading saves.
 X86_FUNC(sub_000197C0) {
     __imp__sub_000197C0(ctx, base);
-    game::cheats::SyncWithActiveSaveIfChanged();
+    game::cheats::ResetCheatsOnSaveSwitch();
 }
 
 // Cheat code input dispatcher: __stdcall int sub_001923B0(const char* input) [ret 0x04].
