@@ -20,19 +20,20 @@ enum class UiContext : uint8_t {
 // Gameplay actions synced live from MC3D's in-game Controller Configuration / Custom Remap table
 // (0x00558848 + active_config * 0x140).
 enum class GameAction : uint8_t {
-    SteerAxis = 0,  // MC3D action 0x00 STEER_AXIS
-    Gas,            // MC3D action 0x02 GAS (fallback 0x04)
-    Brake,          // MC3D action 0x03 BRAKE
-    Handbrake,      // MC3D action 0x07 HANDBRAKE
-    Nitro,          // MC3D action 0x09 NITRO (also activates slipstream turbo)
-    LookBack,       // MC3D action 0x0A LOOKBACK
-    Camera,         // MC3D action 0x0B CAM_UP
-    Map,            // MC3D action 0x0D MAP
-    FlashLights,    // MC3D action 0x10 HEADLIGHTS
-    Pause,          // MC3D action 0x12 PAUSE
-    RadioNext,      // MC3D action 0x14 MUSIC_UP
-    RadioPrev,      // MC3D action 0x15 MUSIC_DOWN
-    Special,        // MC3D action 0x23 IN_ZONE
+    SteerAxis = 0,   // MC3D action 0x00 STEER_AXIS
+    Gas,             // MC3D action 0x02 GAS (fallback 0x04)
+    Brake,           // MC3D action 0x03 BRAKE
+    Handbrake,       // MC3D action 0x07 HANDBRAKE
+    WeightTransfer,  // MC3D action 0x08 WEIGHT_XFER
+    Nitro,           // MC3D action 0x09 NITRO (also activates slipstream turbo)
+    LookBack,        // MC3D action 0x0A LOOKBACK
+    Camera,          // MC3D action 0x0B CAM_UP
+    Map,             // MC3D action 0x0D MAP
+    FlashLights,     // MC3D action 0x10 HEADLIGHTS
+    Pause,           // MC3D action 0x12 PAUSE
+    RadioNext,       // MC3D action 0x14 MUSIC_UP
+    RadioPrev,       // MC3D action 0x15 MUSIC_DOWN
+    Special,         // MC3D action 0x23 IN_ZONE
     Count,
 };
 
@@ -48,6 +49,7 @@ struct TouchTelemetry {
     std::atomic<bool> special_ready{false};  // special ability meter ready/active
     std::atomic<int8_t> special_type{-1};    // 0 = Zone, 1 = Agro, 2 = Roar, -1 = None
     std::atomic<float> speed_kmh{0.0f};      // current car speed in km/h
+    std::atomic<bool> is_bike{false};        // true when riding a Chopper (5) or Sport Bike (6)
     std::atomic<bool> race_countdown{false}; // true during pre-race 3-2-1 staging countdown before GO!
     std::atomic<bool> garage_vertical{false};// true in Garage when submenu list scrolls Up/Down (depth >= 1)
     std::atomic<uint64_t> fmv_frame_ms{0};   // steady clock ms of last active Bink FMV frame

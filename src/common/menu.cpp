@@ -181,6 +181,7 @@ constexpr Row kQualityRows[] = {
 // native Touchscreen Options rows (visibility is dynamic: 200ms auto fade-out on controller / fade-in on touch)
 constexpr Row kTouchRows[] = {
     {Kind::Value, kTouchSkin, "Button Style"},
+    {Kind::Value, kTouchStick, "Steering Mode"},
     {Kind::Value, kTouchOpacity, "Controls Opacity"},
     {Kind::Value, kAutoBurnout, "Auto Burnout"},
     {Kind::Action, kTouchEdit, "Edit Control Layout"},

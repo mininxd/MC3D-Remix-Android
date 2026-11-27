@@ -766,6 +766,7 @@ void UpdateTouchTelemetry() {
     bool special_ready = false;
     int8_t special_type = -1;
     float speed_kmh = 0.0f;
+    bool is_bike = false;
     bool race_countdown = false;
     bool garage_vertical = false;
 
@@ -789,6 +790,17 @@ void UpdateTouchTelemetry() {
             if (std::isfinite(speed_mps)) {
                 speed_kmh = std::fabs(speed_mps) * 3.6f;
             }
+        }
+
+        // Detect motorcycle class (5 = Chopper, 6 = Sport_Bike) from vehicle list [0x00557EB0]
+        // verified from x86_recomp.35.cpp:40678 & sub_0013C840.
+        const uint32_t veh_info = safe_mem::Read32(player_car + 0x10u, 0u);
+        const uint32_t veh_id = veh_info ? safe_mem::Read32(veh_info + 0x04u, 0xFFFFFFFFu) : 0xFFFFFFFFu;
+        const uint32_t veh_list = safe_mem::Read32(kVehicleListPtrAddr, 0u);
+        const uint32_t veh_count = safe_mem::Read32(kVehicleListCountAddr, 0u);
+        if (veh_list != 0u && veh_id < veh_count && veh_count < 512u) {
+            const uint32_t veh_class = safe_mem::Read32(veh_list + veh_id * 0x28u + 0x08u, 0xFFFFFFFFu);
+            is_bike = (veh_class == 5u || veh_class == 6u);
         }
 
         // Pre-race countdown detection verified from loc_001CC5D0 / sub_001DD1C0:
@@ -844,6 +856,7 @@ void UpdateTouchTelemetry() {
     tel.special_ready.store(special_ready, std::memory_order_relaxed);
     tel.special_type.store(special_type, std::memory_order_relaxed);
     tel.speed_kmh.store(speed_kmh, std::memory_order_relaxed);
+    tel.is_bike.store(is_bike, std::memory_order_relaxed);
     tel.race_countdown.store(race_countdown, std::memory_order_relaxed);
     tel.garage_vertical.store(garage_vertical, std::memory_order_relaxed);
 
@@ -859,6 +872,7 @@ void UpdateTouchTelemetry() {
                 0x02u,  // Gas
                 0x03u,  // Brake
                 0x07u,  // Handbrake
+                0x08u,  // WeightTransfer (WEIGHT_XFER)
                 0x09u,  // Nitro
                 0x0Au,  // LookBack
                 0x0Bu,  // Camera (CAM_UP)

@@ -494,13 +494,14 @@ namespace {
 
 using input::NowMs;
 
-enum class Role : uint8_t { None, Button, RadioSwipe, GarageSwipe, FmvHold, Drag, Pinch, ToolbarDrag };
+enum class Role : uint8_t { None, Button, AnalogStick, RadioSwipe, GarageOrbit, FmvHold, Drag, Pinch, ToolbarDrag };
 
 // Controller press targets
 enum : int {
     kSteerLeft = -10,
     kSteerRight = -11,
-    kBurnout = -12,  // Simultaneous Gas + Handbrake (synced with remapped bindings)
+    kBurnout = -12,     // Simultaneous Gas + Handbrake (synced with remapped bindings)
+    kSteerStick = -13,  // Progressive NFSU2-style analog steering thumbstick
     kAnalogA = 0,
     kAnalogB = 1,
     kAnalogX = 2,
@@ -518,6 +519,7 @@ enum class SvgIcon : uint8_t {
     Gas,
     Brake,
     Handbrake,
+    WeightTransfer,
     Burnout,
     Nitro,
     Turbo,
@@ -526,6 +528,7 @@ enum class SvgIcon : uint8_t {
     SpecialAgro,
     SpecialRoar,
     Start,
+    Pause,
     Camera,
     Map,
     FlashLights,
@@ -552,33 +555,35 @@ struct SvgSpec {
 };
 
 constexpr SvgSpec kSvgSpecs[kSvgIconCount] = {
-    {"steer-left",   128, 256},
-    {"steer-right",  128, 256},
-    {"gas",          128, 256},
-    {"brake",        170, 256},
-    {"handbrake",    192, 192},
-    {"burnout",      192, 192},
-    {"nitro",        192, 192},
-    {"turbo",        192, 192},
-    {"special",      192, 192},
-    {"special-zone", 192, 192},
-    {"special-agro", 192, 192},
-    {"special-roar", 192, 192},
-    {"start",        192, 192},
-    {"camera",       192, 192},
-    {"map",          192, 192},
-    {"flash-lights", 192, 192},
-    {"look-back",    192, 192},
-    {"dpad-up",      192, 192},
-    {"dpad-down",    192, 192},
-    {"dpad-left",    192, 192},
-    {"dpad-right",   192, 192},
-    {"dpad-up",      256, 128},
-    {"dpad-down",    256, 128},
-    {"dpad-left",    128, 256},
-    {"dpad-right",   128, 256},
-    {"ok",           284, 120},
-    {"back",         284, 120},
+    {"steer-left",      128, 256},
+    {"steer-right",     128, 256},
+    {"gas",             128, 256},
+    {"brake",           170, 256},
+    {"handbrake",       192, 192},
+    {"weight-transfer", 192, 192},
+    {"burnout",         192, 192},
+    {"nitro",           192, 192},
+    {"turbo",           192, 192},
+    {"special",         192, 192},
+    {"special-zone",    192, 192},
+    {"special-agro",    192, 192},
+    {"special-roar",    192, 192},
+    {"start",           192, 192},
+    {"pause",           192, 192},
+    {"camera",          192, 192},
+    {"map",             192, 192},
+    {"flash-lights",    192, 192},
+    {"look-back",       192, 192},
+    {"dpad-up",         192, 192},
+    {"dpad-down",       192, 192},
+    {"dpad-left",       192, 192},
+    {"dpad-right",      192, 192},
+    {"dpad-up",         256, 128},
+    {"dpad-down",       256, 128},
+    {"dpad-left",       128, 256},
+    {"dpad-right",      128, 256},
+    {"ok",              284, 120},
+    {"back",            284, 120},
 };
 
 enum Skin : uint32_t { kOutline = 0, kFilledWhite = 1, kFilledDark = 2, kSkins = 3 };
@@ -587,6 +592,8 @@ constexpr const char* kSkinNames[kSkins] = {"Outline", "Filled White", "Filled D
 
 enum class When : uint8_t {
     Play,
+    PlaySteerBtn,
+    PlayStick,
     PlayNos,
     PlayTurbo,
     PlaySpecial,
@@ -608,51 +615,55 @@ struct Button {
 
 constexpr Button kButtons[] = {
     // Gameplay driving controls (auto-synced with MC3D's in-game Controller Configuration / Custom Remap!)
-    {"steer_left",  "Steer Left",  SvgIcon::SteerLeft,   kSteerLeft,    game::GameAction::SteerAxis,   When::Play,           0.50f,       true,  true},
-    {"steer_right", "Steer Right", SvgIcon::SteerRight,  kSteerRight,   game::GameAction::SteerAxis,   When::Play,           0.50f,       true,  true},
-    {"gas",         "Gas",         SvgIcon::Gas,         kAnalogRT,     game::GameAction::Gas,         When::Play,           0.50f,       true,  false},
-    {"brake",       "Brake",       SvgIcon::Brake,       kAnalogLT,     game::GameAction::Brake,       When::Play,           2.0f / 3.0f, true,  false},
-    {"handbrake",   "Handbrake",   SvgIcon::Handbrake,   kAnalogA,      game::GameAction::Handbrake,   When::Play,           1.0f,        false, false},
-    {"burnout",     "Burnout",     SvgIcon::Burnout,     kBurnout,      game::GameAction::Count,       When::Play,           1.0f,        false, false},
-    {"nitro",       "Nitro",       SvgIcon::Nitro,       kAnalogX,      game::GameAction::Nitro,       When::PlayNos,        1.0f,        false, false},
-    {"turbo",       "Turbo",       SvgIcon::Turbo,       kAnalogX,      game::GameAction::Nitro,       When::PlayTurbo,      1.0f,        false, false},
-    {"special",     "Special",     SvgIcon::Special,     kBit + 6,      game::GameAction::Special,     When::PlaySpecial,    1.0f,        false, false},
-    {"pause",       "Pause",       SvgIcon::Start,       kBit + 4,      game::GameAction::Pause,       When::Play,           1.0f,        true,  false},
-    {"camera",      "Camera",      SvgIcon::Camera,      kAnalogBlack,  game::GameAction::Camera,      When::Play,           1.0f,        false, false},
-    {"map",         "Map",         SvgIcon::Map,         kBit + 5,      game::GameAction::Map,         When::Play,           1.0f,        false, false},
-    {"flash",       "Flash",       SvgIcon::FlashLights, kAnalogWhite,  game::GameAction::FlashLights, When::Play,           1.0f,        false, false},
-    {"look_back",   "Look Back",   SvgIcon::LookBack,    kAnalogY,      game::GameAction::LookBack,    When::Play,           1.0f,        false, false},
+    {"steer_left",  "Steer Left",      SvgIcon::SteerLeft,      kSteerLeft,    game::GameAction::SteerAxis,      When::PlaySteerBtn,   0.50f,       true,  true},
+    {"steer_right", "Steer Right",     SvgIcon::SteerRight,     kSteerRight,   game::GameAction::SteerAxis,      When::PlaySteerBtn,   0.50f,       true,  true},
+    {"steer_stick", "Steer Stick",     SvgIcon::Count,          kSteerStick,   game::GameAction::SteerAxis,      When::PlayStick,      1.0f,        true,  false},
+    {"gas",         "Gas",             SvgIcon::Gas,            kAnalogRT,     game::GameAction::Gas,            When::Play,           0.50f,       true,  false},
+    {"brake",       "Brake",           SvgIcon::Brake,          kAnalogLT,     game::GameAction::Brake,          When::Play,           2.0f / 3.0f, true,  false},
+    {"handbrake",   "Handbrake",       SvgIcon::Handbrake,      kAnalogA,      game::GameAction::Handbrake,      When::Play,           1.0f,        false, false},
+    {"weight_xfer", "Weight Transfer", SvgIcon::WeightTransfer, kAnalogB,      game::GameAction::WeightTransfer, When::Play,           1.0f,        false, false},
+    {"burnout",     "Burnout",         SvgIcon::Burnout,        kBurnout,      game::GameAction::Count,          When::Play,           1.0f,        false, false},
+    {"nitro",       "Nitro",           SvgIcon::Nitro,          kAnalogX,      game::GameAction::Nitro,          When::PlayNos,        1.0f,        false, false},
+    {"turbo",       "Turbo",           SvgIcon::Turbo,          kAnalogX,      game::GameAction::Nitro,          When::PlayTurbo,      1.0f,        false, false},
+    {"special",     "Special",         SvgIcon::Special,        kBit + 6,      game::GameAction::Special,        When::PlaySpecial,    1.0f,        false, false},
+    {"pause",       "Pause",           SvgIcon::Pause,          kBit + 4,      game::GameAction::Pause,          When::Play,           1.0f,        true,  false},
+    {"camera",      "Camera",          SvgIcon::Camera,         kAnalogBlack,  game::GameAction::Camera,         When::Play,           1.0f,        false, false},
+    {"map",         "Map",             SvgIcon::Map,            kBit + 5,      game::GameAction::Map,            When::Play,           1.0f,        false, false},
+    {"flash",       "Flash",           SvgIcon::FlashLights,    kAnalogWhite,  game::GameAction::FlashLights,    When::Play,           1.0f,        false, false},
+    {"look_back",   "Look Back",       SvgIcon::LookBack,       kAnalogY,      game::GameAction::LookBack,       When::Play,           1.0f,        false, false},
 
     // Menu & Garage minimal navigation controls (NFSU2 wide pill OK/Back + dynamic Garage D-Pad)
-    {"dpad_up",     "D-Pad Up",    SvgIcon::DpadUp,      kBit + 0,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
-    {"dpad_down",   "D-Pad Down",  SvgIcon::DpadDown,    kBit + 1,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
-    {"dpad_left",   "D-Pad Left",  SvgIcon::DpadLeft,    kBit + 2,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
-    {"dpad_right",  "D-Pad Right", SvgIcon::DpadRight,   kBit + 3,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
-    {"ok",          "OK",          SvgIcon::Ok,          kAnalogA,      game::GameAction::Count,       When::MenusAndGarage, 2.375f,      true,  false},
-    {"back",        "Back",        SvgIcon::Back,        kAnalogB,      game::GameAction::Count,       When::MenusAndGarage, 2.375f,      true,  false},
+    {"dpad_up",     "D-Pad Up",        SvgIcon::DpadUp,         kBit + 0,      game::GameAction::Count,          When::MenusAndGarage, 1.0f,        true,  false},
+    {"dpad_down",   "D-Pad Down",      SvgIcon::DpadDown,       kBit + 1,      game::GameAction::Count,          When::MenusAndGarage, 1.0f,        true,  false},
+    {"dpad_left",   "D-Pad Left",      SvgIcon::DpadLeft,       kBit + 2,      game::GameAction::Count,          When::MenusAndGarage, 1.0f,        true,  false},
+    {"dpad_right",  "D-Pad Right",     SvgIcon::DpadRight,      kBit + 3,      game::GameAction::Count,          When::MenusAndGarage, 1.0f,        true,  false},
+    {"ok",          "OK",              SvgIcon::Ok,             kAnalogA,      game::GameAction::Count,          When::MenusAndGarage, 2.375f,      true,  false},
+    {"back",        "Back",            SvgIcon::Back,           kAnalogB,      game::GameAction::Count,          When::MenusAndGarage, 2.375f,      true,  false},
 };
 
 constexpr size_t kButtonCount = std::size(kButtons);
 constexpr size_t kIdxSteerLeft = 0;
 constexpr size_t kIdxSteerRight = 1;
-constexpr size_t kIdxGas = 2;
-constexpr size_t kIdxBrake = 3;
-constexpr size_t kIdxHandbrake = 4;
-constexpr size_t kIdxBurnout = 5;
-constexpr size_t kIdxNitro = 6;
-constexpr size_t kIdxTurbo = 7;
-constexpr size_t kIdxSpecial = 8;
-constexpr size_t kIdxPause = 9;
-constexpr size_t kIdxCamera = 10;
-constexpr size_t kIdxMap = 11;
-constexpr size_t kIdxFlash = 12;
-constexpr size_t kIdxLookBack = 13;
-constexpr size_t kIdxDpadUp = 14;
-constexpr size_t kIdxDpadDown = 15;
-constexpr size_t kIdxDpadLeft = 16;
-constexpr size_t kIdxDpadRight = 17;
-constexpr size_t kIdxOk = 18;
-constexpr size_t kIdxBack = 19;
+constexpr size_t kIdxSteerStick = 2;
+constexpr size_t kIdxGas = 3;
+constexpr size_t kIdxBrake = 4;
+constexpr size_t kIdxHandbrake = 5;
+constexpr size_t kIdxWeightTransfer = 6;
+constexpr size_t kIdxBurnout = 7;
+constexpr size_t kIdxNitro = 8;
+constexpr size_t kIdxTurbo = 9;
+constexpr size_t kIdxSpecial = 10;
+constexpr size_t kIdxPause = 11;
+constexpr size_t kIdxCamera = 12;
+constexpr size_t kIdxMap = 13;
+constexpr size_t kIdxFlash = 14;
+constexpr size_t kIdxLookBack = 15;
+constexpr size_t kIdxDpadUp = 16;
+constexpr size_t kIdxDpadDown = 17;
+constexpr size_t kIdxDpadLeft = 18;
+constexpr size_t kIdxDpadRight = 19;
+constexpr size_t kIdxOk = 20;
+constexpr size_t kIdxBack = 21;
 
 // Screen-percentage placement:
 //   x, y in [0..1] screen shares
@@ -673,12 +684,16 @@ Layout ComputeDefaultLayout(float screen_w, float screen_h) {
 
     Layout L{};
 
-    // --- Gameplay: 1:2 Steer Left/Right (bottom-left), 1:2 Gas & 2:3 Brake (bottom-right) ---
+    // --- Gameplay: 1:2 Steer Left/Right OR Analog Stick (bottom-left), 1:2 Gas & 2:3 Brake (bottom-right) ---
     const float steer_r = 0.175f;  // 35% screen height, 1:2 W:H
     const float steer_rx = rx_of(steer_r, 0.50f);
     const float steer_y = 1.0f - edge_y - steer_r;
     L[kIdxSteerLeft]  = {edge_x + steer_rx, steer_y, steer_r, false};
     L[kIdxSteerRight] = {edge_x + steer_rx * 3.35f, steer_y, steer_r, false};
+
+    const float stick_r = 0.145f;  // 29% screen height circular thumbstick
+    const float stick_rx = rx_of(stick_r, 1.0f);
+    L[kIdxSteerStick] = {edge_x + stick_rx + 0.014f, 1.0f - edge_y - stick_r, stick_r, false};
 
     const float gas_r = 0.185f;    // 37% screen height, 1:2 W:H
     const float gas_rx = rx_of(gas_r, 0.50f);
@@ -695,6 +710,9 @@ Layout ComputeDefaultLayout(float screen_w, float screen_h) {
     const float hb_r = 0.068f;
     const float hb_y = brk_y - brk_r - hb_r - 0.045f;
     L[kIdxHandbrake] = {brk_x, hb_y, hb_r, false};
+
+    const float wt_r = 0.066f;
+    L[kIdxWeightTransfer] = {brk_x, hb_y - hb_r - wt_r - 0.036f, wt_r, false};
 
     const float nitro_r = 0.075f;
     L[kIdxNitro] = {gas_x, gas_y - gas_r - nitro_r - 0.045f, nitro_r, false};
@@ -779,6 +797,15 @@ uint64_t g_fmv_last_ms = 0;
 uint64_t g_fmv_skip_pulse_until = 0;
 bool g_fmv_skip_fired = false;
 
+// Analog steering stick & Garage 1-finger orbit camera state (under g_lock)
+bool g_analog_stick = false;
+float g_stick_raw_x = 0.0f;
+float g_stick_raw_y = 0.0f;
+float g_stick_x = 0.0f;
+float g_stick_y = 0.0f;
+float g_orbit_x = 0.0f;
+float g_orbit_y = 0.0f;
+
 Layout g_layout{};
 uint32_t g_skin = kOutline;
 float g_opacity = 0.85f;
@@ -854,11 +881,12 @@ void LoadLayout() {
         toml::table t = toml::parse_file(LayoutFile().string());
         g_opacity = std::clamp(float(t["opacity"].value_or(double(g_opacity))), 0.2f, 1.0f);
         g_scale = std::clamp(float(t["scale"].value_or(double(g_scale))), 0.5f, 1.5f);
+        g_analog_stick = t["analog_stick"].value_or(false);
         std::string skin = t["skin"].value_or(std::string(kSkinDirs[g_skin]));
         for (uint32_t i = 0; i < kSkins; i++) {
             if (skin == kSkinDirs[i]) g_skin = i;
         }
-        // layout_version >= 4 includes NFSU2-style stacked horizontal pill OK/Back & dynamic Garage D-Pad
+        // layout_version >= 4 preserves user positions (new buttons default cleanly from ComputeDefaultLayout)
         if (t["layout_version"].value_or(0) >= 4) {
             for (size_t i = 0; i < kButtonCount; i++) {
                 const toml::table* p = t["controls"][kButtons[i].id].as_table();
@@ -882,9 +910,10 @@ void SaveLayout() {
                         toml::table{{"x", double(p.x)}, {"y", double(p.y)}, {"r", double(p.r)}, {"hidden", p.hidden}});
     }
     toml::table t{
-        {"layout_version", 4},
+        {"layout_version", 5},
         {"opacity", double(g_opacity)},
         {"scale", double(g_scale)},
+        {"analog_stick", g_analog_stick},
         {"skin", kSkinDirs[g_skin]},
         {"controls", controls},
     };
@@ -904,7 +933,8 @@ bool IsMenuLike(game::UiContext ctx) {
 }
 
 bool IsGameplayButton(When w) {
-    return w == When::Play || w == When::PlayNos || w == When::PlayTurbo || w == When::PlaySpecial;
+    return w == When::Play || w == When::PlaySteerBtn || w == When::PlayStick ||
+           w == When::PlayNos || w == When::PlayTurbo || w == When::PlaySpecial;
 }
 
 bool GarageVerticalMode() {
@@ -925,7 +955,10 @@ bool IsGarageVerticalDpad(size_t i) {
 bool ButtonShown(size_t i) {
     const Button& b = kButtons[i];
     if (g_editing) {
-        return g_edit_menu_tab ? !IsGameplayButton(b.when) : IsGameplayButton(b.when);
+        if (g_edit_menu_tab) return !IsGameplayButton(b.when);
+        if (b.when == When::PlaySteerBtn) return !g_analog_stick;
+        if (b.when == When::PlayStick) return g_analog_stick;
+        return IsGameplayButton(b.when);
     }
     if (g_layout[i].hidden) return false;
 
@@ -947,6 +980,10 @@ bool ButtonShown(size_t i) {
             return ctx == game::UiContext::MainMenu || ctx == game::UiContext::Garage;
         case When::Play:
             return ctx == game::UiContext::Gameplay;
+        case When::PlaySteerBtn:
+            return ctx == game::UiContext::Gameplay && !g_analog_stick;
+        case When::PlayStick:
+            return ctx == game::UiContext::Gameplay && g_analog_stick;
         case When::PlayNos:
             return ctx == game::UiContext::Gameplay &&
                    game::Telemetry().has_nos.load(std::memory_order_relaxed);
@@ -1042,6 +1079,12 @@ struct EditorCard {
     float status_cy;
 };
 
+void EditorCardSize(float w, float h, float& card_w, float& card_h) {
+    // Generous mobile-first NFSU2 card dimensions (~10.4% screen height per button row)
+    card_h = h * 0.255f;
+    card_w = std::min(w * 0.92f, h * 1.48f);
+}
+
 void ClampEditorCard(float w, float h, float card_w, float card_h) {
     const float half_w = card_w * 0.5f;
     const float min_cx = (half_w + w * 0.012f) / w;
@@ -1054,8 +1097,8 @@ void ClampEditorCard(float w, float h, float card_w, float card_h) {
 
 EditorCard ComputeEditorCard() {
     const float w = Width(), h = Height();
-    const float card_h = h * 0.168f;
-    const float card_w = std::min(w * 0.86f, h * 1.04f);
+    float card_w = 0.0f, card_h = 0.0f;
+    EditorCardSize(w, h, card_w, card_h);
     ClampEditorCard(w, h, card_w, card_h);
 
     EditorCard c{};
@@ -1066,9 +1109,9 @@ EditorCard ComputeEditorCard() {
     c.card[2] = x0 + card_w;
     c.card[3] = y0 + card_h;
 
-    const float pad = card_h * 0.085f;
-    const float gap = card_h * 0.075f;
-    const float grip_w = card_h * 0.34f;
+    const float pad = card_h * 0.080f;
+    const float gap = card_h * 0.070f;
+    const float grip_w = card_h * 0.30f;
     c.grip[0] = x0;
     c.grip[1] = y0;
     c.grip[2] = x0 + grip_w;
@@ -1110,7 +1153,7 @@ EditorCard ComputeEditorCard() {
     }
 
     // Place status badge below card (or above if card was dragged near bottom edge)
-    c.status_cy = (c.card[3] + h * 0.065f < h) ? (c.card[3] + h * 0.036f) : (c.card[1] - h * 0.036f);
+    c.status_cy = (c.card[3] + h * 0.085f < h) ? (c.card[3] + h * 0.048f) : (c.card[1] - h * 0.048f);
     return c;
 }
 
@@ -1258,6 +1301,34 @@ void EditDown(Finger& f, float x, float y) {
     f.y0 = y - g_layout[b].y * Height();
 }
 
+void UpdateAnalogStickLocked(float x, float y) {
+    float x0, y0, x1, y1;
+    ButtonRect(kIdxSteerStick, x0, y0, x1, y1);
+    const float cx = (x0 + x1) * 0.5f;
+    const float cy = (y0 + y1) * 0.5f;
+    const float radius = std::max((y1 - y0) * 0.5f, 1.0f);
+    float dx = (x - cx) / radius;
+    float dy = (y - cy) / radius;
+    const float mag = std::hypot(dx, dy);
+    if (mag > 1.0f) {
+        dx /= mag;
+        dy /= mag;
+    }
+    auto shape_axis = [](float v) -> float {
+        constexpr float kDeadzone = 0.04f;
+        const float av = std::fabs(v);
+        if (av <= kDeadzone) return 0.0f;
+        const float norm = std::clamp((av - kDeadzone) / (1.0f - kDeadzone), 0.0f, 1.0f);
+        // Progressive NFSU2 S-curve: crisp center precision with responsive full lock
+        const float curved = norm * norm * (0.45f + 0.55f * norm) * 0.65f + norm * 0.35f;
+        return std::copysign(std::clamp(curved, 0.0f, 1.0f), v);
+    };
+    g_stick_raw_x = dx;
+    g_stick_raw_y = dy;
+    g_stick_x = shape_axis(dx);
+    g_stick_y = shape_axis(dy);
+}
+
 void FingerDown(SDL_FingerID id, float x, float y) {
     const uint64_t now = NowMs();
     StartFadeLocked(1.0f, now);  // Smooth 200ms fade-in whenever screen is touched!
@@ -1288,19 +1359,26 @@ void FingerDown(SDL_FingerID id, float x, float y) {
     }
 
     const size_t b = HitButton(x, y);
-    if (b < kButtonCount) {
+    if (b == kIdxSteerStick && g_analog_stick && ctx == game::UiContext::Gameplay) {
+        f.role = Role::AnalogStick;
+        f.button = kIdxSteerStick;
+        UpdateAnalogStickLocked(x, y);
+    } else if (b < kButtonCount) {
         f.role = Role::Button;
         f.button = b;
     } else {
         const float w = Width();
         const float h = Height();
-        if (ctx == game::UiContext::Gameplay &&
-            x >= w * 0.25f && x <= w * 0.75f && y >= h * 0.62f) {
+        if (ctx == game::UiContext::Garage) {
+            // #2 UX: 1-finger drag anywhere in open car viewport orbits garage camera (Right Stick)
+            f.role = Role::GarageOrbit;
+        } else if (ctx == game::UiContext::Gameplay &&
+                   x >= w * 0.30f && x <= w * 0.70f && y >= h * 0.72f) {
             f.role = Role::RadioSwipe;
-        } else if (ctx == game::UiContext::Garage) {
-            f.role = Role::GarageSwipe;
-            f.notch_x = x;
-            f.notch_y = y;
+        } else {
+            // NFSU2-style free slide-across: start on open screen and drag into any button without lifting!
+            f.role = Role::Button;
+            f.button = kButtonCount;
         }
     }
     g_fingers.push_back(f);
@@ -1317,8 +1395,8 @@ void FingerMove(SDL_FingerID id, float x, float y) {
         f.x = x;
         f.y = y;
         if (f.role == Role::ToolbarDrag) {
-            const float card_h = h * 0.168f;
-            const float card_w = std::min(w * 0.86f, h * 1.04f);
+            float card_w = 0.0f, card_h = 0.0f;
+            EditorCardSize(w, h, card_w, card_h);
             g_bar_cx = (x - f.x0) / w;
             g_bar_top = (y - f.y0) / h;
             ClampEditorCard(w, h, card_w, card_h);
@@ -1380,13 +1458,38 @@ void FingerMove(SDL_FingerID id, float x, float y) {
                 Resize(f.button, pinch.y0 * std::hypot(pinch.x - drag.x, pinch.y - drag.y) / pinch.x0);
             }
         }
-        if (f.role == Role::Button && f.button < kButtonCount && kButtons[f.button].steer_pair) {
+        if (f.role == Role::AnalogStick) {
+            UpdateAnalogStickLocked(x, y);
+            continue;
+        }
+        if (f.role == Role::Button) {
+            // NFSU2-style free slide-across touching: glide seamlessly into or between any buttons!
             const size_t hit = HitButton(x, y);
-            if (hit == kIdxSteerLeft || hit == kIdxSteerRight) {
+            if (hit == kIdxPause && f.button != kIdxPause) {
+                // Guard: never accidentally slide-trigger Pause while gliding across screen
+                f.button = kButtonCount;
+            } else if (hit == kIdxSteerStick) {
+                const bool stick_busy = std::any_of(g_fingers.begin(), g_fingers.end(),
+                    [&](const Finger& o) { return &o != &f && o.role == Role::AnalogStick; });
+                if (!stick_busy && f.button == kButtonCount) {
+                    f.role = Role::AnalogStick;
+                    f.button = kIdxSteerStick;
+                    UpdateAnalogStickLocked(x, y);
+                }
+            } else if (hit != f.button) {
                 f.button = hit;
+                f.down_ms = now;
             }
         }
         if (f.role == Role::RadioSwipe && !f.swipe_fired) {
+            const size_t hit = HitButton(x, y);
+            if (hit < kButtonCount && hit != kIdxPause && hit != kIdxSteerStick) {
+                // Finger glided into a driving button before triggering swipe -> seamlessly engage it!
+                f.role = Role::Button;
+                f.button = hit;
+                f.down_ms = now;
+                continue;
+            }
             const float dx = x - f.x0;
             const float dy = y - f.y0;
             if (std::fabs(dx) >= w * 0.06f && std::fabs(dx) > std::fabs(dy) * 1.25f) {
@@ -1401,27 +1504,18 @@ void FingerMove(SDL_FingerID id, float x, float y) {
                 g_radio_toast_until = now + kToastMs;
             }
         }
-        if (f.role == Role::GarageSwipe) {
-            if (GarageVerticalMode()) {
-                // Vertical Up/Down buttons are shown -> open-canvas horizontal swipe sends Left/Right!
-                const float notch = w * 0.055f;
-                if (x <= f.notch_x - notch) {
-                    f.notch_x -= notch;
-                    g_pulse_until[2] = now + kPulseMs;
-                } else if (x >= f.notch_x + notch) {
-                    f.notch_x += notch;
-                    g_pulse_until[3] = now + kPulseMs;
-                }
-            } else {
-                // Horizontal Left/Right buttons are shown -> open-canvas vertical swipe sends Up/Down!
-                const float notch = h * 0.065f;
-                if (y <= f.notch_y - notch) {
-                    f.notch_y -= notch;
-                    g_pulse_until[0] = now + kPulseMs;
-                } else if (y >= f.notch_y + notch) {
-                    f.notch_y += notch;
-                    g_pulse_until[1] = now + kPulseMs;
-                }
+        if (f.role == Role::GarageOrbit) {
+            // #2 UX: Smooth 1-finger garage orbit camera drag -> Right Stick (rx / ry)
+            const float dx = x - f.x0;
+            const float dy = y - f.y0;
+            if (std::hypot(dx, dy) > h * 0.012f) {
+                const float max_x = w * 0.14f;
+                const float max_y = h * 0.18f;
+                g_orbit_x = std::clamp(dx / max_x, -1.0f, 1.0f);
+                g_orbit_y = std::clamp(-dy / max_y, -1.0f, 1.0f);
+                // Trailing anchor so reversing orbit direction responds instantly
+                if (std::fabs(dx) > max_x) f.x0 = x - std::copysign(max_x, dx);
+                if (std::fabs(dy) > max_y) f.y0 = y - std::copysign(max_y, dy);
             }
         }
     }
@@ -1437,6 +1531,14 @@ void FingerUp(SDL_FingerID id) {
     if (std::none_of(g_fingers.begin(), g_fingers.end(),
                      [](const Finger& f) { return f.role == Role::ToolbarDrag; })) {
         g_bar_dragging = false;
+    }
+    if (std::none_of(g_fingers.begin(), g_fingers.end(),
+                     [](const Finger& f) { return f.role == Role::AnalogStick; })) {
+        g_stick_raw_x = g_stick_raw_y = g_stick_x = g_stick_y = 0.0f;
+    }
+    if (std::none_of(g_fingers.begin(), g_fingers.end(),
+                     [](const Finger& f) { return f.role == Role::GarageOrbit; })) {
+        g_orbit_x = g_orbit_y = 0.0f;
     }
     Recount();
 }
@@ -1915,6 +2017,26 @@ void ApplyRemappedAction(input::Pad& pad, game::GameAction act, int dir_sign, in
     ApplyFallbackPress(pad, fallback_press);
 }
 
+void ApplyRemappedSteer(input::Pad& pad, float steer_f) {
+    if (std::fabs(steer_f) < 0.02f) return;
+    const float clamped = std::clamp(steer_f, -1.0f, 1.0f);
+    const int16_t val = int16_t(std::lround(clamped * 32767.0f));
+    const auto& slot = game::Telemetry().bindings[static_cast<size_t>(game::GameAction::SteerAxis)];
+    const uint32_t dev = slot.dev.load(std::memory_order_relaxed);
+    const uint32_t key = slot.key.load(std::memory_order_relaxed);
+    if (dev == 0x09u) {
+        if (key == 0x0000u) { pad.lx = val; return; }            // Left Analog X
+        if (key == 0x0002u) { pad.rx = val; return; }            // Right Analog X
+        if (key == 0x000Cu) {                                    // D-Pad Left / Right
+            if (std::fabs(clamped) >= 0.18f) {
+                pad.buttons |= uint16_t(clamped < 0.0f ? (1u << 2) : (1u << 3));
+            }
+            return;
+        }
+    }
+    pad.lx = val;
+}
+
 void Apply(int port, input::Pad& pad) {
     if (port != 0 || g_editing) return;
     std::lock_guard lock(g_lock);
@@ -1939,7 +2061,7 @@ void Apply(int port, input::Pad& pad) {
             // Burnout: simultaneously hold Gas + Handbrake (synced with any in-game remaps!)
             ApplyRemappedAction(pad, game::GameAction::Gas, 0, kAnalogRT);
             ApplyRemappedAction(pad, game::GameAction::Handbrake, 0, kAnalogA);
-        } else {
+        } else if (p != kSteerStick) {
             ApplyRemappedAction(pad, kButtons[i].action, 0, p);
         }
     }
@@ -1951,8 +2073,31 @@ void Apply(int port, input::Pad& pad) {
         ApplyRemappedAction(pad, game::GameAction::Handbrake, 0, kAnalogA);
     }
 
-    if (steer != 0) {
-        ApplyRemappedAction(pad, game::GameAction::SteerAxis, steer, steer < 0 ? kSteerLeft : kSteerRight);
+    // Steering: digital Left/Right buttons OR proportional NFSU2-style analog thumbstick
+    const float steer_f = (steer != 0) ? float(steer) : (g_analog_stick ? g_stick_x : 0.0f);
+    if (std::fabs(steer_f) >= 0.02f) {
+        ApplyRemappedSteer(pad, steer_f);
+        used = true;
+    }
+    if (g_analog_stick && ctx == game::UiContext::Gameplay && std::fabs(g_stick_y) >= 0.18f) {
+        // Thumbstick up/down pitches motorcycle weight (tuck forward / wheelie back)
+        pad.ly = int16_t(std::lround(std::clamp(-g_stick_y, -1.0f, 1.0f) * 32767.0f));
+        used = true;
+    }
+
+    // Bikes automatically engage Weight Transfer whenever steering for sharp corner carving!
+    if (ctx == game::UiContext::Gameplay &&
+        game::Telemetry().is_bike.load(std::memory_order_relaxed) &&
+        std::fabs(steer_f) >= 0.12f) {
+        ApplyRemappedAction(pad, game::GameAction::WeightTransfer, 0, kAnalogB);
+    }
+
+    // #2 UX: 1-finger Garage orbit camera drag -> Right Stick (rx / ry)
+    if (ctx == game::UiContext::Garage &&
+        (std::fabs(g_orbit_x) > 0.02f || std::fabs(g_orbit_y) > 0.02f)) {
+        pad.rx = int16_t(std::lround(std::clamp(g_orbit_x, -1.0f, 1.0f) * 32767.0f));
+        pad.ry = int16_t(std::lround(std::clamp(g_orbit_y, -1.0f, 1.0f) * 32767.0f));
+        used = true;
     }
 
     // Swipe gestures: during Gameplay, Radio Left/Right follow remapped MUSIC_DOWN / MUSIC_UP!
@@ -2098,22 +2243,93 @@ void BuildOverlay(std::vector<Quad>& out) {
         const float dy1 = cy + bh * 0.5f * press_scale;
 
         const SvgIcon icon = ActiveIconForButton(i);
-        const AtlasUv& uv = g_atlas_uv[skin][static_cast<size_t>(icon)];
+        const bool stick_active = !editing && i == kIdxSteerStick &&
+                                  (std::fabs(g_stick_raw_x) > 0.01f || std::fabs(g_stick_raw_y) > 0.01f);
 
-        if (atlas_ok && uv.valid) {
-            float tr = 1.0f, tg = 1.0f, tb = 1.0f, ta = std::min(1.0f, vis * (on ? 1.15f : 0.92f));
-            if (kButtons[i].when == When::PlayTurbo && !editing) {
-                tr = on ? 1.0f : 0.48f;
-                tg = on ? 0.94f : 0.92f;
-                tb = on ? 0.72f : 1.0f;
-                ta = std::min(1.0f, vis * 1.10f);
-            }
-            out.push_back(Quad{dx0, dy0, dx1, dy1, uv.u0, uv.v0, uv.u1, uv.v1,
-                               tr, tg, tb, ta, 0, 0, 0, 0, 0, 0, 0u});
+        if (i == kIdxSteerStick) {
+            // Native SDF Analog Steering Thumbstick matching active Button Style + NFSU2 lime active glow
+            const float rad = std::min(bw, bh) * 0.5f;
+            const float fill_r = (skin == kFilledWhite) ? 0.96f : (skin == kFilledDark ? 0.08f : 0.04f);
+            const float fill_g = (skin == kFilledWhite) ? 0.97f : (skin == kFilledDark ? 0.09f : 0.05f);
+            const float fill_b = (skin == kFilledWhite) ? 0.99f : (skin == kFilledDark ? 0.12f : 0.07f);
+            const float fill_a = (skin == kOutline ? 0.22f : 0.42f) * vis;
+            const float rim_r = stick_active ? 0.784f : 1.0f;
+            const float rim_g = stick_active ? 0.941f : 1.0f;
+            const float rim_b = stick_active ? 0.533f : 1.0f;
+            const float rim_a = (stick_active ? 0.98f : 0.86f) * vis;
+            EmitPanel(out, x0, y0, x1, y1, fill_r, fill_g, fill_b, fill_a, rad,
+                      stick_active ? th * 1.45f : th * 1.15f, rim_r, rim_g, rim_b, rim_a);
+
+            // Subtle directional guide chevrons inside the ring
+            const float chev_a = (skin == kFilledWhite ? 0.55f : 0.50f) * vis;
+            const float chev_c = (skin == kFilledWhite) ? 0.12f : 1.0f;
+            EmitTextCentered(out, cx - rad * 0.68f, cy, rad * 0.34f, chev_c, chev_c, chev_c, chev_a, "<");
+            EmitTextCentered(out, cx + rad * 0.68f, cy, rad * 0.34f, chev_c, chev_c, chev_c, chev_a, ">");
+
+            // Animated inner thumb knob
+            const float knob_r = rad * 0.42f;
+            const float kx = cx + (editing ? 0.0f : g_stick_raw_x * rad * 0.50f);
+            const float ky = cy + (editing ? 0.0f : g_stick_raw_y * rad * 0.50f);
+            const float kf_r = (skin == kFilledDark) ? 0.14f : 0.96f;
+            const float kf_g = (skin == kFilledDark) ? 0.16f : 0.97f;
+            const float kf_b = (skin == kFilledDark) ? 0.20f : 1.00f;
+            const float kf_a = (skin == kOutline ? (stick_active ? 0.45f : 0.26f) : 0.92f) * vis;
+            EmitPanel(out, kx - knob_r, ky - knob_r, kx + knob_r, ky + knob_r,
+                      kf_r, kf_g, kf_b, kf_a, knob_r,
+                      th * 1.25f, rim_r, rim_g, rim_b, std::min(1.0f, vis * 1.05f));
         } else {
-            EmitPanel(out, dx0, dy0, dx1, dy1,
-                      on ? 0.9f : 0.08f, on ? 0.9f : 0.09f, on ? 0.95f : 0.12f, (on ? 0.42f : 0.55f) * vis,
-                      std::min(bw, bh) * 0.25f, th, 1.0f, 1.0f, 1.0f, 0.8f * vis);
+            // #1 UX: Live Auto-Burnout pulsing golden-amber launch cue on Gas pedal during 3-2-1 countdown!
+            const bool launch_cue = !editing && i == kIdxGas && ctx == game::UiContext::Gameplay &&
+                                    game::Opt().auto_burnout &&
+                                    game::Telemetry().race_countdown.load(std::memory_order_relaxed);
+            if (launch_cue) {
+                const float pulse = 0.5f + 0.5f * std::sin(float(now % 6283u) * 0.008f);
+                const float glow_pad = th * (on ? 4.2f : (2.4f + pulse * 1.6f));
+                const float gr = on ? 0.784f : 1.000f;
+                const float gg = on ? 0.941f : 0.720f;
+                const float gb = on ? 0.533f : 0.180f;
+                const float ga = (on ? 0.96f : (0.52f + pulse * 0.40f)) * fade_alpha;
+                EmitPanel(out, dx0 - glow_pad, dy0 - glow_pad, dx1 + glow_pad, dy1 + glow_pad,
+                          gr, gg, gb, (on ? 0.26f : (0.10f + pulse * 0.12f)) * fade_alpha,
+                          bw * 0.28f + glow_pad * 0.4f, th * 1.65f, gr, gg, gb, ga);
+            }
+
+            const AtlasUv& uv = g_atlas_uv[skin][static_cast<size_t>(icon)];
+            if (atlas_ok && uv.valid) {
+                float tr = 1.0f, tg = 1.0f, tb = 1.0f, ta = std::min(1.0f, vis * (on ? 1.15f : 0.92f));
+                if (kButtons[i].when == When::PlayTurbo && !editing) {
+                    tr = on ? 1.0f : 0.48f;
+                    tg = on ? 0.94f : 0.92f;
+                    tb = on ? 0.72f : 1.0f;
+                    ta = std::min(1.0f, vis * 1.10f);
+                } else if (launch_cue) {
+                    tr = 1.0f;
+                    tg = on ? 0.98f : 0.90f;
+                    tb = on ? 0.65f : 0.55f;
+                    ta = std::min(1.0f, vis * 1.15f);
+                }
+                out.push_back(Quad{dx0, dy0, dx1, dy1, uv.u0, uv.v0, uv.u1, uv.v1,
+                                   tr, tg, tb, ta, 0, 0, 0, 0, 0, 0, 0u});
+            } else {
+                EmitPanel(out, dx0, dy0, dx1, dy1,
+                          on ? 0.9f : 0.08f, on ? 0.9f : 0.09f, on ? 0.95f : 0.12f, (on ? 0.42f : 0.55f) * vis,
+                          std::min(bw, bh) * 0.25f, th, 1.0f, 1.0f, 1.0f, 0.8f * vis);
+            }
+
+            if (launch_cue) {
+                const float badge_w = std::max(bw * 1.18f, h * 0.165f);
+                const float badge_h = h * 0.044f;
+                const float badge_cy = dy0 + h * 0.010f;
+                const float br = on ? 0.784f : 1.000f;
+                const float bg = on ? 0.941f : 0.745f;
+                const float bb = on ? 0.533f : 0.220f;
+                EmitPanel(out, cx - badge_w * 0.5f, badge_cy - badge_h * 0.5f,
+                          cx + badge_w * 0.5f, badge_cy + badge_h * 0.5f,
+                          0.06f, 0.08f, 0.11f, 0.88f * fade_alpha, badge_h * 0.48f,
+                          th * 1.05f, br, bg, bb, 0.96f * fade_alpha);
+                EmitTextCentered(out, cx, badge_cy, h * 0.025f,
+                                 br, bg, bb, 0.98f * fade_alpha, on ? "BURNOUT" : "LAUNCH");
+            }
         }
 
         if (editing) {
@@ -2128,8 +2344,8 @@ void BuildOverlay(std::vector<Quad>& out) {
                           0.95f, 0.28f, 0.24f, 0.14f, std::min(bw, bh) * 0.24f,
                           th * 0.9f, 0.98f, 0.36f, 0.32f, 0.78f);
             }
-            EmitTextCentered(out, cx, y1 + h * 0.025f, h * 0.025f,
-                             1.0f, 1.0f, 1.0f, hidden ? 0.50f : 0.92f, kButtons[i].label);
+            EmitTextCentered(out, cx, y1 + h * 0.028f, h * 0.030f,
+                             1.0f, 1.0f, 1.0f, hidden ? 0.50f : 0.94f, kButtons[i].label);
         }
     }
 
@@ -2148,32 +2364,32 @@ void BuildOverlay(std::vector<Quad>& out) {
                          theme.pill_tr, theme.pill_tg, theme.pill_tb, 0.96f * alpha, msg);
     }
 
-    // 5. NFSU2-Style Floating Draggable Two-Row Layout Editor Card (Zero ImGui, Google Roboto)
+    // 5. NFSU2-Style Mobile-Sized Floating Draggable Two-Row Layout Editor Card (Zero ImGui, Google Roboto)
     if (editing) {
         const EditorCard c = ComputeEditorCard();
-        const float card_r = h * 0.028f;
-        const float btn_r = h * 0.018f;
-        const float border_w = std::max(1.5f, th * 0.85f);
+        const float card_r = h * 0.036f;
+        const float btn_r = h * 0.024f;
+        const float border_w = std::max(2.0f, th * 1.05f);
 
         // Dark translucent slate card (#DD101620), lime border (#C8F088) when dragging
         EmitPanel(out, c.card[0], c.card[1], c.card[2], c.card[3],
-                  0.063f, 0.086f, 0.125f, 0.87f, card_r,
-                  g_bar_dragging ? th * 1.35f : border_w,
+                  0.063f, 0.086f, 0.125f, 0.89f, card_r,
+                  g_bar_dragging ? th * 1.65f : border_w,
                   g_bar_dragging ? 0.784f : 1.0f,
                   g_bar_dragging ? 0.941f : 1.0f,
                   g_bar_dragging ? 0.533f : 1.0f,
-                  g_bar_dragging ? 0.95f : 0.34f);
+                  g_bar_dragging ? 0.96f : 0.38f);
 
-        // Left-side draggable hamburger grip handle (3 crisp horizontal bars)
+        // Left-side draggable hamburger grip handle (3 bold mobile horizontal bars)
         const float gx = 0.5f * (c.grip[0] + c.grip[2]);
         const float gy = 0.5f * (c.grip[1] + c.grip[3]);
-        const float bar_hw = (c.grip[2] - c.grip[0]) * 0.24f;
-        const float bar_hh = std::max(1.5f, h * 0.0028f);
-        const float bar_sp = h * 0.015f;
+        const float bar_hw = (c.grip[2] - c.grip[0]) * 0.26f;
+        const float bar_hh = std::max(2.0f, h * 0.0040f);
+        const float bar_sp = h * 0.022f;
         const float gr = g_bar_dragging ? 0.784f : 1.0f;
         const float gg = g_bar_dragging ? 0.941f : 1.0f;
         const float gb = g_bar_dragging ? 0.533f : 1.0f;
-        const float ga = g_bar_dragging ? 0.95f : 0.55f;
+        const float ga = g_bar_dragging ? 0.95f : 0.62f;
         for (int k = -1; k <= 1; ++k) {
             const float ly = gy + float(k) * bar_sp;
             EmitPanel(out, gx - bar_hw, ly - bar_hh, gx + bar_hw, ly + bar_hh,
@@ -2195,66 +2411,73 @@ void BuildOverlay(std::vector<Quad>& out) {
                              txt_h, tr, tg, tb, ta, label);
         };
 
-        const float lbl_h = h * 0.025f;
-        const float sym_h = h * 0.036f;
+        const float lbl_h = h * 0.038f;
+        const float sym_h = h * 0.058f;
 
         // Row 1: RESET | - | + | SAVE (Lime) | CANCEL
         draw_nfsu2_btn(kEdReset, "RESET", lbl_h,
-                       0.094f, 0.125f, 0.157f, 0.88f,  1.0f, 1.0f, 1.0f, 0.34f,  0.88f, 0.88f, 0.88f, 0.95f);
+                       0.094f, 0.125f, 0.157f, 0.90f,  1.0f, 1.0f, 1.0f, 0.36f,  0.90f, 0.91f, 0.93f, 0.96f);
         draw_nfsu2_btn(kEdMinus, "-", sym_h,
-                       0.118f, 0.157f, 0.212f, has_sel ? 0.90f : 0.52f,
-                       1.0f, 1.0f, 1.0f, has_sel ? 0.42f : 0.18f,
-                       1.0f, 1.0f, 1.0f, has_sel ? 0.98f : 0.40f);
+                       0.118f, 0.157f, 0.212f, has_sel ? 0.92f : 0.54f,
+                       1.0f, 1.0f, 1.0f, has_sel ? 0.45f : 0.20f,
+                       1.0f, 1.0f, 1.0f, has_sel ? 0.98f : 0.42f);
         draw_nfsu2_btn(kEdPlus, "+", sym_h,
-                       0.118f, 0.157f, 0.212f, has_sel ? 0.90f : 0.52f,
-                       1.0f, 1.0f, 1.0f, has_sel ? 0.42f : 0.18f,
-                       1.0f, 1.0f, 1.0f, has_sel ? 0.98f : 0.40f);
+                       0.118f, 0.157f, 0.212f, has_sel ? 0.92f : 0.54f,
+                       1.0f, 1.0f, 1.0f, has_sel ? 0.45f : 0.20f,
+                       1.0f, 1.0f, 1.0f, has_sel ? 0.98f : 0.42f);
         draw_nfsu2_btn(kEdSave, "SAVE", lbl_h,
-                       0.094f, 0.188f, 0.110f, 0.92f,  0.533f, 0.878f, 0.376f, 0.72f,  0.784f, 0.941f, 0.533f, 0.98f);
+                       0.094f, 0.188f, 0.110f, 0.94f,  0.533f, 0.878f, 0.376f, 0.78f,  0.784f, 0.941f, 0.533f, 0.98f);
         draw_nfsu2_btn(kEdCancel, "CANCEL", lbl_h,
-                       0.094f, 0.125f, 0.157f, 0.88f,  1.0f, 1.0f, 1.0f, 0.34f,  0.88f, 0.88f, 0.88f, 0.95f);
+                       0.094f, 0.125f, 0.157f, 0.90f,  1.0f, 1.0f, 1.0f, 0.36f,  0.90f, 0.91f, 0.93f, 0.96f);
 
         // Row 2: PLAY/MENU (Sky Blue) | SNAP ON/OFF (Teal) | HIDE/SHOW (Amber/Lime)
         draw_nfsu2_btn(kEdTab, g_edit_menu_tab ? "MENU" : "PLAY", lbl_h,
-                       0.086f, 0.145f, 0.204f, 0.90f,  0.353f, 0.784f, 0.980f, 0.68f,  0.478f, 0.847f, 1.000f, 0.98f);
+                       0.086f, 0.145f, 0.204f, 0.92f,  0.353f, 0.784f, 0.980f, 0.72f,  0.478f, 0.847f, 1.000f, 0.98f);
         if (g_snap_grid) {
             draw_nfsu2_btn(kEdSnap, "SNAP ON", lbl_h,
-                           0.086f, 0.176f, 0.157f, 0.90f,  0.361f, 0.910f, 0.753f, 0.68f,  0.486f, 0.973f, 0.816f, 0.98f);
+                           0.086f, 0.176f, 0.157f, 0.92f,  0.361f, 0.910f, 0.753f, 0.72f,  0.486f, 0.973f, 0.816f, 0.98f);
         } else {
             draw_nfsu2_btn(kEdSnap, "SNAP OFF", lbl_h,
-                           0.094f, 0.125f, 0.157f, 0.82f,  1.0f, 1.0f, 1.0f, 0.28f,  0.75f, 0.78f, 0.82f, 0.88f);
+                           0.094f, 0.125f, 0.157f, 0.84f,  1.0f, 1.0f, 1.0f, 0.30f,  0.78f, 0.80f, 0.84f, 0.90f);
         }
         if (can_hide) {
             if (sel_hidden) {
                 draw_nfsu2_btn(kEdHide, "SHOW", lbl_h,
-                               0.094f, 0.188f, 0.110f, 0.90f,  0.533f, 0.878f, 0.376f, 0.70f,  0.784f, 0.941f, 0.533f, 0.98f);
+                               0.094f, 0.188f, 0.110f, 0.92f,  0.533f, 0.878f, 0.376f, 0.74f,  0.784f, 0.941f, 0.533f, 0.98f);
             } else {
                 draw_nfsu2_btn(kEdHide, "HIDE", lbl_h,
-                               0.157f, 0.125f, 0.094f, 0.90f,  1.000f, 0.718f, 0.302f, 0.70f,  1.000f, 0.718f, 0.302f, 0.98f);
+                               0.157f, 0.125f, 0.094f, 0.92f,  1.000f, 0.718f, 0.302f, 0.74f,  1.000f, 0.718f, 0.302f, 0.98f);
             }
         } else {
             draw_nfsu2_btn(kEdHide, "HIDE", lbl_h,
-                           0.094f, 0.125f, 0.157f, 0.50f,  1.0f, 1.0f, 1.0f, 0.18f,  0.70f, 0.72f, 0.76f, 0.42f);
+                           0.094f, 0.125f, 0.157f, 0.52f,  1.0f, 1.0f, 1.0f, 0.20f,  0.70f, 0.72f, 0.76f, 0.44f);
         }
 
-        // Compact floating status badge beneath (or above) card
+        // Readable pill status badge beneath (or above) card
         char status[80];
         if (has_sel) {
             const int pct = int(std::lround(g_layout[size_t(g_selected)].r * 200.0f));
-            std::snprintf(status, sizeof(status), "%s  -  %d%%  (Pinch or +/- to resize)",
+            std::snprintf(status, sizeof(status), "%s  -  %d%%  (Pinch or +/-)",
                           kButtons[size_t(g_selected)].label, pct);
         } else {
             std::snprintf(status, sizeof(status), "Drag controls to move  |  Drag handle to move bar");
         }
-        EmitTextCentered(out, 0.5f * (c.card[0] + c.card[2]), c.status_cy, h * 0.023f,
-                         has_sel ? 0.784f : 0.94f, has_sel ? 0.941f : 0.96f, has_sel ? 0.533f : 1.00f,
-                         0.90f, status);
+        const float st_cx = 0.5f * (c.card[0] + c.card[2]);
+        const float st_h = h * 0.056f;
+        const float st_w = std::min(c.card[2] - c.card[0], h * 1.18f);
+        EmitPanel(out, st_cx - st_w * 0.5f, c.status_cy - st_h * 0.5f,
+                  st_cx + st_w * 0.5f, c.status_cy + st_h * 0.5f,
+                  0.063f, 0.086f, 0.125f, 0.78f, st_h * 0.48f,
+                  th * 0.75f, has_sel ? 0.784f : 1.0f, has_sel ? 0.941f : 1.0f, has_sel ? 0.533f : 1.0f, 0.32f);
+        EmitTextCentered(out, st_cx, c.status_cy, h * 0.031f,
+                         has_sel ? 0.784f : 0.95f, has_sel ? 0.941f : 0.97f, has_sel ? 0.533f : 1.00f,
+                         0.95f, status);
     }
 }
 
 bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& out_w, uint32_t& out_h) {
     constexpr uint32_t kAtlasW = 2048;
-    constexpr uint32_t kAtlasH = 2816;
+    constexpr uint32_t kAtlasH = 3072;
     constexpr uint32_t kPad = 4;
 
     rgba.assign(size_t(kAtlasW) * kAtlasH * 4u, 0u);
@@ -2290,7 +2513,7 @@ bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& out_w, uint32_t& out_h) {
                 cur_y += row_h + kPad;
                 row_h = 0;
             }
-            if (cur_y + spec.cell_h + kPad > 2166u) {
+            if (cur_y + spec.cell_h + kPad > 2420u) {
                 LOGE("touch: SVG atlas overflow at %s/%s", kSkinDirs[s], spec.file);
                 break;
             }
@@ -2315,8 +2538,8 @@ bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& out_w, uint32_t& out_h) {
         }
     }
 
-    // Bake anti-aliased proportional Google Roboto font into bottom region (y = 2176..2752)
-    BakeRobotoIntoAtlas(rgba, kAtlasW, kAtlasH, 2176u);
+    // Bake anti-aliased proportional Google Roboto font into bottom region (y = 2432..3008)
+    BakeRobotoIntoAtlas(rgba, kAtlasW, kAtlasH, 2432u);
 
     out_w = kAtlasW;
     out_h = kAtlasH;
@@ -2378,8 +2601,19 @@ void StepSkin(int step) {
     SaveLayout();
 }
 
-const char* StickModeName() { return "BUTTONS"; }
-void StepStickMode(int) {}
+const char* StickModeName() {
+    std::lock_guard lock(g_lock);
+    EnsureLayout();
+    return g_analog_stick ? "Analog" : "Buttons";
+}
+
+void StepStickMode(int) {
+    std::lock_guard lock(g_lock);
+    EnsureLayout();
+    g_analog_stick = !g_analog_stick;
+    g_stick_raw_x = g_stick_raw_y = g_stick_x = g_stick_y = 0.0f;
+    SaveLayout();
+}
 
 void EditLayout() {
     std::lock_guard lock(g_lock);
@@ -2448,8 +2682,9 @@ bool LeftButton() {
     if (!Active() || g_settle) return false;
     if (Down(VK_LBUTTON)) return true;
     std::lock_guard lock(touch::g_lock);
-    return std::any_of(touch::g_fingers.begin(), touch::g_fingers.end(),
-                       [](const touch::Finger& f) { return f.role != touch::Role::Button; });
+    return std::any_of(touch::g_fingers.begin(), touch::g_fingers.end(), [](const touch::Finger& f) {
+        return f.role == touch::Role::None;
+    });
 }
 
 bool TouchActive() { return g_touch; }
