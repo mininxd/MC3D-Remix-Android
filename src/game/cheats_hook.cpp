@@ -18,12 +18,16 @@ X86_EXTERN_FUNC(sub_002693C0);
 X86_EXTERN_FUNC(sub_002693D0);
 X86_EXTERN_FUNC(sub_002BF570);
 X86_EXTERN_FUNC(sub_00326FE0);
+X86_EXTERN_FUNC(sub_00327A20);
 
 X86_EXTERN_FUNC(__imp__sub_001923B0);
 X86_EXTERN_FUNC(__imp__sub_00292CD0);
 X86_EXTERN_FUNC(__imp__sub_001CF9D0);
 X86_EXTERN_FUNC(__imp__sub_00269220);
 X86_EXTERN_FUNC(__imp__sub_00029337);
+X86_EXTERN_FUNC(__imp__sub_00029690);
+X86_EXTERN_FUNC(__imp__sub_00327830);
+X86_EXTERN_FUNC(__imp__sub_001D4F20);
 X86_EXTERN_FUNC(__imp__sub_002BD990);
 X86_EXTERN_FUNC(__imp__sub_001422D0);
 X86_EXTERN_FUNC(__imp__sub_00144C90);
@@ -63,6 +67,7 @@ struct CheatState {
     bool has_saved_gravity = false;
     float saved_gravity_y = -9.81f;
     bool was_in_race_for_cops = false;
+    bool powerup_hud_loaded_by_cheat = false;
 };
 
 CheatState g_state;
@@ -112,23 +117,19 @@ void ApplyArcadeSettings() {
     }
 }
 
-void SpawnRandomArcadePowerupsIfEmpty(X86Context& ctx, uint8_t* base) {
+void SpawnRandomArcadePowerupsForRaceMgr(X86Context& ctx, uint8_t* base, uint32_t race_mgr) {
     if (!g_state.arcade_powerups.load(std::memory_order_relaxed)) return;
-    const uint32_t race_mgr = safe_mem::Read32(0x00557EECu, 0u);
-    if (!race_mgr || !safe_mem::CanAccess(race_mgr + 0x80u, 0x10u)) return;
+    if (!race_mgr || !safe_mem::CanAccess(race_mgr + 0x24u, 8u) ||
+        !safe_mem::CanAccess(race_mgr + 0x80u, 0x10u)) {
+        return;
+    }
     const uint16_t cur_count = safe_mem::Read16(race_mgr + 0x80u + 0x08u, 0u);
     if (cur_count > 0u) return;
 
-    uint32_t course = safe_mem::Read32(race_mgr + 0xB4u, 0u);
-    auto valid_course = [](uint32_t c) {
-        if (!c || !safe_mem::CanAccess(c + 0x110u, 4u)) return false;
-        const float len = safe_mem::ReadF32(c + 0x110u, 0.0f);
-        return len > 1.0f && len < 100000.0f;
-    };
-    if (!valid_course(course)) {
-        course = valid_course(race_mgr) ? race_mgr : 0u;
-    }
-    if (!course) return;
+    const int32_t num_checkpoints = static_cast<int32_t>(safe_mem::Read32(race_mgr + 0x24u, 0u));
+    const uint32_t checkpoints_ptr = safe_mem::Read32(race_mgr + 0x28u, 0u);
+    if (num_checkpoints <= 0 || num_checkpoints > 128 || !checkpoints_ptr) return;
+    if (!safe_mem::CanAccess(checkpoints_ptr, static_cast<uint32_t>(num_checkpoints) * 0x120u)) return;
 
     const uint32_t orig_esp = ctx.esp;
     const uint32_t orig_eax = ctx.eax;
@@ -137,17 +138,17 @@ void SpawnRandomArcadePowerupsIfEmpty(X86Context& ctx, uint8_t* base) {
 
     ctx.ecx = race_mgr + 0x80u;
     X86_PUSH32(0u);
-    X86_PUSH32(course);
-    X86_PUSH32(10u);  // 10 * 5 = 50 randomized pickups along course (Paint-style)
-    X86_PUSH32(0x00029685u);
+    X86_PUSH32(checkpoints_ptr);
+    X86_PUSH32(static_cast<uint32_t>(num_checkpoints));
+    X86_PUSH32(0x001D5999u);
     sub_00326FE0(ctx, base);
 
     ctx.esp = orig_esp;
     ctx.eax = orig_eax;
     ctx.ecx = orig_ecx;
     ctx.edx = orig_edx;
-    LOGI("[OK] cheats: ARCADE spawned randomized powerups (count=%u)",
-         unsigned(safe_mem::Read16(race_mgr + 0x80u + 0x08u, 0u)));
+    LOGI("[OK] cheats: ARCADE spawned randomized powerups across %d checkpoints (count=%u)",
+         num_checkpoints, unsigned(safe_mem::Read16(race_mgr + 0x80u + 0x08u, 0u)));
 }
 
 void ApplyUnlockFlags() {
@@ -465,11 +466,59 @@ X86_FUNC(sub_00269220) {
 // Race initialization (spawns HUD, powerup pickups, traffic, police, racers for both Career and Arcade).
 X86_FUNC(sub_00029337) {
     game::cheats::ApplyTrafficSettings();
-    game::cheats::ApplyArcadeSettings();
+    if (game::cheats::g_state.arcade_powerups.load(std::memory_order_relaxed)) {
+        game::cheats::ApplyArcadeSettings();
+        game::cheats::g_state.powerup_hud_loaded_by_cheat = true;
+    }
     game::cheats::ApplySuperCopy();
     game::cheats::ApplyPoliceCheats();
     __imp__sub_00029337(ctx, base);
-    game::cheats::SpawnRandomArcadePowerupsIfEmpty(ctx, base);
+}
+
+// Guard sub_00327830 against double-loading powerup assets into the fixed Xbox heap.
+X86_FUNC(sub_00327830) {
+    if (game::safe_mem::Read8(0x00563730u, 0u) != 0u) {
+        ctx.esp += 4u;
+        return;
+    }
+    __imp__sub_00327830(ctx, base);
+}
+
+// Race unload: stock sub_00029690 only calls sub_00327A20 (unload powerup models/textures)
+// when [0x0053F2D4] == 1 (Arcade). In Career ([0x0053F2D4] == 2), skipping sub_00327A20
+// leaks ~2-3 MB on the fixed Xbox heap and causes a Heap overrun crash on the next race load.
+X86_FUNC(sub_00029690) {
+    if (game::cheats::g_state.powerup_hud_loaded_by_cheat) {
+        const uint32_t rs = game::safe_mem::Read32(game::cheats::kRaceSettingsPtrAddr, 0u);
+        if (rs && game::safe_mem::CanAccess(rs + 0x1Cu, 4u)) {
+            kernel::W32(rs + 0x1Cu, 1u);
+        }
+        game::cheats::g_state.powerup_hud_loaded_by_cheat = false;
+    }
+    __imp__sub_00029690(ctx, base);
+    if (game::safe_mem::Read8(0x00563730u, 0u) != 0u) {
+        const uint32_t orig_esp = ctx.esp;
+        const uint32_t orig_eax = ctx.eax;
+        const uint32_t orig_ecx = ctx.ecx;
+        const uint32_t orig_edx = ctx.edx;
+        X86_PUSH32(0x000296CFu);
+        sub_00327A20(ctx, base);
+        ctx.esp = orig_esp;
+        ctx.eax = orig_eax;
+        ctx.ecx = orig_ecx;
+        ctx.edx = orig_edx;
+        LOGI("[OK] cheats: unloaded Career powerup assets via sub_00327A20");
+    }
+}
+
+// Race file loader: __thiscall bool sub_001D4F20(a1, a2) [ret 0x08].
+// After checkpoints are loaded, spawn Paint-style randomized powerup pickups if ARCADE is active.
+X86_FUNC(sub_001D4F20) {
+    const uint32_t race_mgr = ctx.ecx;
+    __imp__sub_001D4F20(ctx, base);
+    if ((ctx.eax & 0xFFu) != 0u) {
+        game::cheats::SpawnRandomArcadePowerupsForRaceMgr(ctx, base, race_mgr);
+    }
 }
 
 // Race vehicle spawn/init.
