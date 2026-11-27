@@ -122,7 +122,7 @@ struct I {
     float4 v2 : ATTR2;
     float4 v3 : ATTR3;
     float4 v4 : ATTR4;
-    float  v5 : ATTR5;
+    float v5 : ATTR5;
 };
 struct O {
     float4 p : SV_Position;
@@ -130,7 +130,7 @@ struct O {
     float4 tint : TEXCOORD1;
     float4 geom : TEXCOORD2;
     float4 bcol : TEXCOORD3;
-    float  mode : TEXCOORD4;
+    float mode : TEXCOORD4;
 };
 O vs(I i) {
     O o;
@@ -1352,6 +1352,229 @@ bool IsFixedDrawOutsideFrustum(const Assembled& a, const float full[16],
     return IsAabbOutsideFrustum(sb.min_p, sb.max_p, full);
 }
 
+struct VsMeta {
+    uint16_t max_vsc_regs = 192;
+    int16_t mvp_cbase = -1;  // >= 0 when direct screen-space 4x4 DP4 MVP on v0 + rcp(w) + c[59] detected
+};
+
+VsMeta AnalyzeVertexProgram(const std::vector<uint32_t>& prog) {
+    VsMeta m{};
+    if (prog.size() < 4u) {
+        m.max_vsc_regs = 1;
+        return m;
+    }
+    auto fld = [](const uint32_t* t, int sub, int bit, int len) -> uint32_t {
+        return (t[sub] >> bit) & ((1u << len) - 1u);
+    };
+    auto is_ident_swizzle = [](uint32_t s0, uint32_t s1, uint32_t s2, uint32_t s3) -> bool {
+        return s0 == 0u && s1 == 1u && s2 == 2u && s3 == 3u;
+    };
+
+    uint16_t max_c = 1;
+    bool has_relative = false;
+    bool reads_c58 = false;
+    int dp4_reg = -1;
+    int dp4_c[4] = {-1, -1, -1, -1};
+    bool dp4_clobbered = false;
+    int rcp_reg = -1;
+    bool mad_opos_ok = false;
+
+    for (size_t n = 0; n + 4u <= prog.size(); n += 4u) {
+        const uint32_t* t = &prog[n];
+        const uint32_t mac = fld(t, 1, 21, 4);
+        const uint32_t ilu = fld(t, 1, 25, 3);
+        const uint32_t muxA = fld(t, 2, 26, 2);
+        const uint32_t muxB = fld(t, 2, 11, 2);
+        const uint32_t muxC = fld(t, 3, 28, 2);
+        const bool uses_c = (muxA == 3u || muxB == 3u || muxC == 3u);
+        const bool rel = fld(t, 3, 1, 1) != 0u;
+        const uint32_t cr = fld(t, 1, 13, 8);
+        if (uses_c) {
+            if (rel) {
+                has_relative = true;
+                max_c = 192;
+            } else {
+                const uint16_t need = uint16_t(std::min<uint32_t>(cr + 1u, 192u));
+                if (need > max_c) max_c = need;
+                if (cr == 58u) reads_c58 = true;
+            }
+        }
+        if (mac == 13u) {
+            has_relative = true;
+            max_c = 192;
+        }
+
+        if (!has_relative) {
+            const uint32_t r = fld(t, 3, 20, 4);
+            const uint32_t mac_mask = (ilu && r == 1u) ? 0u : fld(t, 3, 24, 4);
+            const uint32_t ilu_mask = fld(t, 3, 16, 4);
+            const uint32_t ir = mac ? 1u : r;
+
+            // Detect DP4 (7) or DPH (6) of v0 with c[cr] into a single lane of temp reg < 12
+            bool matched_dp4 = false;
+            if ((mac == 7u || mac == 6u) && !rel && r < 12u &&
+                (mac_mask == 8u || mac_mask == 4u || mac_mask == 2u || mac_mask == 1u)) {
+                const uint32_t negA = fld(t, 1, 8, 1);
+                const uint32_t negB = fld(t, 2, 25, 1);
+                const bool idA = !negA && is_ident_swizzle(fld(t, 1, 6, 2), fld(t, 1, 4, 2), fld(t, 1, 2, 2), fld(t, 1, 0, 2));
+                const bool idB = !negB && is_ident_swizzle(fld(t, 2, 23, 2), fld(t, 2, 21, 2), fld(t, 2, 19, 2), fld(t, 2, 17, 2));
+                const uint32_t vin = fld(t, 1, 9, 4);
+                const bool v0_and_c = ((muxA == 2u && vin == 0u && muxB == 3u) ||
+                                       (muxB == 2u && vin == 0u && muxA == 3u));
+                if (idA && idB && v0_and_c && cr < 192u) {
+                    const int lane = (mac_mask == 8u) ? 0 : (mac_mask == 4u) ? 1 : (mac_mask == 2u) ? 2 : 3;
+                    if (dp4_reg < 0) dp4_reg = int(r);
+                    if (int(r) == dp4_reg && !dp4_clobbered && dp4_c[lane] < 0) {
+                        dp4_c[lane] = int(cr);
+                        matched_dp4 = true;
+                    }
+                }
+            }
+
+            const bool dp4_done = (dp4_reg >= 0 && dp4_c[0] >= 0 && dp4_c[1] >= 0 && dp4_c[2] >= 0 && dp4_c[3] >= 0);
+
+            // Detect RCP(2) or RCC(3) on dp4_reg.w -> rcp_reg
+            if (dp4_done && !dp4_clobbered && (ilu == 2u || ilu == 3u) && muxC == 1u && ilu_mask != 0u && ir < 12u) {
+                const uint32_t regC = (fld(t, 2, 0, 2) << 2) | fld(t, 3, 30, 2);
+                const uint32_t swC0 = fld(t, 2, 8, 2);
+                const uint32_t negC = fld(t, 2, 10, 1);
+                if (!negC && int(regC) == dp4_reg && swC0 == 3u) {
+                    rcp_reg = int(ir);
+                }
+            }
+
+            // Detect MAD oPos.xyz, dp4_reg, rcp_reg, c[59]
+            if (dp4_done && !dp4_clobbered && rcp_reg >= 0 && mac == 4u && !rel && cr == 59u) {
+                const uint32_t omask = fld(t, 3, 12, 4);
+                const bool out_en = fld(t, 3, 11, 1) != 0u;
+                const bool use_ilu = fld(t, 3, 2, 1) == 1u;
+                const uint32_t o = fld(t, 3, 3, 8) & 0xFu;
+                const bool writes_opos_xyz = out_en && !use_ilu && o == 0u && ((omask & 0xEu) == 0xEu);
+                if (writes_opos_xyz && muxA == 1u && muxB == 1u && muxC == 3u) {
+                    const uint32_t regA = fld(t, 2, 28, 4);
+                    const uint32_t regB = fld(t, 2, 13, 4);
+                    if ((int(regA) == dp4_reg && int(regB) == rcp_reg) ||
+                        (int(regB) == dp4_reg && int(regA) == rcp_reg)) {
+                        mad_opos_ok = true;
+                    }
+                }
+            }
+
+            // If dp4_reg is overwritten by anything else before MAD oPos, disqualify
+            if (!matched_dp4 && !mad_opos_ok && dp4_reg >= 0) {
+                if ((mac && mac != 13u && mac_mask && int(r) == dp4_reg) ||
+                    (ilu && ilu_mask && int(ir) == dp4_reg)) {
+                    dp4_clobbered = true;
+                }
+            }
+        }
+
+        if (fld(t, 3, 0, 1)) break;
+    }
+
+    m.max_vsc_regs = max_c;
+    if (!has_relative && !reads_c58 && mad_opos_ok && !dp4_clobbered &&
+        dp4_c[0] >= 0 && dp4_c[1] == dp4_c[0] + 1 && dp4_c[2] == dp4_c[0] + 2 && dp4_c[3] == dp4_c[0] + 3 &&
+        dp4_c[3] < 192) {
+        m.mvp_cbase = int16_t(dp4_c[0]);
+    }
+    return m;
+}
+
+bool IsProgDrawOutsideFrustum(const State& s, const Assembled& a, GuestExtent size, int16_t cbase,
+                              std::unordered_map<uint64_t, StaticBuf>& static_bufs) {
+    if (cbase < 0 || cbase + 3 >= 192 || !a.vertices.empty() || a.vertex_count < 3u || a.vertex_count > 16384u)
+        return false;
+    if (!(a.regs & 1u) || a.elements[0].format != DXGI_FORMAT_R32G32B32_FLOAT) return false;
+    const VertexElement& e = a.elements[0];
+    const VertexBuffer& vb = a.buffers[e.buffer];
+    if (!vb.src || !vb.stride || uint64_t(a.vertex_count) * vb.stride > vb.bytes) return false;
+    if (size.w == 0u || size.h == 0u || s.zscale <= 0.0f) return false;
+
+    const float* r0 = s.vsc[size_t(cbase + 0)].data();
+    const float* r1 = s.vsc[size_t(cbase + 1)].data();
+    const float* r2 = s.vsc[size_t(cbase + 2)].data();
+    const float* r3 = s.vsc[size_t(cbase + 3)].data();
+    const float* c59 = s.vsc[59].data();
+    if (!std::isfinite(c59[0]) || !std::isfinite(c59[1]) || !std::isfinite(c59[2]) || !std::isfinite(r3[3]))
+        return false;
+
+    const float lo_x = -0.12f * float(size.w);
+    const float hi_x =  1.12f * float(size.w);
+    const float lo_y = -0.12f * float(size.h);
+    const float hi_y =  1.12f * float(size.h);
+    const float lo_z = -0.05f * s.zscale;
+    const float hi_z =  1.05f * s.zscale;
+
+    auto test_point = [&](float px, float py, float pz) -> uint32_t {
+        const float cw = px * r3[0] + py * r3[1] + pz * r3[2] + r3[3];
+        if (cw <= 1e-6f) return (1u << 4);
+        const float inv_w = 1.0f / cw;
+        const float sx = (px * r0[0] + py * r0[1] + pz * r0[2] + r0[3]) * inv_w + c59[0];
+        const float sy = (px * r1[0] + py * r1[1] + pz * r1[2] + r1[3]) * inv_w + c59[1];
+        const float sz = (px * r2[0] + py * r2[1] + pz * r2[2] + r2[3]) * inv_w + c59[2];
+        uint32_t out = 0u;
+        if (sx < lo_x) out |= (1u << 0);
+        if (sx > hi_x) out |= (1u << 1);
+        if (sy < lo_y) out |= (1u << 2);
+        if (sy > hi_y) out |= (1u << 3);
+        if (sz < lo_z) out |= (1u << 4);
+        if (sz > hi_z) out |= (1u << 5);
+        return out;
+    };
+
+    if (a.vertex_count <= 256u) {
+        uint32_t all_out = 0x3Fu;
+        for (uint32_t v = 0; v < a.vertex_count; ++v) {
+            float p[3];
+            std::memcpy(p, vb.src + size_t(v) * vb.stride + e.offset, sizeof(p));
+            all_out &= test_point(p[0], p[1], p[2]);
+            if (all_out == 0u) return false;
+        }
+        return all_out != 0u;
+    }
+
+    if (!kernel::g_base) return false;
+    const uintptr_t p_addr = reinterpret_cast<uintptr_t>(vb.src);
+    const uintptr_t base = reinterpret_cast<uintptr_t>(kernel::g_base);
+    if (p_addr < base || (p_addr - base) >= 0x100000000ull) return false;
+    const uint32_t guest_va = uint32_t(p_addr - base);
+    const uint64_t key = (uint64_t(guest_va) << 32) | uint64_t(vb.bytes);
+    const uint64_t ep = DirtyEpoch(guest_va);
+    StaticBuf& sb = static_bufs[key];
+    if (!sb.has_aabb || sb.epoch != ep || sb.aabb_stride != vb.stride ||
+        sb.aabb_offset != e.offset || sb.aabb_vcount != a.vertex_count) {
+        float mn[3] = {1e30f, 1e30f, 1e30f};
+        float mx[3] = {-1e30f, -1e30f, -1e30f};
+        for (uint32_t v = 0; v < a.vertex_count; ++v) {
+            float pt[3];
+            std::memcpy(pt, vb.src + size_t(v) * vb.stride + e.offset, sizeof(pt));
+            for (int k = 0; k < 3; ++k) {
+                if (pt[k] < mn[k]) mn[k] = pt[k];
+                if (pt[k] > mx[k]) mx[k] = pt[k];
+            }
+        }
+        if (!std::isfinite(mn[0]) || !std::isfinite(mx[0])) return false;
+        std::memcpy(sb.min_p, mn, sizeof(mn));
+        std::memcpy(sb.max_p, mx, sizeof(mx));
+        sb.epoch = ep;
+        sb.bytes = vb.bytes;
+        sb.aabb_stride = vb.stride;
+        sb.aabb_offset = e.offset;
+        sb.aabb_vcount = a.vertex_count;
+        sb.has_aabb = true;
+    }
+    uint32_t all_out = 0x3Fu;
+    for (int i = 0; i < 8; ++i) {
+        const float px = (i & 1) ? sb.max_p[0] : sb.min_p[0];
+        const float py = (i & 2) ? sb.max_p[1] : sb.min_p[1];
+        const float pz = (i & 4) ? sb.max_p[2] : sb.min_p[2];
+        all_out &= test_point(px, py, pz);
+        if (all_out == 0u) return false;
+    }
+    return all_out != 0u;
+}
+
 void FillTransformConstants(const State& s, const float wv[16], const float full[16], DrawConstants& c) {
     Transpose(full, c.wvp);
     Transpose(wv, c.wv);
@@ -1486,6 +1709,7 @@ private:
         VkDeviceSize used = 0;
         Alloc dummy_vc{};
         std::array<std::array<float, 4>, 192> last_vsc{};
+        size_t last_vsc_bytes = 0;
         Alloc last_vsc_alloc{};
         bool has_last_vsc = false;
         DrawConstants last_dc{};
@@ -1544,6 +1768,7 @@ private:
     Alloc Upload(VkDeviceSize size, VkDeviceSize align = 16);
     Alloc UploadCached(const uint8_t* src, uint32_t bytes, VkDeviceSize align, bool allow_cache);
     Alloc Constants(const void* data, size_t bytes);
+    Alloc ConstantsTrimmed(const void* data, size_t bytes);
 
     // command recording
     void Begin();
@@ -1560,7 +1785,8 @@ private:
     void EndRender();
     // without dynamic rendering: render passes that only load and store, and framebuffers per pair of views
     VkRenderPass Pass(VkFormat color, VkFormat depth, bool clear_c = false, bool clear_ds = false,
-                      VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT, bool has_resolve = false);
+                      VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT, bool has_resolve = false,
+                      bool dont_care_c = false);
     VkFramebuffer Framebuffer(VkFormat color_fmt, VkFormat depth_fmt, VkImageView color, VkImageView depth,
                               uint32_t w, uint32_t h, VkImageView resolve = VK_NULL_HANDLE,
                               VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT);
@@ -1745,6 +1971,7 @@ private:
 
     std::unordered_map<uint64_t, VkShaderModule> modules_;
     std::unordered_map<uint64_t, uint64_t> shader_src_;
+    std::unordered_map<uint64_t, VsMeta> vs_meta_;
     std::unordered_map<uint64_t, VkPipeline> pipelines_;
     std::unordered_map<uint64_t, VkSampler> samplers_;
     std::unordered_map<uint64_t, VkSampler> stage_samplers_;
@@ -1770,7 +1997,10 @@ private:
     std::atomic<uint64_t> presents_seen_{0};
     std::atomic<uint64_t> present_value_[kFrames + 1] = {};
     uint64_t presents_ = 0;
+    uint64_t frame_verts_ = 0;
     double fps_ = 0;
+    float ema_frame_ms_ = 16.67f;
+    std::chrono::steady_clock::time_point last_present_t_ = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point fps_t_ = std::chrono::steady_clock::now();
     uint64_t fps_n_ = 0;
 };
@@ -1881,6 +2111,7 @@ bool VulkanBackend::PickDevice() {
             if (!(qs[q].queueFlags & VK_QUEUE_GRAPHICS_BIT) || !present) continue;
             pd_ = pd;
             props_ = p;
+            host::SetGpuName(p.deviceName);
             api_ = api;
             qfam_ = q;
             dev_exts_ = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
@@ -2417,6 +2648,24 @@ VulkanBackend::Alloc VulkanBackend::Constants(const void* data, size_t bytes) {
     return a;
 }
 
+VulkanBackend::Alloc VulkanBackend::ConstantsTrimmed(const void* data, size_t bytes) {
+    const size_t copy_bytes = std::min<size_t>(bytes, kUboRange);
+    const VkDeviceSize step = std::max<VkDeviceSize>(
+        ((VkDeviceSize(copy_bytes) + kUboAlign - 1u) / kUboAlign) * kUboAlign, kUboAlign);
+    Frame* f = &CurrentFrame();
+    VkDeviceSize o = (f->used + kUboAlign - 1u) / kUboAlign * kUboAlign;
+    // Ensure descriptor binding 0 [o, o + kUboRange] stays strictly within kUploadSize
+    if (o + kUboRange > kUploadSize) {
+        Submit(true, false);
+        f = &CurrentFrame();
+        o = 0;
+    }
+    f->used = o + step;
+    Alloc a{f->upload.buf, o, f->upload.mem.map + o};
+    if (copy_bytes) std::memcpy(a.cpu, data, copy_bytes);
+    return a;
+}
+
 // ---- command recording
 
 void VulkanBackend::Begin() {
@@ -2770,9 +3019,10 @@ void VulkanBackend::EndRender() {
 // the layouts stay the attachment ones throughout, as with dynamic rendering: barriers outside do the transitions.
 // pipelines only need a compatible pass, which load ops are not part of
 VkRenderPass VulkanBackend::Pass(VkFormat color, VkFormat depth, bool clear_c, bool clear_ds,
-                                 VkSampleCountFlagBits samples, bool has_resolve) {
+                                 VkSampleCountFlagBits samples, bool has_resolve, bool dont_care_c) {
     const bool resolve = has_resolve && (color != VK_FORMAT_UNDEFINED) && (samples > VK_SAMPLE_COUNT_1_BIT);
-    const uint64_t k[6] = {uint64_t(color), uint64_t(depth), uint64_t(clear_c), uint64_t(clear_ds),
+    const uint64_t c_op = dont_care_c ? 2ull : (clear_c ? 1ull : 0ull);
+    const uint64_t k[6] = {uint64_t(color), uint64_t(depth), c_op, uint64_t(clear_ds),
                            uint64_t(samples), uint64_t(resolve)};
     uint64_t key = Hash(k, sizeof(k));
     if (auto it = passes_.find(key); it != passes_.end()) return it->second;
@@ -2784,7 +3034,9 @@ VkRenderPass VulkanBackend::Pass(VkFormat color, VkFormat depth, bool clear_c, b
     sp.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     uint32_t n = 0;
     if (color != VK_FORMAT_UNDEFINED) {
-        at[n] = {0, color, samples, clear_c ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
+        const VkAttachmentLoadOp color_load = dont_care_c ? VK_ATTACHMENT_LOAD_OP_DONT_CARE
+                                                          : (clear_c ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD);
+        at[n] = {0, color, samples, color_load,
                  VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE,
                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
         cr.attachment = n++;
@@ -3827,8 +4079,9 @@ VkImageView VulkanBackend::BindGuestTexture(const State& s, int stage, const Tex
         t.palette = palette.hash;
         const uint64_t ep = DirtyEpoch(d.data);
         const uint32_t total = TotalSize(d);
+        const uint32_t rehash_mask = (fi.compressed && t.stable_frames >= 8u) ? 255u : 31u;
         bool need_full = !same || pal_changed || ep != t.epoch || t.stable_frames < 2u ||
-                         (((presents_ + (d.data >> 6)) & 15u) == 0u);
+                         (((presents_ + (d.data >> 6)) & rehash_mask) == 0u);
         if (!need_full) {
             const uint64_t fsig = FastMemSig(d.data, total);
             if (fsig == t.fast_sig) {
@@ -4018,7 +4271,23 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
             return;
         }
     }
-    if (sh.prog) EnsureProgramHash(s);
+    VsMeta vs_meta{};
+    if (sh.prog) {
+        EnsureProgramHash(s);
+        auto mit = vs_meta_.find(s.vs->hash);
+        if (mit == vs_meta_.end()) {
+            vs_meta = AnalyzeVertexProgram(s.vs->program);
+            vs_meta_.emplace(s.vs->hash, vs_meta);
+        } else {
+            vs_meta = mit->second;
+        }
+        if (vs_meta.mvp_cbase >= 0 && !a.pretransformed && s.rs[kRsVertexBlend] == 0 &&
+            a.topology != Topology::Points && !s.scissor_count &&
+            IsProgDrawOutsideFrustum(s, a, size, vs_meta.mvp_cbase, static_bufs_)) {
+            ++perf_frustum_culled_;
+            return;
+        }
+    }
     sh.vkey = VertexKey(s, a, sh);
     EnsureVertexShader(s, a, sh);
 
@@ -4051,14 +4320,17 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
     }
     Alloc vc{};
     if (sh.prog) {
+        const size_t vsc_bytes = std::clamp<size_t>(size_t(vs_meta.max_vsc_regs) * 16u, 16u, sizeof(s.vsc));
         Frame& cur = CurrentFrame();
-        if (cur.has_last_vsc && std::memcmp(cur.last_vsc.data(), s.vsc.data(), sizeof(s.vsc)) == 0) {
+        if (cur.has_last_vsc && cur.last_vsc_bytes >= vsc_bytes &&
+            std::memcmp(cur.last_vsc.data(), s.vsc.data(), vsc_bytes) == 0) {
             vc = cur.last_vsc_alloc;
             ++perf_vsc_hits_;
         } else {
-            vc = Constants(s.vsc.data(), sizeof(s.vsc));
+            vc = ConstantsTrimmed(s.vsc.data(), vsc_bytes);
             Frame& after = CurrentFrame();
-            after.last_vsc = s.vsc;
+            std::memcpy(after.last_vsc.data(), s.vsc.data(), vsc_bytes);
+            after.last_vsc_bytes = vsc_bytes;
             after.last_vsc_alloc = vc;
             after.has_last_vsc = true;
         }
@@ -4089,7 +4361,7 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
     const bool raw_guest_verts = a.vertices.empty();
     for (uint32_t i = 0; i < a.buffer_count; i++) {
         const VertexBuffer& b = a.buffers[i];
-        const bool can_cache = raw_guest_verts && a.gathered[i].empty();
+        const bool can_cache = raw_guest_verts && (b.src != a.gathered[i].data());
         Alloc v = UploadCached(b.src, b.bytes, 16, can_cache);
         vbufs[i] = v.buf;
         voffs[i] = v.off;
@@ -4154,8 +4426,10 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
             vkCmdBindIndexBuffer(Cb(), ib.buf, ib.off, itype);
         }
         vkCmdDrawIndexed(Cb(), a.index_count, 1, 0, a.base_vertex, 0);
+        frame_verts_ += a.index_count;
     } else {
         vkCmdDraw(Cb(), a.draw_count, 1, 0, 0);
+        frame_verts_ += a.draw_count;
     }
 }
 
@@ -4525,10 +4799,11 @@ void VulkanBackend::DrawFrame(Target* t, uint32_t index) {
         const VkSampler samplers[4] = {linear_, point_, point_, point_};
         set = Set(views, samplers);
     }
+    const bool full_cover = (pipe != VK_NULL_HANDLE) && (vw >= w - 1.0f) && (vh >= h - 1.0f);
     VkRenderingAttachmentInfoKHR ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR};
     ca.imageView = swap_views_[index];
     ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    ca.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    ca.loadOp = full_cover ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_CLEAR;
     ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     ca.clearValue.color = {{0, 0, 0, 1}};
     VkRenderingInfoKHR ri{VK_STRUCTURE_TYPE_RENDERING_INFO_KHR};
@@ -4540,12 +4815,12 @@ void VulkanBackend::DrawFrame(Target* t, uint32_t index) {
         begin_rendering_(cb, &ri);
     } else {
         VkRenderPassBeginInfo bi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-        bi.renderPass = Pass(swap_fmt_, VK_FORMAT_UNDEFINED, true);
+        bi.renderPass = Pass(swap_fmt_, VK_FORMAT_UNDEFINED, !full_cover, false, VK_SAMPLE_COUNT_1_BIT, false, full_cover);
         bi.framebuffer = Framebuffer(swap_fmt_, VK_FORMAT_UNDEFINED, swap_views_[index], VK_NULL_HANDLE,
                                      swap_extent_.width, swap_extent_.height);
         bi.renderArea = ri.renderArea;
-        bi.clearValueCount = 1;
-        bi.pClearValues = &ca.clearValue;
+        bi.clearValueCount = full_cover ? 0u : 1u;
+        bi.pClearValues = full_cover ? nullptr : &ca.clearValue;
         vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
     }
     if (pipe) {
@@ -4807,18 +5082,28 @@ void VulkanBackend::Present(const Surface& front) {
     presents_seen_.store(presents_);
     frame_++;
     Frame& next = CurrentFrame();
+    const auto wait_t0 = std::chrono::steady_clock::now();
     ResetFrame(next);
+    const auto wait_t1 = std::chrono::steady_clock::now();
+    const float gpu_wait_ms = std::chrono::duration<float, std::milli>(wait_t1 - wait_t0).count();
     vkResetCommandPool(dev_, next.pool, 0);
     Begin();
     ReleaseOldTextures();
     fps_n_++;
     auto now = std::chrono::steady_clock::now();
+    const float raw_frame_ms = std::chrono::duration<float, std::milli>(now - last_present_t_).count();
+    last_present_t_ = now;
+    if (raw_frame_ms > 0.2f && raw_frame_ms < 250.0f) {
+        ema_frame_ms_ = ema_frame_ms_ * 0.85f + raw_frame_ms * 0.15f;
+    }
     double el = std::chrono::duration<double>(now - fps_t_).count();
     if (el >= 0.5) {
         fps_ = fps_n_ / el;
         fps_n_ = 0;
         fps_t_ = now;
     }
+    host::UpdateDisplayLogs(float(fps_), ema_frame_ms_, frame_verts_, gpu_wait_ms);
+    frame_verts_ = 0;
     if (presents_ == 180 || presents_ % 600 == 0) {
         SavePipelineCache();
         LOGR("[INFO] vkPerf: frame=%llu fps=%.1f msaa=%ux tex=%zu objBufs=%zu objHits=%llu vbHits=%llu vscHits=%llu dcHits=%llu psoHits=%llu fastTex=%llu clearCoalesce=%llu frustumCull=%llu scissorCull=%llu dxtPar=%llu",

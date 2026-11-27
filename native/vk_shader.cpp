@@ -1,6 +1,7 @@
 // HLSL to SPIR-V for the Vulkan renderer, through glslang's HLSL front end, with a cache on disk
 #include "vk_shader.h"
 
+#include <array>
 #include <condition_variable>
 #include <cstdio>
 #include <deque>
@@ -36,7 +37,7 @@ std::deque<PendingSpv> g_io_queue;
 bool g_io_started = false;
 
 // bumped when the translation below changes, so older cached modules are not used
-constexpr uint32_t kCacheVersion = 2;
+constexpr uint32_t kCacheVersion = 3;
 constexpr uint32_t kPackMagic = 0x53505650u;  // 'SPVP'
 
 struct Param {
@@ -115,7 +116,7 @@ std::string Adapt(const std::string& hlsl) {
     std::string s = Specialize(hlsl);
     for (size_t at; (at = s.find("1.#INF")) != std::string::npos;) s.replace(at, 6, "asfloat(0x7F800000u)");
     // the vertex inputs at the location of their register, ATTRn: the pipeline's attributes are numbered so
-    static const std::regex attr(R"((\n[ \t]*)(\w+ v\d+ : ATTR(\d+);))");
+    static const std::regex attr(R"((\n[ \t]*)(\w+[ \t]+v\d+[ \t]*:[ \t]*ATTR(\d+);))");
     return std::regex_replace(s, attr, "$1[[vk::location($3)]] $2");
 }
 
@@ -225,6 +226,104 @@ void Store(uint64_t hash, const std::vector<uint32_t>& spirv) {
     g_io_cv.notify_one();
 }
 
+// Safe SPIR-V RelaxedPrecision (FP16) decoration pass for MC3D pixel shader combiner math.
+// Targets core SPIR-V 1.0/1.3 OpDecorate RelaxedPrecision (no device extensions required, 2x ALU
+// throughput on Mali-G57 & Adreno) while preserving full FP32 on UV coordinates, derivatives,
+// shadow comparisons, and divisions.
+void DecoratePixelCombinerFp16(std::vector<uint32_t>& spv) {
+    if (spv.size() < 6 || spv[0] != 0x07230203u) return;
+    const uint32_t bound = spv[3];
+    if (bound == 0 || bound > 65536u) return;
+
+    std::vector<uint8_t> is_float_type(bound, 0);
+    std::vector<uint8_t> fp32_protected(bound, 0);
+    std::vector<uint8_t> already_relaxed(bound, 0);
+    std::vector<uint32_t> candidates;
+    std::vector<std::pair<uint32_t, std::array<uint32_t, 3>>> producers;
+    uint32_t glsl_ext_id = 0;
+    size_t insert_pos = 0;
+
+    for (size_t i = 5; i < spv.size();) {
+        const uint32_t w = spv[i];
+        const uint32_t wc = w >> 16;
+        const uint32_t op = w & 0xFFFFu;
+        if (wc == 0 || i + wc > spv.size()) return;
+
+        // First type declaration marks exact end of Annotations (OpDecorate) section
+        if (insert_pos == 0 && op >= 19u && op <= 33u) insert_pos = i;
+
+        if (op == 11u && wc >= 3) {  // OpExtInstImport
+            const uint32_t id = spv[i + 1];
+            if (wc >= 5 && spv[i + 2] == 0x4C534C47u) glsl_ext_id = id;  // "GLSL"
+        } else if (op == 71u && wc >= 3) {  // OpDecorate
+            if (spv[i + 1] < bound && spv[i + 2] == 0u) already_relaxed[spv[i + 1]] = 1;
+        } else if (op == 22u && wc >= 3) {  // OpTypeFloat
+            if (spv[i + 1] < bound && spv[i + 2] == 32u) is_float_type[spv[i + 1]] = 1;
+        } else if (op == 23u && wc >= 4) {  // OpTypeVector
+            if (spv[i + 1] < bound && spv[i + 2] < bound && is_float_type[spv[i + 2]]) {
+                is_float_type[spv[i + 1]] = 1;
+            }
+        } else if ((op >= 87u && op <= 94u) || (op >= 207u && op <= 218u)) {
+            // OpImageSample* (87..94) and OpDPdx/OpDPdy/OpFwidth* (207..218): protect coord/input IDs as FP32!
+            for (uint32_t k = 3; k < wc; ++k) {
+                if (spv[i + k] < bound) fp32_protected[spv[i + k]] = 1;
+            }
+        } else if (op == 136u && wc >= 5) {  // OpFDiv: keep divisions and their operands FP32
+            if (spv[i + 2] < bound) fp32_protected[spv[i + 2]] = 1;
+            if (spv[i + 3] < bound) fp32_protected[spv[i + 3]] = 1;
+            if (spv[i + 4] < bound) fp32_protected[spv[i + 4]] = 1;
+        } else if (op == 127u || op == 129u || op == 131u || op == 133u || op == 142u || op == 148u) {
+            // OpFNegate(127), OpFAdd(129), OpFSub(131), OpFMul(133), OpVectorTimesScalar(142), OpDot(148)
+            if (wc >= 4 && spv[i + 1] < bound && spv[i + 2] < bound && is_float_type[spv[i + 1]]) {
+                const uint32_t res = spv[i + 2];
+                candidates.push_back(res);
+                std::array<uint32_t, 3> ops = {spv[i + 3], wc >= 5 ? spv[i + 4] : 0u, 0u};
+                producers.push_back({res, ops});
+            }
+        } else if (op == 12u && wc >= 6 && glsl_ext_id != 0 && spv[i + 3] == glsl_ext_id) {
+            // GLSL.std.450: FMin(37), FMax(40), FClamp(43), FMix(46)
+            const uint32_t ext_op = spv[i + 4];
+            if ((ext_op == 37u || ext_op == 40u || ext_op == 43u || ext_op == 46u) &&
+                spv[i + 1] < bound && spv[i + 2] < bound && is_float_type[spv[i + 1]]) {
+                const uint32_t res = spv[i + 2];
+                candidates.push_back(res);
+                std::array<uint32_t, 3> ops = {
+                    wc >= 6 ? spv[i + 5] : 0u,
+                    wc >= 7 ? spv[i + 6] : 0u,
+                    wc >= 8 ? spv[i + 7] : 0u,
+                };
+                producers.push_back({res, ops});
+            }
+        }
+        i += wc;
+    }
+
+    if (insert_pos == 0 || candidates.empty()) return;
+
+    // Propagate FP32 protection 2 hops backward from image sample coordinates / derivatives / divisions
+    for (int pass = 0; pass < 2; ++pass) {
+        for (const auto& [res, ops] : producers) {
+            if (!fp32_protected[res]) continue;
+            for (uint32_t u : ops) {
+                if (u != 0u && u < bound) fp32_protected[u] = 1;
+            }
+        }
+    }
+
+    std::vector<uint32_t> decs;
+    decs.reserve(candidates.size() * 3);
+    for (uint32_t id : candidates) {
+        if (fp32_protected[id] || already_relaxed[id]) continue;
+        already_relaxed[id] = 1;
+        decs.push_back((3u << 16) | 71u);  // OpDecorate
+        decs.push_back(id);
+        decs.push_back(0u);  // RelaxedPrecision
+    }
+    if (!decs.empty()) {
+        spv.insert(spv.begin() + std::ptrdiff_t(insert_pos), decs.begin(), decs.end());
+    }
+}
+
 }  // namespace
 
 void Init(const std::filesystem::path& cache_dir) {
@@ -273,6 +372,9 @@ bool Compile(const std::string& hlsl, const char* entry, Stage stage, uint64_t h
     spirv.clear();
     glslang::GlslangToSpv(*program.getIntermediate(lang), spirv, &options);
     if (spirv.empty()) return false;
+    if (stage == Stage::Pixel && hlsl.find("SV_IsFrontFace") != std::string::npos) {
+        DecoratePixelCombinerFp16(spirv);
+    }
     Store(hash, spirv);
     return true;
 }

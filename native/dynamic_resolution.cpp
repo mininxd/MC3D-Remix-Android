@@ -33,6 +33,7 @@ std::atomic<uint32_t> g_percent{0};  // 0 until play starts it, then the resolut
 clock::time_point g_start, g_last, g_changed, g_ceiling_until;
 uint32_t g_frames = 0;
 uint32_t g_ceiling = 0;  // a step up to this or past it brought the drop back
+uint32_t g_last_target_fps = 0;
 bool g_raised = false;   // the last change was up
 
 uint32_t Floor(uint32_t p) { return p / kStep * kStep; }
@@ -55,7 +56,7 @@ constexpr uint32_t kDynamicMaxPercent = 90;
 uint32_t TargetFps() {
     const uint32_t cap = app::Get().fps_cap;
     if (cap >= 30u) return cap;
-    return std::max(game::Opt().dynamic_target_fps, 60u);
+    return std::max(game::Opt().dynamic_target_fps, 30u);
 }
 
 }  // namespace
@@ -75,7 +76,17 @@ void Frame() {
     g_last = now;
     if (!o.dynamic_resolution) {
         g_percent = 0;
+        g_last_target_fps = 0;
         return;
+    }
+    const uint32_t cur_target = TargetFps();
+    if (g_last_target_fps != cur_target) {
+        g_last_target_fps = cur_target;
+        g_ceiling = 0;
+        g_ceiling_until = {};
+        g_raised = false;
+        g_changed = now;
+        Restart(now);
     }
     uint32_t p = Percent();
     if (!g_percent) {

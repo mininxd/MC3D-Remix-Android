@@ -8,9 +8,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <cwchar>
@@ -123,6 +125,279 @@ void WindowPixels(int& w, int& h) {
     }
 }
 
+namespace {
+
+std::mutex g_diag_lock;
+std::string g_diag_device;
+std::string g_diag_cpu;
+std::string g_diag_gpu = "Vulkan GPU";
+bool g_diag_hw_init = false;
+
+std::atomic<float> g_diag_fps{0.0f};
+std::atomic<float> g_diag_frame_ms{16.67f};
+std::atomic<float> g_diag_cpu_pct{0.0f};
+std::atomic<float> g_diag_gpu_pct{0.0f};
+std::atomic<uint64_t> g_diag_verts{0};
+
+// CPU & GPU sysfs sampling state (NFSU2 DiagnosticOverlay style, sampled every 500ms)
+uint64_t g_prev_cpu_total = 0;
+uint64_t g_prev_cpu_work = 0;
+int64_t g_prev_wall_ms = 0;
+int64_t g_prev_proc_ms = 0;
+float g_last_cpu_pct = 0.0f;
+float g_smoothed_gpu_pct = -1.0f;
+bool g_gpu_sysfs_checked = false;
+std::string g_gpu_sysfs_path;
+bool g_gpu_sysfs_pair = false;
+std::chrono::steady_clock::time_point g_last_diag_sample{};
+
+std::string TrimStr(std::string s) {
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+    return s;
+}
+
+std::string TitleBrand(std::string s) {
+    s = TrimStr(std::move(s));
+    if (s.empty()) return s;
+    bool all_lower = true;
+    for (unsigned char c : s) {
+        if (std::isupper(c)) {
+            all_lower = false;
+            break;
+        }
+    }
+    if (all_lower) s[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(s[0])));
+    return s;
+}
+
+void EnsureHardwareInfoLocked() {
+    if (g_diag_hw_init) return;
+    g_diag_hw_init = true;
+
+    std::string brand = TitleBrand(Property("ro.product.brand"));
+    if (brand.empty()) brand = TitleBrand(Property("ro.product.manufacturer"));
+    std::string model = TrimStr(Property("ro.product.model"));
+    if (!brand.empty() && !model.empty()) {
+        std::string b_low = brand, m_low = model;
+        for (char& c : b_low) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        for (char& c : m_low) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        g_diag_device = (m_low.rfind(b_low, 0) == 0) ? model : (brand + " " + model);
+    } else if (!model.empty()) {
+        g_diag_device = model;
+    } else if (!brand.empty()) {
+        g_diag_device = brand;
+    } else {
+        g_diag_device = "Android Device";
+    }
+
+    std::string soc_mfg = TitleBrand(Property("ro.soc.manufacturer"));
+    std::string soc_model = TrimStr(Property("ro.soc.model"));
+    if (!soc_model.empty()) {
+        std::string sm_low = soc_model, mfg_low = soc_mfg;
+        for (char& c : sm_low) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        for (char& c : mfg_low) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (!soc_mfg.empty() && sm_low.rfind(mfg_low, 0) != 0) {
+            g_diag_cpu = soc_mfg + " " + soc_model;
+        } else {
+            g_diag_cpu = soc_model;
+        }
+    } else {
+        std::string hw = TrimStr(Property("ro.board.platform"));
+        if (hw.empty()) hw = TrimStr(Property("ro.hardware"));
+        if (hw.empty()) {
+            std::ifstream ci("/proc/cpuinfo");
+            for (std::string line; std::getline(ci, line);) {
+                if (line.rfind("Hardware", 0) == 0) {
+                    const size_t col = line.find(':');
+                    if (col != std::string::npos) {
+                        hw = TrimStr(line.substr(col + 1));
+                        break;
+                    }
+                }
+            }
+        }
+        g_diag_cpu = hw.empty() ? "ARM64 CPU" : hw;
+    }
+}
+
+float SampleCpuPercent() {
+    {
+        std::ifstream f("/proc/stat");
+        std::string line;
+        if (std::getline(f, line)) {
+            uint64_t user = 0, nice = 0, sys = 0, idle = 0, iowait = 0, irq = 0, softirq = 0;
+            if (std::sscanf(line.c_str(), "cpu %llu %llu %llu %llu %llu %llu %llu",
+                            (unsigned long long*)&user, (unsigned long long*)&nice,
+                            (unsigned long long*)&sys, (unsigned long long*)&idle,
+                            (unsigned long long*)&iowait, (unsigned long long*)&irq,
+                            (unsigned long long*)&softirq) >= 7) {
+                const uint64_t total = user + nice + sys + idle + iowait + irq + softirq;
+                const uint64_t work = user + nice + sys;
+                if (g_prev_cpu_total > 0 && total > g_prev_cpu_total && work >= g_prev_cpu_work) {
+                    const uint64_t td = total - g_prev_cpu_total;
+                    const uint64_t wd = work - g_prev_cpu_work;
+                    g_last_cpu_pct = std::clamp(float(wd) * 100.0f / float(td), 0.0f, 100.0f);
+                }
+                g_prev_cpu_total = total;
+                g_prev_cpu_work = work;
+                return g_last_cpu_pct;
+            }
+        }
+    }
+    // Fallback: process CPU time normalized by logical cores (identical to NFSU2 DiagnosticOverlay)
+    struct timespec ts_wall{}, ts_proc{};
+    clock_gettime(CLOCK_MONOTONIC, &ts_wall);
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts_proc);
+    const int64_t now_wall = int64_t(ts_wall.tv_sec) * 1000 + ts_wall.tv_nsec / 1000000;
+    const int64_t now_proc = int64_t(ts_proc.tv_sec) * 1000 + ts_proc.tv_nsec / 1000000;
+    if (g_prev_wall_ms > 0 && now_wall > g_prev_wall_ms && now_proc >= g_prev_proc_ms) {
+        const int cores = std::max(1, SDL_GetNumLogicalCPUCores());
+        const float pct = float(now_proc - g_prev_proc_ms) * 100.0f / (float(now_wall - g_prev_wall_ms) * float(cores));
+        g_last_cpu_pct = std::clamp(pct, 0.0f, 100.0f);
+    }
+    g_prev_wall_ms = now_wall;
+    g_prev_proc_ms = now_proc;
+    return g_last_cpu_pct;
+}
+
+bool ReadSysfsPercent(const std::string& path, float& out) {
+    std::ifstream f(path);
+    std::string line;
+    if (!std::getline(f, line)) return false;
+    float v = -1.0f;
+    if (std::sscanf(line.c_str(), "%f", &v) == 1 && v >= 0.0f && v <= 100.0f) {
+        out = v;
+        return true;
+    }
+    return false;
+}
+
+bool ReadSysfsBusyPair(const std::string& path, float& out) {
+    std::ifstream f(path);
+    std::string line;
+    if (!std::getline(f, line)) return false;
+    unsigned long long busy = 0, total = 0;
+    if (std::sscanf(line.c_str(), "%llu %llu", &busy, &total) == 2 && total > 0 && busy <= total) {
+        out = float(busy) * 100.0f / float(total);
+        return true;
+    }
+    return false;
+}
+
+bool SampleGpuSysfs(float& out) {
+    if (g_gpu_sysfs_checked) {
+        if (g_gpu_sysfs_path.empty()) return false;
+        const bool ok = g_gpu_sysfs_pair ? ReadSysfsBusyPair(g_gpu_sysfs_path, out)
+                                         : ReadSysfsPercent(g_gpu_sysfs_path, out);
+        if (!ok) g_gpu_sysfs_path.clear();
+        return ok;
+    }
+    g_gpu_sysfs_checked = true;
+    static constexpr const char* kPctPaths[] = {
+        "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage",
+        "/sys/class/kgsl/kgsl-3d0/gpu_load",
+        "/sys/class/misc/mali0/device/utilization",
+        "/sys/class/misc/mali0/device/gpu_busy",
+        "/sys/devices/platform/mali.0/utilization",
+        "/sys/devices/platform/13040000.mali/utilization",
+        "/sys/devices/platform/13000000.mali/utilization",
+        "/sys/devices/platform/14ac0000.mali/utilization",
+        "/sys/devices/platform/1c500000.mali/utilization",
+        "/sys/devices/platform/sprd_mali.0/utilization",
+        "/sys/devices/platform/gpu/utilization",
+        "/sys/kernel/debug/ged/hal/gpu_utilization",
+        "/sys/module/ged/parameters/gpu_loading",
+        "/sys/module/ged/parameters/gpu_dvfs_loading",
+    };
+    for (const char* p : kPctPaths) {
+        if (ReadSysfsPercent(p, out)) {
+            g_gpu_sysfs_path = p;
+            g_gpu_sysfs_pair = false;
+            return true;
+        }
+    }
+    static constexpr const char* kBusyPaths[] = {
+        "/sys/class/kgsl/kgsl-3d0/gpubusy",
+        "/sys/devices/platform/soc/soc:qcom,kgsl-3d0/kgsl/kgsl-3d0/gpubusy",
+    };
+    for (const char* p : kBusyPaths) {
+        if (ReadSysfsBusyPair(p, out)) {
+            g_gpu_sysfs_path = p;
+            g_gpu_sysfs_pair = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+void SetGpuName(const char* name) {
+    if (!name || !name[0]) return;
+    std::lock_guard lock(g_diag_lock);
+    g_diag_gpu = name;
+}
+
+void UpdateDisplayLogs(float fps, float frame_ms, uint64_t vertices, float gpu_wait_ms) {
+    g_diag_fps.store(fps, std::memory_order_relaxed);
+    g_diag_frame_ms.store(frame_ms, std::memory_order_relaxed);
+    g_diag_verts.store(vertices, std::memory_order_relaxed);
+    if (game::Opt().display_logs == 0u) return;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (g_last_diag_sample.time_since_epoch().count() != 0 &&
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - g_last_diag_sample).count() < 500) {
+        return;
+    }
+    g_last_diag_sample = now;
+
+    const float cpu = SampleCpuPercent();
+    g_diag_cpu_pct.store(cpu, std::memory_order_relaxed);
+
+    float gpu = 0.0f;
+    if (SampleGpuSysfs(gpu)) {
+        g_smoothed_gpu_pct = gpu;
+    } else {
+        // Balanced fallback estimator (NFSU2 DiagnosticOverlay style + Vulkan GPU wait ratio)
+        const float target_fps = float(app::Get().fps_cap >= 30u ? app::Get().fps_cap : 60u);
+        const float target_ms = 1000.0f / target_fps;
+        float est = 0.0f;
+        if (gpu_wait_ms > 0.5f && frame_ms > 1.0f) {
+            est = std::clamp((gpu_wait_ms / target_ms) * 100.0f, 15.0f, 99.0f);
+        } else if (fps >= target_fps * 0.90f) {
+            est = std::clamp(25.0f + cpu * 0.20f, 20.0f, 45.0f);
+        } else if (cpu > 70.0f) {
+            const float ratio = std::max(0.2f, fps / target_fps);
+            est = std::clamp(ratio * 45.0f, 18.0f, 50.0f);
+        } else {
+            const float eff = std::min(1.0f, target_ms / std::max(1.0f, frame_ms));
+            est = std::clamp(eff * 60.0f, 25.0f, 65.0f);
+        }
+        g_smoothed_gpu_pct = (g_smoothed_gpu_pct < 0.0f) ? est : (g_smoothed_gpu_pct * 0.75f + est * 0.25f);
+        gpu = std::clamp(g_smoothed_gpu_pct, 0.0f, 100.0f);
+    }
+    g_diag_gpu_pct.store(gpu, std::memory_order_relaxed);
+}
+
+DisplayLogsSnapshot GetDisplayLogs() {
+    DisplayLogsSnapshot snap{};
+    {
+        std::lock_guard lock(g_diag_lock);
+        EnsureHardwareInfoLocked();
+        snap.device_name = g_diag_device.c_str();
+        snap.cpu_name = g_diag_cpu.c_str();
+        snap.gpu_name = g_diag_gpu.c_str();
+    }
+    snap.app_version = APP_VERSION_NAME;
+    snap.fps = g_diag_fps.load(std::memory_order_relaxed);
+    snap.frame_ms = g_diag_frame_ms.load(std::memory_order_relaxed);
+    snap.cpu_percent = g_diag_cpu_pct.load(std::memory_order_relaxed);
+    snap.gpu_percent = g_diag_gpu_pct.load(std::memory_order_relaxed);
+    snap.vertices = g_diag_verts.load(std::memory_order_relaxed);
+    return snap;
+}
+
 }  // namespace host
 
 namespace app {
@@ -207,6 +482,10 @@ void Load() {
         else *o.value = t[o.key].value_or(*o.value);
     }
     if (migrate_defaults) PhoneFrameDefaults(s);
+    // Normalize simplified Motion Blur (Off / On), Display Logs (Off / Minimal / Full), and sync Dynamic Res FPS target
+    game::Opt().motion_blur = game::Opt().motion_blur ? 1u : 0u;
+    game::Opt().display_logs = std::min(game::Opt().display_logs, 2u);
+    if (s.fps_cap >= 30u) game::Opt().dynamic_target_fps = s.fps_cap;
     if (kGame.load) kGame.load(&t);
 }
 

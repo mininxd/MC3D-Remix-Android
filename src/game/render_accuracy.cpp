@@ -1,5 +1,6 @@
 #include "game/render_accuracy.h"
 #include "game/render_accuracy_internal.h"
+#include "d3d/gpu_frame.h"
 #include "game/car_lights_fix.h"
 #include "game/d3d_guest_sync.h"
 #include "game/deferred_tss_guard.h"
@@ -524,6 +525,7 @@ void ApplyRenderAccuracy() {
     } else {
         SyncFixedFunctionStages(s, tex_ok);
     }
+    gpu::MarkStateDirty(gpu::kDirtySimple | gpu::kDirtyRsTss);
 
     game::car_lights_fix::Apply(s);
 

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Delete Save (Outline)">
+  <g id="btn-trash" transform="scale(4)">
+    <circle cx="64" cy="64" r="52" fill="none" stroke="#FFFFFF" stroke-width="3.2"/>
+    <path d="M 42 46 L 86 46" fill="none" stroke="#FFFFFF" stroke-width="3.6" stroke-linecap="round"/>
+    <path d="M 54 46 L 56 38 L 72 38 L 74 46" fill="none" stroke="#FFFFFF" stroke-width="3.4" stroke-linejoin="round"/>
+    <path d="M 46 46 L 49 88 C 49.3 91 51.5 93 54.5 93 L 73.5 93 C 76.5 93 78.7 91 79 88 L 82 46" fill="none" stroke="#FFFFFF" stroke-width="3.4" stroke-linejoin="round"/>
+    <line x1="57" y1="56" x2="58" y2="83" stroke="#FFFFFF" stroke-width="3.2" stroke-linecap="round"/>
+    <line x1="64" y1="56" x2="64" y2="83" stroke="#FFFFFF" stroke-width="3.2" stroke-linecap="round"/>
+    <line x1="71" y1="56" x2="70" y2="83" stroke="#FFFFFF" stroke-width="3.2" stroke-linecap="round"/>
+  </g>
+</svg>

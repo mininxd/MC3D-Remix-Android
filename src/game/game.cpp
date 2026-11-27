@@ -1557,11 +1557,12 @@ X86_FUNC(sub_0020B6F0) {
     }
     __imp__sub_0020B6F0(ctx, base);
     game::cheats::OnFrameTick();
+    game::cheats::SyncPromptVisibility(ctx, base);
 }
 
 // Native MC3D Sense-of-Speed / Radial Motion Blur control (mcFbGlow::RenderMotionBlur).
 // Signature: __thiscall void sub_00044230(float alphaScale, float radiusScale, int flag) [ret 0x0C].
-// Motion Blur option: 0 = Off (skip pass), 1 = Low (reduced alpha/radius), 2 = Strong (stock Xbox).
+// Motion Blur option: 0 = Off (skip pass), 1 = On (Low reduced alpha/radius, default On).
 X86_EXTERN_FUNC(__imp__sub_00044230);
 X86_FUNC(sub_00044230) {
     const uint32_t mode = game::Opt().motion_blur;
@@ -1569,7 +1570,7 @@ X86_FUNC(sub_00044230) {
         ctx.esp += 16u;  // __thiscall ret 0x0C
         return;
     }
-    if (mode == 1u && game::safe_mem::CanAccess(ctx.esp + 4u, 8u)) {
+    if (game::safe_mem::CanAccess(ctx.esp + 4u, 8u)) {
         auto scale_arg = [&](uint32_t va, float factor) {
             uint32_t bits = X86_MEM32(va);
             float v = 0.0f;

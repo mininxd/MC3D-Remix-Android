@@ -26,14 +26,15 @@ android {
         minSdk 29
         targetSdk 34
         // -PversionCode=<n> -PversionName=<name>: the release workflow sets them from the tag
+        def appVersionName = project.hasProperty("versionName") ? project.versionName : "1.0"
         versionCode project.hasProperty("versionCode") ? project.versionCode.toInteger() : 1
-        versionName project.hasProperty("versionName") ? project.versionName : "1.0"
+        versionName appVersionName
         ndk {
             abiFilters "arm64-v8a"
         }
         externalNativeBuild {
             cmake {
-                arguments "-DANDROID_STL=c++_shared"
+                arguments "-DANDROID_STL=c++_shared", "-DAPP_VERSION_NAME=${appVersionName}"
                 // -PxbeGenerated=<dir> -PxbeImage=<file>: recompiled code from somewhere else than generated/game
                 if (project.hasProperty("xbeGenerated")) arguments "-DXBE_GENERATED=${project.xbeGenerated}"
                 if (project.hasProperty("xbeImage")) arguments "-DXBE_IMAGE=${project.xbeImage}"

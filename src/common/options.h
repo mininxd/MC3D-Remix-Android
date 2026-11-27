@@ -14,12 +14,13 @@ struct Options {
     bool auto_burnout = true;     // auto-hold Handbrake with Gas during pre-race countdown for burnout launch
     bool skip_intros = false;
     bool fps_counter = false;
+    uint32_t display_logs = 0;  // 0 Off, 1 Minimal (FPS/GPU/CPU), 2 Full (FPS/GPU/CPU/Version/Vertex/Device)
     uint32_t fmv_scale = 0;
     uint32_t screen_filter = 0;
     bool reload_blur = true;
     bool bloom = true;
     bool fog = true;
-    uint32_t motion_blur = 1;   // 0 Off, 1 Low (reduced native), 2 Strong (stock native)
+    uint32_t motion_blur = 1;   // 0 Off, 1 On (Low reduced native blur, default On)
     uint32_t reflections = 1;   // 0 Off, 1 On (full dynamic cubemap)
     bool debug_logging = false; // object_logs.txt telemetry (off by default for best CPU performance)
     uint32_t anti_aliasing = 0;  // 0 Off, 1 FXAA, 2 MSAA 2x, 3 MSAA 4x, 4 SSAA 2x

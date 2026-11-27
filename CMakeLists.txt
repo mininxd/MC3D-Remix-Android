@@ -57,7 +57,10 @@ if(GIT_EXECUTABLE)
         set(BUILD_COMMIT ${head})
     endif()
 endif()
-file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/build_info.h CONTENT "#define BLACK_COMMIT \"${BUILD_COMMIT}\"\n#define MC3D_COMMIT \"${BUILD_COMMIT}\"\n")
+if(NOT DEFINED APP_VERSION_NAME OR APP_VERSION_NAME STREQUAL "")
+    set(APP_VERSION_NAME "1.0")
+endif()
+file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/build_info.h CONTENT "#define BLACK_COMMIT \"${BUILD_COMMIT}\"\n#define MC3D_COMMIT \"${BUILD_COMMIT}\"\n#define APP_VERSION_NAME \"${APP_VERSION_NAME}\"\n")
 
 # dependencies: SDL3 from the checkout Gradle makes (its Java side goes into the APK), the rest fetched
 set(SDL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL)

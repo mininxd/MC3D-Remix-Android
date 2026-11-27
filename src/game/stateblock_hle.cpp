@@ -10,6 +10,7 @@
 #include "core/log.h"
 #include "cpu/x86_context.h"
 #include "cpu/x86_ops.h"
+#include "d3d/gpu_frame.h"
 #include "game/d3d_guest_sync.h"
 #include "game/guest_mem_safe.h"
 #include "game/render_accuracy_internal.h"
@@ -339,6 +340,7 @@ void ApplyBlockToDevice(X86Context& ctx, uint8_t* base, const HostStateBlock& bl
         }
 
         d3d_sync::MirrorHostStateToGuest(s);
+        gpu::MarkStateDirty(gpu::kDirtyAll);
     }
 
     // 3. Viewport via D3DDevice_SetViewport so viewport constants (c-38/c-37) refresh cleanly.
@@ -407,6 +409,7 @@ void RestoreFullRecordedState(X86Context& ctx, uint8_t* base, const RecordingCon
             }
         }
         d3d_sync::MirrorHostStateToGuest(s);
+        gpu::MarkStateDirty(gpu::kDirtyAll);
     }
     render_accuracy::InvalidateMc3dStateShadows();
 }

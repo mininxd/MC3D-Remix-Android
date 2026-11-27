@@ -192,11 +192,25 @@ uint32_t NewSurface(uint32_t w, uint32_t h, uint32_t fmt, uint32_t bpp) {
 
 void SyncDeferred() {
     // deferred states live in the title's memory, the inline SetRenderState and SetTextureStageState write them
-    for (uint32_t i = gpu::kRsDeferredFirst; i < gpu::kRsComplexFirst; i++) g_state.rs[i] = R32(kRenderState + i * 4);
+    bool changed = false;
+    for (uint32_t i = gpu::kRsDeferredFirst; i < gpu::kRsComplexFirst; i++) {
+        uint32_t v = R32(kRenderState + i * 4);
+        if (g_state.rs[i] != v) {
+            g_state.rs[i] = v;
+            changed = true;
+        }
+    }
     for (int s = 0; s < 4; s++) {
         uint32_t stage = kTextureState + s * kStageStates * 4;
-        for (uint32_t i = 0; i < gpu::kTssBumpEnvMat00; i++) g_state.tss[s][i] = R32(stage + i * 4);
+        for (uint32_t i = 0; i < gpu::kTssBumpEnvMat00; i++) {
+            uint32_t v = R32(stage + i * 4);
+            if (g_state.tss[s][i] != v) {
+                g_state.tss[s][i] = v;
+                changed = true;
+            }
+        }
     }
+    if (changed) gpu::MarkStateDirty(gpu::kDirtyRsTss);
 }
 
 float ZScale(const gpu::Surface& zs) {
@@ -219,10 +233,14 @@ void UpdateViewportConstants() {
     float x = v.x + g_state.ss_offset_x + hw;
     float y = v.y + g_state.ss_offset_y + hh;
     g_state.vsc[kViewportOffset] = {x, y, v.min_z * g_state.zscale, 0};
+    gpu::MarkStateDirty(gpu::kDirtyVsc | gpu::kDirtyScissor);
 }
 
 void SetComplex(uint32_t rs, uint32_t v) {
-    g_state.rs[rs] = v;
+    if (g_state.rs[rs] != v) {
+        g_state.rs[rs] = v;
+        gpu::MarkStateDirty(gpu::kDirtyRsTss);
+    }
     W32(kRenderState + rs * 4, v);
 }
 
@@ -693,6 +711,7 @@ HLE_STDCALL(D3DDevice_SetScissors, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     g_state.scissor_count = std::min<uint32_t>(a[0], 8);
     for (uint32_t i = 0; i < g_state.scissor_count * 4; i++) g_state.scissors[i] = R32(a[2] + i * 4);
+    gpu::MarkStateDirty(gpu::kDirtyScissor);
     return 0;
 }
 
@@ -715,7 +734,10 @@ static uint32_t CanonicalSimpleValue(uint32_t method, uint32_t value) {
 HLE_FASTCALL(D3DDevice_SetRenderState_Simple, 0) {
     uint32_t method = a[0] & 0x1FFC;
     uint32_t value = CanonicalSimpleValue(method, a[1]);
-    g_state.simple[method >> 2] = value;
+    if (g_state.simple[method >> 2] != value) {
+        g_state.simple[method >> 2] = value;
+        gpu::MarkStateDirty(gpu::kDirtySimple);
+    }
     return 0;
 }
 
@@ -724,7 +746,11 @@ HLE_STDCALL(D3DDevice_SetRenderStateNotInline, 2) {
     uint32_t v = a[1];
     if (rs < gpu::kRsDeferredFirst) {
         uint32_t method = R32(kSimpleEncode + rs * 4) & 0x1FFC;
-        g_state.simple[method >> 2] = CanonicalSimpleValue(method, v);
+        uint32_t value = CanonicalSimpleValue(method, v);
+        if (g_state.simple[method >> 2] != value) {
+            g_state.simple[method >> 2] = value;
+            gpu::MarkStateDirty(gpu::kDirtySimple);
+        }
     } else if (rs < gpu::kRsMax) {
         SetComplex(rs, v);
     }
@@ -767,20 +793,33 @@ COMPLEX_STATE(RopZRead, gpu::kRsRopZRead)
 COMPLEX_STATE(DoNotCullUncompressed, gpu::kRsDoNotCullUncompressed)
 
 HLE_STDCALL(D3DDevice_SetTextureState_TexCoordIndex, 2) {
-    g_state.tss[a[0] & 3][gpu::kTssTexCoordIndex] = a[1];
+    if (g_state.tss[a[0] & 3][gpu::kTssTexCoordIndex] != a[1]) {
+        g_state.tss[a[0] & 3][gpu::kTssTexCoordIndex] = a[1];
+        gpu::MarkStateDirty(gpu::kDirtyRsTss);
+    }
     W32(kTextureState + ((a[0] & 3) * kStageStates + gpu::kTssTexCoordIndex) * 4, a[1]);
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetTextureState_BumpEnv, 3) {
-    if (a[1] >= gpu::kTssBumpEnvMat00 && a[1] <= gpu::kTssBumpEnvLOffset) g_state.tss[a[0] & 3][a[1]] = a[2];
+    if (a[1] >= gpu::kTssBumpEnvMat00 && a[1] <= gpu::kTssBumpEnvLOffset &&
+        g_state.tss[a[0] & 3][a[1]] != a[2]) {
+        g_state.tss[a[0] & 3][a[1]] = a[2];
+        gpu::MarkStateDirty(gpu::kDirtyRsTss);
+    }
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetTextureState_BorderColor, 2) {
-    g_state.tss[a[0] & 3][gpu::kTssBorderColor] = a[1];
+    if (g_state.tss[a[0] & 3][gpu::kTssBorderColor] != a[1]) {
+        g_state.tss[a[0] & 3][gpu::kTssBorderColor] = a[1];
+        gpu::MarkStateDirty(gpu::kDirtyRsTss);
+    }
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetTextureState_ColorKeyColor, 2) {
-    g_state.tss[a[0] & 3][gpu::kTssColorKeyColor] = a[1];
+    if (g_state.tss[a[0] & 3][gpu::kTssColorKeyColor] != a[1]) {
+        g_state.tss[a[0] & 3][gpu::kTssColorKeyColor] = a[1];
+        gpu::MarkStateDirty(gpu::kDirtyRsTss);
+    }
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetTextureStageStateNotInline, 3) {
@@ -788,7 +827,10 @@ HLE_STDCALL(D3DDevice_SetTextureStageStateNotInline, 3) {
     uint32_t type = a[1];
     uint32_t v = a[2];
     if (type < gpu::kTssCount) {
-        g_state.tss[stage][type] = v;
+        if (g_state.tss[stage][type] != v) {
+            g_state.tss[stage][type] = v;
+            gpu::MarkStateDirty(gpu::kDirtyRsTss);
+        }
         W32(kTextureState + (stage * kStageStates + type) * 4, v);
     }
     return 0;
@@ -811,11 +853,14 @@ HLE_STDCALL(D3DDevice_SetTransform, 2) {
     std::memcpy(HostPtr(kDevice + kDevTransforms + t * 64), HostPtr(a[1]), 64);
     uint32_t pc = D3D8TransformType(t);
     std::memcpy(g_state.transforms[pc].data(), HostPtr(a[1]), 64);
+    gpu::MarkStateDirty(t < 2 ? gpu::kDirtyTransformVP
+                        : (t < 6 ? gpu::kDirtyTransformTex : gpu::kDirtyTransformW));
     return 0;
 }
 
 HLE_STDCALL(D3DDevice_SetMaterial, 1) {
     std::memcpy(g_state.material.data(), HostPtr(a[0]), 17 * 4);
+    gpu::MarkStateDirty(gpu::kDirtyLighting);
     return 0;
 }
 
@@ -826,6 +871,7 @@ HLE_STDCALL(D3DDevice_SetLight, 2) {
     if (i < 8 && l) {
         std::lock_guard<std::recursive_mutex> lock(g_lock);
         std::memcpy(g_state.lights[i].data(), HostPtr(l), 26 * 4);
+        gpu::MarkStateDirty(gpu::kDirtyLighting);
     }
     return 0;
 }
@@ -835,6 +881,7 @@ HLE_STDCALL(D3DDevice_LightEnable, 2) {
     if (i < 8) {
         std::lock_guard<std::recursive_mutex> lock(g_lock);
         g_state.light_enable = on ? g_state.light_enable | 1u << i : g_state.light_enable & ~(1u << i);
+        gpu::MarkStateDirty(gpu::kDirtyLighting);
     }
     return 0;
 }
@@ -917,6 +964,7 @@ HLE_STDCALL(D3DDevice_SetIndices, 2) {
     g_state.index_buffer = ib;
     g_state.index_data = ib ? R32(ib + kResData) : 0;
     g_state.base_vertex = a[1];
+    gpu::MarkStateDirty(gpu::kDirtyIndex);
     return 0;
 }
 
@@ -966,13 +1014,17 @@ HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
     uint32_t h = a[0];
     g_state.vs_handle = h;
     g_state.vs = nullptr;
+    gpu::MarkStateDirty(gpu::kDirtyIndex);
     if (h & 1) {
         auto it = g_vs.find(h);
         if (it != g_vs.end()) {
             g_state.vs = it->second;
             // constants declared with the shader load when it is selected
-            for (auto& [reg, v] : it->second->constants) {
-                if (reg < kVsConstants) g_state.vsc[reg] = v;
+            if (!it->second->constants.empty()) {
+                for (auto& [reg, v] : it->second->constants) {
+                    if (reg < kVsConstants) g_state.vsc[reg] = v;
+                }
+                gpu::MarkStateDirty(gpu::kDirtyVsc);
             }
         } else {
             LOG_FIRST(8, "d3d: SetVertexShader with unknown handle %08X", h);
@@ -993,13 +1045,19 @@ HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
 
 HLE_FASTCALL(D3DDevice_SetVertexShaderConstant1Fast, 0) {
     uint32_t reg = a[0];
-    if (reg < kVsConstants) std::memcpy(g_state.vsc[reg].data(), HostPtr(a[1]), 16);
+    if (reg < kVsConstants) {
+        std::memcpy(g_state.vsc[reg].data(), HostPtr(a[1]), 16);
+        gpu::MarkStateDirty(gpu::kDirtyVsc);
+    }
     return 0;
 }
 
 HLE_FASTCALL(D3DDevice_SetVertexShaderConstant1, 0) {
     uint32_t reg = a[0];
-    if (reg < kVsConstants) std::memcpy(g_state.vsc[reg].data(), HostPtr(a[1]), 16);
+    if (reg < kVsConstants) {
+        std::memcpy(g_state.vsc[reg].data(), HostPtr(a[1]), 16);
+        gpu::MarkStateDirty(gpu::kDirtyVsc);
+    }
     return 0;
 }
 
@@ -1009,6 +1067,7 @@ HLE_FASTCALL(D3DDevice_SetVertexShaderConstant4, 0) {
     for (uint32_t i = 0; i < 4 && reg + i < kVsConstants; i++) {
         std::memcpy(g_state.vsc[reg + i].data(), HostPtr(src + i * 16), 16);
     }
+    gpu::MarkStateDirty(gpu::kDirtyVsc);
     return 0;
 }
 
@@ -1019,6 +1078,7 @@ HLE_FASTCALL(D3DDevice_SetVertexShaderConstantNotInlineFast, 1) {
     for (uint32_t i = 0; i < dwords / 4 && reg + i < kVsConstants; i++) {
         std::memcpy(g_state.vsc[reg + i].data(), HostPtr(src + i * 16), 16);
     }
+    gpu::MarkStateDirty(gpu::kDirtyVsc);
     return 0;
 }
 
@@ -1090,6 +1150,7 @@ HLE_STDCALL(D3DDevice_SetPixelShader, 1) {
     put(gpu::kMPsCombinerCount, d[53]);
     put(gpu::kMPsDotMapping, d[55]);
     put(gpu::kMPsInputTexture, d[56]);
+    gpu::MarkStateDirty(gpu::kDirtySimple);
     SetComplex(gpu::kRsPsTextureModes, d[54]);
     return 0;
 }
@@ -1103,6 +1164,7 @@ HLE_STDCALL(D3DDevice_SetPixelShaderConstant, 3) {
         std::memcpy(g_state.psc[reg + i].data(), HostPtr(src + i * 16), 16);
     }
     gpu::ApplyPixelConstants(g_state, reg, n);
+    gpu::MarkStateDirty(gpu::kDirtySimple);
     return 0;
 }
 
@@ -1193,10 +1255,12 @@ void DrawIndexedUp(uint32_t prim, uint32_t count, const void* indices, const voi
     auto stream = g_state.streams[0];
     uint32_t saved_base = g_state.base_vertex;
     g_state.base_vertex = 0;
+    gpu::MarkStateDirty(gpu::kDirtyIndex);
     g_state.streams[0] = {UpVertices(vertices, bytes), stride};
     g_backend->Draw(g_state, prim, 0, count, reinterpret_cast<const uint8_t*>(indices));
     g_state.streams[0] = stream;
     g_state.base_vertex = saved_base;
+    gpu::MarkStateDirty(gpu::kDirtyIndex);
 }
 
 uint32_t g_push_begin = 0;
@@ -1266,9 +1330,11 @@ void EndPrimitive() {
     }
     g_state.vs = m.vs;
     g_state.vs_handle = handle | 1;
+    gpu::MarkStateDirty(gpu::kDirtyIndex);
     DrawUp(prim, count, packed.data(), m.vs->stream_stride[0]);
     g_state.vs = bound;
     g_state.vs_handle = handle;
+    gpu::MarkStateDirty(gpu::kDirtyIndex);
 }
 
 // one value of a method: begin/end opens or draws the primitive, vertex data fills a slot
@@ -1370,7 +1436,10 @@ void Walk(uint32_t end) {
                        (m >= 0x1518 && m < 0x1528)) {
                 ApplyImmediateMethod(m, v);
             } else {
-                if (m >> 2 < g_state.simple.size()) g_state.simple[m >> 2] = CanonicalSimpleValue(m, v);
+                if (m >> 2 < g_state.simple.size()) {
+                    g_state.simple[m >> 2] = CanonicalSimpleValue(m, v);
+                    gpu::MarkStateDirty(gpu::kDirtySimple);
+                }
             }
         }
     }
@@ -1414,7 +1483,10 @@ HLE_STDCALL(D3DDevice_EndPush, 1) {
             if (m == kMInlineArray) {
                 if (prim) vertices.push_back(v);
             } else if (m != kMBeginEnd) {
-                if (m >> 2 < g_state.simple.size()) g_state.simple[m >> 2] = CanonicalSimpleValue(m, v);
+                if (m >> 2 < g_state.simple.size()) {
+                    g_state.simple[m >> 2] = CanonicalSimpleValue(m, v);
+                    gpu::MarkStateDirty(gpu::kDirtySimple);
+                }
             } else if (v) {
                 prim = v;
                 vertices.clear();

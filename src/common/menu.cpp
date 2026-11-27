@@ -75,8 +75,10 @@ constexpr uint32_t kDistances[] = {1, 2, 4, 8};
 const char* const kDistanceNames[] = {"Default", "2x", "4x", "8x"};
 constexpr uint32_t kAntiAliasings[] = {0, 1, 2, 3, 4};
 const char* const kAntiAliasingNames[] = {"Off", "FXAA", "MSAA 2x", "MSAA 4x", "SSAA 2x"};
-constexpr uint32_t kMotionBlurs[] = {0, 1, 2};
-const char* const kMotionBlurNames[] = {"Off", "Low", "Strong"};
+constexpr uint32_t kMotionBlurs[] = {0, 1};
+const char* const kMotionBlurNames[] = {"Off", "On"};
+constexpr uint32_t kDisplayLogsValues[] = {0, 1, 2};
+const char* const kDisplayLogsNames[] = {"Off", "Minimal", "Full"};
 constexpr uint32_t kReflectionValues[] = {0, 1};
 const char* const kReflectionNames[] = {"Off", "On"};
 constexpr uint32_t kFmvScales[] = {0, 1};
@@ -155,7 +157,7 @@ enum RowId { kRenderResolution, kMaxFps, kVsync, kFpsCounter, kAniso, kReloadBlu
              kCheckUpdates, kTouchSensitivity, kLeftDeadzone, kRightDeadzone, kLeftSensitivity, kRightSensitivity,
              kScreenFilter, kGyroInvertX, kGyroInvertY, kTouchSkin, kCredit, kBloom,
              kFog, kAntiAliasing, kMotionBlur, kReflections, kTouchStick, kDynamicRes, kDynamicTarget, kDynamicMin,
-             kDynamicMax, kDynamicHold, kAutoUpdate, kTouchReset, kAutoBurnout };
+             kDynamicMax, kDynamicHold, kAutoUpdate, kTouchReset, kAutoBurnout, kDisplayLogs };
 
 using rows::Kind;
 using rows::Row;
@@ -166,6 +168,7 @@ constexpr Row kDisplayRows[] = {
     {Kind::Value, kDynamicRes, "Dynamic Resolution"},
     {Kind::Value, kMaxFps, "Max FPS"},
     {Kind::Value, kScreenFilter, "Screen Filter"},
+    {Kind::Value, kDisplayLogs, "Display Logs"},
     {Kind::Value, kVsync, "VSync"},
 };
 
@@ -337,6 +340,10 @@ bool StepDisplayRow(int id, int step, Settings& s, char (&text)[64]) {
         case kScreenFilter:
             std::snprintf(text, sizeof(text), "%s",
                           kScreenFilterNames[StepTable(kScreenFilters, o.screen_filter, step)]);
+            return true;
+        case kDisplayLogs:
+            std::snprintf(text, sizeof(text), "%s",
+                          kDisplayLogsNames[StepTable(kDisplayLogsValues, o.display_logs, step)]);
             return true;
         case kFov:
             if (step) o.fov = uint32_t(StepRange(int(o.fov), kFovMin, kFovMax, 1, step));

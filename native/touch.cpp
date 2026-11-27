@@ -554,6 +554,9 @@ enum class SvgIcon : uint8_t {
     DpadRight,
     Ok,
     Back,
+    Trash,
+    CityLeft,
+    CityRight,
     Count,
 };
 
@@ -592,6 +595,9 @@ constexpr SvgSpec kSvgSpecs[kSvgIconCount] = {
     {"dpad-right",      192, 192},
     {"ok",              284, 120},
     {"back",            284, 120},
+    {"trash",           192, 192},
+    {"city-left",       192, 192},
+    {"city-right",      192, 192},
 };
 
 enum Skin : uint32_t { kOutline = 0, kSkins = 1 };
@@ -607,6 +613,8 @@ enum class When : uint8_t {
     AlwaysActive,
     MainMenuOnly,
     MenusAndGarage,
+    SaveDelete,
+    CityMap,
 };
 
 struct Button {
@@ -651,6 +659,9 @@ constexpr Button kButtons[] = {
     {"dpad_right",  "D-Pad Right",     SvgIcon::DpadRight,      kBit + 3,      game::GameAction::Count,          When::MenusAndGarage, 1.0f,           true,  false},
     {"ok",          "OK",              SvgIcon::Ok,             kAnalogA,      game::GameAction::Count,          When::MenusAndGarage, 2.375f,         true,  false},
     {"back",        "Back",            SvgIcon::Back,           kAnalogB,      game::GameAction::Count,          When::MenusAndGarage, 2.375f,         true,  false},
+    {"delete_save", "Delete Save",     SvgIcon::Trash,          kAnalogX,      game::GameAction::Count,          When::SaveDelete,     1.0f,           false, false},
+    {"city_left",   "Prev City",       SvgIcon::CityLeft,       kAnalogLT,     game::GameAction::Count,          When::CityMap,        1.0f,           false, false},
+    {"city_right",  "Next City",       SvgIcon::CityRight,      kAnalogRT,     game::GameAction::Count,          When::CityMap,        1.0f,           false, false},
 };
 
 constexpr size_t kButtonCount = std::size(kButtons);
@@ -678,6 +689,9 @@ constexpr size_t kIdxDpadLeft = 20;
 constexpr size_t kIdxDpadRight = 21;
 constexpr size_t kIdxOk = 22;
 constexpr size_t kIdxBack = 23;
+constexpr size_t kIdxDeleteSave = 24;
+constexpr size_t kIdxCityLeft = 25;
+constexpr size_t kIdxCityRight = 26;
 
 // Screen-percentage placement:
 //   x, y in [0..1] screen shares
@@ -688,60 +702,43 @@ struct Place {
 };
 using Layout = std::array<Place, kButtonCount>;
 
+constexpr float kDefaultOpacity = 0.52f;
+
 // Exact NFSU2 RacingControlsView virtual-dp scale (~820..880dp wide x ~375..460dp tall on mobile landscape)
 float UiScale(float screen_w, float screen_h) {
     return std::max(0.5f, std::min(screen_w / 820.0f, screen_h / 375.0f));
 }
 
-// Exact NFSU2 RacingControlsView default button sizes & positions mapped into normalized screen shares
-Layout ComputeDefaultLayout(float screen_w, float screen_h) {
-    const float s = UiScale(screen_w, screen_h);
-    const float w = std::max(screen_w / s, 820.0f);
-    const float h = std::max(screen_h / s, 375.0f);
-    const float bottom = h - 16.0f;
-
+// Default touch layout baked directly from tuned adjustable.cfg + new Save Delete & City Map arrows
+Layout ComputeDefaultLayout(float, float) {
     Layout L{};
-    auto place_dp = [&](size_t idx, float x, float y, float bw, float bh, bool hidden = false) {
-        L[idx] = {(x + bw * 0.5f) / w, (y + bh * 0.5f) / h, (bh * 0.5f) / h, hidden};
-    };
-
-    // --- Top-right header buttons (exact NFSU2 RacingControlsView.java:685-686) ---
-    place_dp(kIdxEditBtn,  w - 56.0f,  16.0f, 44.0f, 44.0f);
-    place_dp(kIdxModeSwap, w - 110.0f, 16.0f, 44.0f, 44.0f);
-
-    // --- Top-left utility row (exact NFSU2 44dp circular buttons, 52dp pitch) ---
-    place_dp(kIdxPause,    16.0f,  16.0f, 44.0f, 44.0f);
-    place_dp(kIdxCamera,   68.0f,  16.0f, 44.0f, 44.0f);
-    place_dp(kIdxLookBack, 120.0f, 16.0f, 44.0f, 44.0f);
-    place_dp(kIdxMap,      172.0f, 16.0f, 44.0f, 44.0f);
-    place_dp(kIdxFlash,    224.0f, 16.0f, 44.0f, 44.0f);
-
-    // --- Left side steering (exact NFSU2 84x84dp arrows OR 140x140dp analog thumbstick) ---
-    place_dp(kIdxSteerLeft,  18.0f,  bottom - 88.0f,  84.0f,  84.0f);
-    place_dp(kIdxSteerRight, 110.0f, bottom - 88.0f,  84.0f,  84.0f);
-    place_dp(kIdxSteerStick, 24.0f,  bottom - 144.0f, 140.0f, 140.0f);
-
-    // --- Right side pedals & boost (exact NFSU2 84x156 Gas, 84x108 Brake, 64x64 Nitro, 58x58 Handbrake) ---
-    place_dp(kIdxGas,            w - 96.0f,  bottom - 160.0f, 84.0f, 156.0f);
-    place_dp(kIdxBrake,          w - 188.0f, bottom - 112.0f, 84.0f, 108.0f);
-    place_dp(kIdxNitro,          w - 86.0f,  bottom - 232.0f, 64.0f, 64.0f);
-    place_dp(kIdxHandbrake,      w - 180.0f, bottom - 182.0f, 58.0f, 58.0f);
-    place_dp(kIdxWeightTransfer, w - 180.0f, bottom - 248.0f, 58.0f, 58.0f);
-    place_dp(kIdxSpecial,        w - 252.0f, bottom - 88.0f,  58.0f, 58.0f);
-    place_dp(kIdxTurbo,          w - 252.0f, bottom - 156.0f, 58.0f, 58.0f);
-    place_dp(kIdxBurnout,        w - 252.0f, bottom - 224.0f, 56.0f, 56.0f);
-
-    // --- Menus & Garage (exact NFSU2 52dp D-Pad + 114x48dp stacked wide pill OK / Back) ---
-    const float pad = 52.0f;
-    const float dcx = 24.0f + pad * 1.5f;
-    const float dcy = bottom - pad * 1.5f;
-    place_dp(kIdxDpadUp,    dcx - pad * 0.5f, dcy - pad * 1.5f, pad, pad);
-    place_dp(kIdxDpadDown,  dcx - pad * 0.5f, dcy + pad * 0.5f, pad, pad);
-    place_dp(kIdxDpadLeft,  dcx - pad * 1.5f, dcy - pad * 0.5f, pad, pad);
-    place_dp(kIdxDpadRight, dcx + pad * 0.5f, dcy - pad * 0.5f, pad, pad);
-    place_dp(kIdxOk,        w - 130.0f, bottom - 52.0f,  114.0f, 48.0f);
-    place_dp(kIdxBack,      w - 130.0f, bottom - 112.0f, 114.0f, 48.0f);
-
+    L[kIdxSteerLeft]      = {0.1250f, 0.6750f, 0.1355f, false};
+    L[kIdxSteerRight]     = {0.2500f, 0.6750f, 0.1355f, false};
+    L[kIdxSteerStick]     = {0.1500f, 0.7000f, 0.1402f, false};
+    L[kIdxGas]            = {0.9250f, 0.7250f, 0.2288f, false};
+    L[kIdxBrake]          = {0.8250f, 0.8000f, 0.1309f, false};
+    L[kIdxHandbrake]      = {0.8250f, 0.5500f, 0.0936f, false};
+    L[kIdxWeightTransfer] = {0.2500f, 0.2500f, 0.0851f, false};
+    L[kIdxBurnout]        = {0.9250f, 0.3500f, 0.0994f, false};
+    L[kIdxNitro]          = {0.7389f, 0.8500f, 0.0938f, false};
+    L[kIdxTurbo]          = {0.8250f, 0.3500f, 0.0936f, false};
+    L[kIdxSpecial]        = {0.7389f, 0.5750f, 0.0850f, false};
+    L[kIdxPause]          = {0.0445f, 0.1013f, 0.0645f, false};
+    L[kIdxCamera]         = {0.5250f, 0.1013f, 0.0646f, false};
+    L[kIdxMap]            = {0.4750f, 0.1013f, 0.0645f, false};
+    L[kIdxFlash]          = {0.3750f, 0.8250f, 0.0587f, false};
+    L[kIdxLookBack]       = {0.6250f, 0.8250f, 0.0587f, false};
+    L[kIdxModeSwap]       = {0.8946f, 0.1013f, 0.0587f, false};
+    L[kIdxEditBtn]        = {0.9602f, 0.1013f, 0.0710f, false};
+    L[kIdxDpadUp]         = {0.1750f, 0.5750f, 0.1015f, false};
+    L[kIdxDpadDown]       = {0.1750f, 0.8827f, 0.1015f, false};
+    L[kIdxDpadLeft]       = {0.1030f, 0.7227f, 0.1015f, false};
+    L[kIdxDpadRight]      = {0.2500f, 0.7227f, 0.1015f, false};
+    L[kIdxOk]             = {0.8750f, 0.8250f, 0.0774f, false};
+    L[kIdxBack]           = {0.8750f, 0.6250f, 0.0774f, false};
+    L[kIdxDeleteSave]     = {0.7450f, 0.8250f, 0.0920f, false};
+    L[kIdxCityLeft]       = {0.0850f, 0.1450f, 0.0920f, false};
+    L[kIdxCityRight]      = {0.1900f, 0.1450f, 0.0920f, false};
     return L;
 }
 
@@ -818,7 +815,7 @@ float g_garage_pinch_dist = 0.0f;
 
 Layout g_layout{};
 uint32_t g_skin = kOutline;
-float g_opacity = 0.85f;
+float g_opacity = kDefaultOpacity;
 float g_scale = 1.0f;
 bool g_loaded = false;
 float g_layout_w = 1920.0f, g_layout_h = 1080.0f;
@@ -834,7 +831,7 @@ float g_bar_top = 0.032f;      // Draggable NFSU2-style editor card top Y (0..1)
 bool g_bar_dragging = false;   // Highlights card border in NFSU2 lime while dragging
 bool g_opacity_dragging = false;  // Highlights opacity slider while dragging
 Layout g_before{};
-float g_before_opacity = 0.85f;
+float g_before_opacity = kDefaultOpacity;
 int g_selected = -1;
 
 // Atlas UV rects for SVG icons + anti-aliased proportional Roboto font glyphs (ASCII 32..126)
@@ -1101,6 +1098,12 @@ bool ButtonShown(size_t i) {
             return ctx == game::UiContext::MainMenu;
         case When::MenusAndGarage:
             return ctx == game::UiContext::MainMenu || ctx == game::UiContext::Garage;
+        case When::SaveDelete:
+            return ctx == game::UiContext::MainMenu &&
+                   game::Telemetry().in_save_screen.load(std::memory_order_relaxed);
+        case When::CityMap:
+            return ctx == game::UiContext::MainMenu &&
+                   game::Telemetry().in_city_map.load(std::memory_order_relaxed);
         case When::Play:
             return ctx == game::UiContext::Gameplay;
         case When::PlaySteerBtn:
@@ -1296,6 +1299,9 @@ void Resize(size_t i, float r) {
             g_layout[kIdxDpadDown].r = clamped;
             g_layout[kIdxDpadLeft].r = clamped;
             g_layout[kIdxDpadRight].r = clamped;
+        } else if (i == kIdxCityLeft || i == kIdxCityRight) {
+            g_layout[kIdxCityLeft].r = clamped;
+            g_layout[kIdxCityRight].r = clamped;
         }
     }
 }
@@ -1348,7 +1354,7 @@ void EditDown(Finger& f, float x, float y) {
             switch (i) {
                 case kEdReset:
                     g_layout = ComputeDefaultLayout(Width(), Height());
-                    g_opacity = 0.85f;
+                    g_opacity = kDefaultOpacity;
                     g_selected = -1;
                     g_edit_moved = true;
                     g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
@@ -1455,7 +1461,7 @@ void UpdateAnalogStickLocked(float x, float y) {
 }
 
 bool IsNoSlideButton(size_t b) {
-    return b == kIdxPause || b == kIdxModeSwap || b == kIdxEditBtn;
+    return b == kIdxPause || b == kIdxModeSwap || b == kIdxEditBtn || b == kIdxDeleteSave;
 }
 
 void FingerDown(SDL_FingerID id, float x, float y) {
@@ -1977,8 +1983,95 @@ void EmitTextCentered(std::vector<Quad>& out, float cx, float cy, float line_h,
     }
 }
 
-// ============================================================================
-// Live SVG Loader & Aspect-Preserving Container Expansion for 1:2 / 2:3 Pedals
+void EmitTextRight(std::vector<Quad>& out, float rx, float cy, float line_h,
+                   float r, float g, float b, float a, const char* text) {
+    if (!text || !text[0] || !g_skin_ready.load(std::memory_order_relaxed)) return;
+    const float total_w = MeasureTextWidth(line_h, text);
+    EmitTextCentered(out, rx - total_w * 0.5f, cy, line_h, r, g, b, a, text);
+}
+
+void EmitDisplayLogsOverlay(std::vector<Quad>& out, float w, float h, bool touch_visible) {
+    const uint32_t mode = game::Opt().display_logs;
+    if (mode == 0u || !g_skin_ready.load(std::memory_order_relaxed)) return;
+
+    const host::DisplayLogsSnapshot snap = host::GetDisplayLogs();
+    const float s = UiScale(w, h);
+    const float line_h = std::clamp(11.0f * s, 14.0f, h * 0.026f);
+    const float line_gap = line_h * 0.34f;
+    const float pad_h = 8.0f * s;
+    const float pad_v = 5.0f * s;
+
+    char line1[128] = {};
+    char line2[128] = {};
+    char line3[256] = {};
+    const int fps_i = std::max(0, int(std::lround(snap.fps)));
+    const int gpu_i = std::clamp(int(std::lround(snap.gpu_percent)), 0, 100);
+    const int cpu_i = std::clamp(int(std::lround(snap.cpu_percent)), 0, 100);
+    std::snprintf(line1, sizeof(line1), "FPS: %d (%.1f ms)  |  GPU: %d%%  |  CPU: %d%%",
+                  fps_i, double(snap.frame_ms), gpu_i, cpu_i);
+
+    int line_count = 1;
+    if (mode >= 2u) {
+        char vert_buf[32] = {};
+        if (snap.vertices >= 1000000ull) {
+            std::snprintf(vert_buf, sizeof(vert_buf), "%.2fM", double(snap.vertices) / 1000000.0);
+        } else if (snap.vertices >= 1000ull) {
+            std::snprintf(vert_buf, sizeof(vert_buf), "%.1fK", double(snap.vertices) / 1000.0);
+        } else {
+            std::snprintf(vert_buf, sizeof(vert_buf), "%llu", (unsigned long long)snap.vertices);
+        }
+        std::snprintf(line2, sizeof(line2), "v%s  |  Vertex: %s",
+                      (snap.app_version && snap.app_version[0]) ? snap.app_version : "1.0", vert_buf);
+        std::snprintf(line3, sizeof(line3), "%s, %s, %s",
+                      (snap.device_name && snap.device_name[0]) ? snap.device_name : "Android",
+                      (snap.cpu_name && snap.cpu_name[0]) ? snap.cpu_name : "ARM64",
+                      (snap.gpu_name && snap.gpu_name[0]) ? snap.gpu_name : "Vulkan");
+        line_count = 3;
+    }
+
+    float max_tw = MeasureTextWidth(line_h, line1);
+    if (line_count >= 2) max_tw = std::max(max_tw, MeasureTextWidth(line_h, line2));
+    if (line_count >= 3) max_tw = std::max(max_tw, MeasureTextWidth(line_h, line3));
+
+    const float box_w = max_tw + pad_h * 2.0f;
+    const float box_h = float(line_count) * line_h + float(line_count - 1) * line_gap + pad_v * 2.0f;
+
+    // Exact NFSU2 DiagnosticOverlay style: top-right, 60% opacity dark pill, zero collision with top-right touch buttons!
+    float right_x = w - 12.0f * s;
+    const float top_y = 10.0f * s;
+    if (touch_visible && !g_controls_hidden) {
+        float sx0, sy0, sx1, sy1;
+        ButtonRect(kIdxModeSwap, sx0, sy0, sx1, sy1);
+        float ex0, ey0, ex1, ey1;
+        ButtonRect(kIdxEditBtn, ex0, ey0, ex1, ey1);
+        const float min_btn_left = std::min(sx0, ex0);
+        if (min_btn_left > box_w + 20.0f * s) {
+            right_x = min_btn_left - 10.0f * s;
+        }
+    }
+
+    const float x0 = std::max(8.0f * s, right_x - box_w);
+    const float x1 = x0 + box_w;
+    const float y0 = top_y;
+    const float y1 = y0 + box_h;
+
+    EmitPanel(out, x0, y0, x1, y1,
+              10.0f / 255.0f, 10.0f / 255.0f, 10.0f / 255.0f, 0.56f, 6.0f * s,
+              std::max(1.0f, 1.0f * s),
+              70.0f / 255.0f, 70.0f / 255.0f, 70.0f / 255.0f, 0.42f);
+
+    const float text_rx = x1 - pad_h;
+    float cy = y0 + pad_v + line_h * 0.5f;
+    EmitTextRight(out, text_rx, cy, line_h, 1.0f, 1.0f, 1.0f, 0.82f, line1);
+    if (line_count >= 2) {
+        cy += line_h + line_gap;
+        EmitTextRight(out, text_rx, cy, line_h, 0.90f, 0.95f, 1.0f, 0.78f, line2);
+    }
+    if (line_count >= 3) {
+        cy += line_h + line_gap;
+        EmitTextRight(out, text_rx, cy, line_h, 0.84f, 0.88f, 0.94f, 0.74f, line3);
+    }
+}
 // ============================================================================
 void ReplaceAll(std::string& s, std::string_view from, std::string_view to) {
     if (from.empty()) return;
@@ -2403,10 +2496,16 @@ void BuildOverlay(std::vector<Quad>& out) {
 
     const bool editing = g_editing;
     const float fade_alpha = CurrentFadeAlphaLocked(now);
-    if (!editing && fade_alpha <= 0.004f) return;
-
     const float w = Width();
     const float h = Height();
+
+    // Always render Display Logs (Off / Minimal / Full) even when touch controls are faded out (controller active)
+    if (!editing) {
+        EmitDisplayLogsOverlay(out, w, h, fade_alpha > 0.05f);
+    }
+
+    if (!editing && fade_alpha <= 0.004f) return;
+
     const float th = std::max(2.0f, h / 360.0f);
     const uint32_t skin = std::min<uint32_t>(g_skin, kSkins - 1);
     const bool atlas_ok = g_skin_ready.load(std::memory_order_relaxed);
@@ -2954,7 +3053,7 @@ void ResetLayout() {
     std::lock_guard lock(g_lock);
     EnsureLayout();
     g_layout = ComputeDefaultLayout(Width(), Height());
-    g_opacity = 0.85f;
+    g_opacity = kDefaultOpacity;
     g_scale = 1.0f;
     g_controls_hidden = false;
     SaveLayout();

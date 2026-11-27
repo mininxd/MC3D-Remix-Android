@@ -19,11 +19,26 @@
 
 #include "core/diag.h"
 #include "core/log.h"
+#include "d3d/gpu_frame.h"
 #include "gpu/backend.h"
 #include "kernel/kernel.h"
 #include "kernel/memory.h"
 
 namespace gpu {
+
+namespace {
+
+std::atomic<uint32_t> g_state_dirty{kDirtyAll};
+
+}  // namespace
+
+void MarkStateDirty(uint32_t bits) {
+    g_state_dirty.fetch_or(bits, std::memory_order_relaxed);
+}
+
+uint32_t ConsumeStateDirty() {
+    return g_state_dirty.exchange(0u, std::memory_order_relaxed);
+}
 
 namespace {
 
@@ -70,6 +85,7 @@ struct Batch {
 struct Range {
     size_t off;
     size_t len;
+    uint32_t dirty_bit;
 };
 size_t At(const State& s, const void* p) {
     return size_t(static_cast<const uint8_t*>(p) - reinterpret_cast<const uint8_t*>(&s));
@@ -79,17 +95,17 @@ size_t SimpleBytes(uint32_t first, uint32_t last) { return size_t(last - first) 
 std::vector<Range> StateRanges() {
     static const State s;
     return {
-        {At(s, &s.simple[kMAlphaTestEnable >> 2]), SimpleBytes(kMAlphaTestEnable, kMDepthOffset)},
-        {At(s, &s.simple[kMPsConstant0 >> 2]), SimpleBytes(kMPsConstant0, kMPsAlphaOutputs - 4)},
-        {At(s, &s.simple[kMPsFinalConstant0 >> 2]), SimpleBytes(kMPsFinalConstant0, kMPsFinalConstant1)},
-        {At(s, &s.rs), At(s, &s.textures) - At(s, &s.rs)},
-        {At(s, &s.index_buffer), At(s, &s.vs) - At(s, &s.index_buffer)},
-        {At(s, &s.vsc), At(s, &s.rt) - At(s, &s.vsc)},
-        {At(s, &s.scissor_count), At(s, &s.transforms) - At(s, &s.scissor_count)},
-        {At(s, &s.transforms[2]), 2 * sizeof(s.transforms[0])},
-        {At(s, &s.transforms[16]), 4 * sizeof(s.transforms[0])},
-        {At(s, &s.transforms[256]), sizeof(s.transforms[0])},
-        {At(s, &s.material), sizeof(State) - At(s, &s.material)},
+        {At(s, &s.simple[kMAlphaTestEnable >> 2]), SimpleBytes(kMAlphaTestEnable, kMDepthOffset), kDirtySimple},
+        {At(s, &s.simple[kMPsConstant0 >> 2]), SimpleBytes(kMPsConstant0, kMPsAlphaOutputs - 4), kDirtySimple},
+        {At(s, &s.simple[kMPsFinalConstant0 >> 2]), SimpleBytes(kMPsFinalConstant0, kMPsFinalConstant1), kDirtySimple},
+        {At(s, &s.rs), At(s, &s.textures) - At(s, &s.rs), kDirtyRsTss},
+        {At(s, &s.index_buffer), At(s, &s.vs) - At(s, &s.index_buffer), kDirtyIndex},
+        {At(s, &s.vsc), At(s, &s.rt) - At(s, &s.vsc), kDirtyVsc},
+        {At(s, &s.scissor_count), At(s, &s.transforms) - At(s, &s.scissor_count), kDirtyScissor},
+        {At(s, &s.transforms[2]), 2 * sizeof(s.transforms[0]), kDirtyTransformVP},
+        {At(s, &s.transforms[16]), 4 * sizeof(s.transforms[0]), kDirtyTransformTex},
+        {At(s, &s.transforms[256]), sizeof(s.transforms[0]), kDirtyTransformW},
+        {At(s, &s.material), sizeof(State) - At(s, &s.material), kDirtyLighting},
     };
 }
 
@@ -345,12 +361,17 @@ private:
         if (off < end) Delta(sent + off, now + off, end - off);
     }
 
-    // what changed since the last command, in 64 byte pieces
+    // what changed since the last command, in 64 byte pieces (skip untouched ranges via dirty mask)
     void SendState(const State& s) {
         const uint8_t* now = reinterpret_cast<const uint8_t*>(&s);
+        const uint32_t dirty = ConsumeStateDirty();
         Cmd c{Op::State};
         size_t first = cur_->bytes.size();
-        for (const Range& r : ranges_) SendRange(now, r);
+        if (dirty != 0u) {
+            for (const Range& r : ranges_) {
+                if (dirty & r.dirty_bit) SendRange(now, r);
+            }
+        }
         std::array<uint32_t, 4> textures;
         for (size_t i = 0; i < 4; i++) textures[i] = Header(s.textures[i]);
         Delta(&sent_.textures, &textures, sizeof(textures));

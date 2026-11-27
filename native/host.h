@@ -22,6 +22,22 @@ void WaitForeground();
 // the window's size in pixels
 void WindowPixels(int& w, int& h);
 
+// Live telemetry snapshot for Display Logs overlay (Off / Minimal / Full)
+struct DisplayLogsSnapshot {
+    float fps = 0.0f;
+    float frame_ms = 0.0f;
+    float cpu_percent = 0.0f;
+    float gpu_percent = 0.0f;
+    uint64_t vertices = 0;
+    const char* app_version = "1.0";
+    const char* device_name = "";
+    const char* cpu_name = "";
+    const char* gpu_name = "";
+};
+void SetGpuName(const char* name);
+void UpdateDisplayLogs(float fps, float frame_ms, uint64_t vertices, float gpu_busy_ms);
+DisplayLogsSnapshot GetDisplayLogs();
+
 }  // namespace host
 
 // the render resolution following the frame rate (dynamic_resolution.cpp)

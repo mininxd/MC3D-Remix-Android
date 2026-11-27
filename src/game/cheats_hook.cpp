@@ -2,6 +2,7 @@
 #include "game/touch_context.h"
 
 #include "app/app.h"
+#include "common/mouse_keyboard.h"
 #include "core/log.h"
 #include "cpu/x86_ops.h"
 #include "game/guest_mem_safe.h"
@@ -42,6 +43,9 @@ X86_EXTERN_FUNC(__imp__sub_001442A0);
 X86_EXTERN_FUNC(__imp__sub_00144C90);
 X86_EXTERN_FUNC(__imp__sub_001474A0);
 X86_EXTERN_FUNC(__imp__sub_0014E300);
+X86_EXTERN_FUNC(__imp__sub_000B2F80);
+X86_EXTERN_FUNC(__imp__sub_00139520);
+X86_EXTERN_FUNC(__imp__sub_001395E0);
 
 namespace game::cheats {
 namespace {
@@ -58,6 +62,116 @@ constexpr uint32_t kTrafficGlobal1 = 0x004B36C8u;
 constexpr uint32_t kTrafficGlobal2 = 0x004B36CCu;
 constexpr uint32_t kVehicleListPtrAddr = 0x00557EB0u;
 constexpr uint32_t kVehicleListCountAddr = 0x00557EB4u;
+
+struct CachedTxtPrompt {
+    uint32_t clip = 0;
+    uint32_t name_va = 0;
+    uint32_t name_len = 0;
+    uint32_t str_va = 0;
+};
+
+constexpr size_t kMaxCachedTxtPrompts = 16;
+CachedTxtPrompt g_txt_prompts[kMaxCachedTxtPrompts]{};
+uint32_t g_prompt_clip_va = 0;
+uint32_t g_want_show_prompt = 0;
+uint32_t g_want_show_prompt_help = 0;
+bool g_has_show_prompt = false;
+bool g_has_show_prompt_help = false;
+bool g_last_prompt_touch = true;
+
+void CallFlashIntVar(X86Context& ctx, uint8_t* base, uint32_t clip, uint32_t name_va, uint32_t val) {
+    const uint32_t saved_eax = ctx.eax, saved_ecx = ctx.ecx, saved_edx = ctx.edx, saved_esp = ctx.esp;
+    ctx.ecx = clip;
+    X86_PUSH32(val);
+    X86_PUSH32(name_va);
+    X86_PUSH32(0u);
+    __imp__sub_00139520(ctx, base);
+    ctx.eax = saved_eax;
+    ctx.ecx = saved_ecx;
+    ctx.edx = saved_edx;
+    ctx.esp = saved_esp;
+}
+
+void CallFlashStringVar(X86Context& ctx, uint8_t* base, uint32_t clip, uint32_t name_va, uint32_t str_va) {
+    const uint32_t saved_eax = ctx.eax, saved_ecx = ctx.ecx, saved_edx = ctx.edx, saved_esp = ctx.esp;
+    ctx.ecx = clip;
+    X86_PUSH32(str_va);
+    X86_PUSH32(name_va);
+    X86_PUSH32(0u);
+    __imp__sub_001395E0(ctx, base);
+    ctx.eax = saved_eax;
+    ctx.ecx = saved_ecx;
+    ctx.edx = saved_edx;
+    ctx.esp = saved_esp;
+}
+
+void RecordTxtPrompt(uint32_t clip, uint32_t name_va, uint32_t name_len, uint32_t str_va) {
+    size_t free_idx = kMaxCachedTxtPrompts;
+    for (size_t i = 0; i < kMaxCachedTxtPrompts; ++i) {
+        if (g_txt_prompts[i].clip == clip && g_txt_prompts[i].name_va == name_va) {
+            g_txt_prompts[i].name_len = name_len;
+            g_txt_prompts[i].str_va = str_va;
+            return;
+        }
+        if (free_idx == kMaxCachedTxtPrompts && g_txt_prompts[i].clip == 0u) free_idx = i;
+    }
+    const size_t slot = (free_idx < kMaxCachedTxtPrompts) ? free_idx : 0u;
+    g_txt_prompts[slot] = {clip, name_va, name_len, str_va};
+}
+
+}  // namespace
+
+std::atomic<uint32_t> g_full_map_obj{0};
+std::atomic<bool> g_full_map_open{false};
+
+void RecordPromptInt(uint32_t clip, bool is_prompt, uint32_t val) {
+    g_prompt_clip_va = clip;
+    if (is_prompt) {
+        g_want_show_prompt = val;
+        g_has_show_prompt = true;
+    } else {
+        g_want_show_prompt_help = val;
+        g_has_show_prompt_help = true;
+    }
+}
+
+void RecordPromptString(uint32_t clip, uint32_t name_va, uint32_t name_len, uint32_t str_va) {
+    RecordTxtPrompt(clip, name_va, name_len, str_va);
+}
+
+void SyncPromptVisibility(X86Context& ctx, uint8_t* base) {
+    const bool touch_now = input::TouchActive();
+    if (touch_now == g_last_prompt_touch) return;
+    g_last_prompt_touch = touch_now;
+
+    const uint32_t flash_root = safe_mem::Read32(0x0050F15Cu, 0u);
+    const uint32_t live_clip = flash_root ? safe_mem::Read32(flash_root + 0xFACu, 0u) : 0u;
+    if (live_clip != 0u && live_clip == g_prompt_clip_va && safe_mem::CanAccess(live_clip, 16u)) {
+        if (g_has_show_prompt) {
+            CallFlashIntVar(ctx, base, live_clip, 0x00457C10u, touch_now ? 0u : g_want_show_prompt);
+        }
+        if (g_has_show_prompt_help) {
+            CallFlashIntVar(ctx, base, live_clip, 0x00457C30u, touch_now ? 0u : g_want_show_prompt_help);
+        }
+    }
+
+    uint32_t nav_ui = 0u;
+    if (g_full_map_open.load(std::memory_order_relaxed)) {
+        const uint32_t fm = g_full_map_obj.load(std::memory_order_relaxed);
+        nav_ui = fm ? safe_mem::Read32(fm + 0x1F0u, 0u) : 0u;
+    }
+    for (const CachedTxtPrompt& e : g_txt_prompts) {
+        if (e.clip == 0u || e.name_va == 0u) continue;
+        if (e.clip != live_clip && (nav_ui == 0u || e.clip != nav_ui)) continue;
+        if (!safe_mem::CanAccess(e.clip, 16u)) continue;
+        const uint32_t target_str = touch_now ? (e.name_va + e.name_len) : e.str_va;
+        if (target_str != 0u && safe_mem::CanAccess(target_str, 1u)) {
+            CallFlashStringVar(ctx, base, e.clip, e.name_va, target_str);
+        }
+    }
+}
+
+namespace {
 constexpr uint32_t kGameStateAddr = 0x0053F2D4u;
 
 enum class CheatId : int {
@@ -473,6 +587,21 @@ void UpdateTouchTelemetry() {
     const uint32_t car_mgr = safe_mem::Read32(0x00558814u, 0u);
     const uint32_t player_car = car_mgr ? safe_mem::Read32(car_mgr + 0x08u, 0u) : 0u;
 
+    // Live Full City Map state (NavSys sub_000B2F80 + [ [nav_mgr + 0x1F0] + 0x28 ] is_open flag)
+    bool in_city_map = false;
+    if ((app_state == 0x02u || app_state == 0x03u) &&
+        game::cheats::g_full_map_open.load(std::memory_order_relaxed)) {
+        const uint32_t fm = game::cheats::g_full_map_obj.load(std::memory_order_relaxed);
+        const uint32_t nav_ui = fm ? safe_mem::Read32(fm + 0x1F0u, 0u) : 0u;
+        if (nav_ui != 0u && safe_mem::Read8(nav_ui + 0x28u, 0u) != 0u) {
+            in_city_map = true;
+        } else {
+            game::cheats::g_full_map_open.store(false, std::memory_order_relaxed);
+        }
+    } else if (app_state != 0x02u && app_state != 0x03u) {
+        game::cheats::g_full_map_open.store(false, std::memory_order_relaxed);
+    }
+
     // Verified from default.xbe jump table @ 0x0001FEDC:
     //   0x01 = Boot/Idle, 0x02/0x03 = In-Game Driving/Pause, 0x04 = FMV/Movie,
     //   0x05 = Garage/Showroom (0x0050F12C), 0x06/0x07 = Frontend / Main Menu / Title / Options
@@ -484,13 +613,22 @@ void UpdateTouchTelemetry() {
     } else if (app_state == 0x06u || app_state == 0x07u) {
         ctx = UiContext::MainMenu;
     } else if (app_state == 0x02u || app_state == 0x03u) {
-        if (is_paused) ctx = UiContext::MainMenu;
+        if (is_paused || in_city_map) ctx = UiContext::MainMenu;
         else if (player_car != 0u) ctx = UiContext::Gameplay;
         else ctx = UiContext::Loading;
     } else {
         ctx = UiContext::Loading;
     }
     tel.ui_context.store(static_cast<uint8_t>(ctx), std::memory_order_relaxed);
+
+    // Load/Save Profile screen detection (bg_savegame.swf: flash_bg_id == 4 or screen_id 0x28 / 0x29)
+    const uint32_t screen_id = menu_owner ? safe_mem::Read32(menu_owner + 0xD8u, 0u) : 0u;
+    const uint32_t flash_root = safe_mem::Read32(0x0050F15Cu, 0u);
+    const uint32_t flash_bg_id = flash_root ? safe_mem::Read32(flash_root + 0xFA8u, 0u) : 0u;
+    const bool in_save_screen = (ctx == UiContext::MainMenu) && !in_city_map &&
+                                (screen_id == 0x28u || screen_id == 0x29u || flash_bg_id == 4u);
+    tel.in_save_screen.store(in_save_screen, std::memory_order_relaxed);
+    tel.in_city_map.store(in_city_map, std::memory_order_relaxed);
 
     bool has_nos = false;
     bool turbo_ready = false;
@@ -940,4 +1078,63 @@ X86_FUNC(sub_001442A0) {
             write_f32(cam + 0x84u, next_fov + (base_fov - next_fov) * blend);
         }
     }
+}
+
+// Full City Map open/close hook (NavSys::SetOpen, __thiscall void sub_000B2F80(bool open) [ret 0x04]).
+X86_FUNC(sub_000B2F80) {
+    const uint32_t nav_mgr = ctx.ecx;
+    const bool open = game::safe_mem::CanAccess(ctx.esp + 4u, 4u) &&
+                      (game::safe_mem::Read8(ctx.esp + 4u, 0u) != 0u);
+    if (nav_mgr != 0u) {
+        game::cheats::g_full_map_obj.store(nav_mgr, std::memory_order_relaxed);
+        game::cheats::g_full_map_open.store(open, std::memory_order_relaxed);
+    }
+    __imp__sub_000B2F80(ctx, base);
+}
+
+// Hide Xbox controller button guide prompts whenever touchscreen is active; restore immediately on external controller press.
+// FlashSetIntVar: __thiscall void sub_00139520(const char* name, int val) [ret 0x08]
+X86_FUNC(sub_00139520) {
+    if (ctx.ecx != 0u && game::safe_mem::CanAccess(ctx.esp + 4u, 8u)) {
+        const uint32_t name_va = X86_MEM32(ctx.esp + 4u);
+        const uint32_t val = X86_MEM32(ctx.esp + 8u);
+        bool is_prompt = (name_va == 0x00457C10u);
+        bool is_help = (name_va == 0x00457C30u);
+        if (!is_prompt && !is_help && name_va != 0u && game::safe_mem::CanAccess(name_va, 10u)) {
+            const uint8_t ch0 = game::safe_mem::Read8(name_va, 0u);
+            if (ch0 == 'S') {
+                const std::string name = game::safe_mem::ReadSanitizedCString(name_va, 32u);
+                if (name == "ShowPrompt") is_prompt = true;
+                else if (name == "ShowTxtPromptHelp") is_help = true;
+            }
+        }
+        if (is_prompt || is_help) {
+            game::cheats::RecordPromptInt(ctx.ecx, is_prompt, val);
+            if (input::TouchActive()) {
+                X86_MEM32(ctx.esp + 8u) = 0u;
+            }
+        }
+    }
+    __imp__sub_00139520(ctx, base);
+}
+
+// FlashSetStringVar: __thiscall void sub_001395E0(const char* name, const char* str) [ret 0x08]
+// Hides Full Map & Save Screen Xbox button prompt text labels (txtPrompt*) while using touchscreen.
+X86_FUNC(sub_001395E0) {
+    if (ctx.ecx != 0u && game::safe_mem::CanAccess(ctx.esp + 4u, 8u)) {
+        const uint32_t name_va = X86_MEM32(ctx.esp + 4u);
+        const uint32_t str_va = X86_MEM32(ctx.esp + 8u);
+        if (name_va != 0u && game::safe_mem::CanAccess(name_va, 10u) &&
+            game::safe_mem::Read8(name_va, 0u) == 't') {
+            const std::string name = game::safe_mem::ReadSanitizedCString(name_va, 40u);
+            if (name.rfind("txtPrompt", 0) == 0) {
+                const uint32_t nlen = uint32_t(name.size());
+                game::cheats::RecordPromptString(ctx.ecx, name_va, nlen, str_va);
+                if (input::TouchActive() && game::safe_mem::CanAccess(name_va + nlen, 1u)) {
+                    X86_MEM32(ctx.esp + 8u) = name_va + nlen;  // points to '\0' in .rdata ("")
+                }
+            }
+        }
+    }
+    __imp__sub_001395E0(ctx, base);
 }

@@ -92,6 +92,7 @@ const app::GameInfo app::kGame = {
     .missing = L"Put the game in the mc3dr folder on the phone's storage (/storage/emulated/0/mc3dr or /sdcard/mc3dr): its disc image (.iso), or default.xbe with assets_x.dat beside it.",
     .images = {{"default.xbe", "MC3D Remix"}},
     .options = {{"fps_counter", &game::Opt().fps_counter, nullptr},
+                {"display_logs", nullptr, &game::Opt().display_logs},
                 {"bloom", &game::Opt().bloom, nullptr},
                 {"fog", &game::Opt().fog, nullptr},
                 {"motion_blur", nullptr, &game::Opt().motion_blur},
