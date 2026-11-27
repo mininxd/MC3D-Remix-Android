@@ -83,9 +83,8 @@ set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(LUNASVG_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(glslang GIT_REPOSITORY https://github.com/KhronosGroup/glslang.git GIT_TAG 16.0.0 GIT_SHALLOW TRUE)
 FetchContent_Declare(tomlplusplus GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git GIT_TAG v3.4.0 GIT_SHALLOW TRUE)
-FetchContent_Declare(imgui GIT_REPOSITORY https://github.com/ocornut/imgui.git GIT_TAG v1.91.0 GIT_SHALLOW TRUE)
 FetchContent_Declare(lunasvg GIT_REPOSITORY https://github.com/sammycage/lunasvg.git GIT_TAG v2.4.1 GIT_SHALLOW TRUE)
-FetchContent_MakeAvailable(glslang tomlplusplus imgui lunasvg)
+FetchContent_MakeAvailable(glslang tomlplusplus lunasvg)
 
 # the SDK's runtime but its Windows parts, and those the game replaces (src/sound, src/d3d)
 file(GLOB RUNTIME_SOURCES ${SDK}/runtime/*/*.cpp)
@@ -94,14 +93,11 @@ list(FILTER RUNTIME_SOURCES EXCLUDE REGEX
 # the game's sources: its sound, Direct3D 8 and settings
 file(GLOB GAME_HOST_SOURCES CONFIGURE_DEPENDS ${GAME}/*/*.cpp)
 file(GLOB ANDROID_SOURCES CONFIGURE_DEPENDS ${NATIVE}/*.cpp)
-set(IMGUI_SOURCES ${imgui_SOURCE_DIR}/imgui.cpp ${imgui_SOURCE_DIR}/imgui_draw.cpp ${imgui_SOURCE_DIR}/imgui_tables.cpp
-    ${imgui_SOURCE_DIR}/imgui_widgets.cpp ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp)
 
-add_library(main SHARED ${RUNTIME_SOURCES} ${GAME_HOST_SOURCES} ${ANDROID_SOURCES} ${GEN_SOURCES} ${IMGUI_SOURCES}
+add_library(main SHARED ${RUNTIME_SOURCES} ${GAME_HOST_SOURCES} ${ANDROID_SOURCES} ${GEN_SOURCES}
             ${CMAKE_CURRENT_BINARY_DIR}/image_sha1.cpp)
 target_include_directories(main PRIVATE ${NATIVE}/compat ${SDK}/harness/compat ${NATIVE} ${GAME} ${SDK}/runtime ${GEN}
                            ${CMAKE_CURRENT_BINARY_DIR} ${glslang_SOURCE_DIR})
-target_include_directories(main SYSTEM PRIVATE ${imgui_SOURCE_DIR})
 # x86 chars are signed, as the game's code and the runtime were written for
 target_compile_options(main PRIVATE -O3 -ffp-contract=fast -flto=thin -fno-strict-aliasing -fsigned-char)
 set(HOST_SOURCES ${RUNTIME_SOURCES} ${GAME_HOST_SOURCES} ${ANDROID_SOURCES})

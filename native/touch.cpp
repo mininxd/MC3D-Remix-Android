@@ -1,14 +1,8 @@
-// Android touch controls, keyboard/mouse bridge, SVG skin rasterizer (LunaSVG), and interactive layout editor.
-// Context-aware minimal mobile racing HUD for Midnight Club 3: DUB Edition Remix:
-//   - Main / Pause Menu : D-Pad + OK + Back
-//   - Garage            : D-Pad Left/Right + OK + Back (+ vertical swipe for upgrade lists)
-//   - Gameplay          : 1:2 Steer Left/Right (with thumb-slide), 1:2 Gas, 2:3 Brake, Handbrake,
-//                         dynamic NOS (only when purchased), dynamic Slipstream Turbo (only when filled & speed >= 10 km/h),
-//                         dynamic Special Ability (Zone/Agro/Roar), minimal top bar, and bottom-center Radio swipe.
+// Android native Vulkan 2D touch controls, SVG skin rasterizer (LunaSVG), dynamic 200ms auto-fade,
+// FMV hold-anywhere circular skip animation (start.svg), and custom zero-ImGui layout editor.
 #include "common/mouse_keyboard.h"
 
 #include <SDL3/SDL.h>
-#include <imgui.h>
 #include <lunasvg.h>
 #include <toml++/toml.hpp>
 
@@ -19,6 +13,7 @@
 #include <cfloat>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -488,7 +483,7 @@ bool HudKey(int vk) { return HostKeyBound(kHudAction, vk); }
 }  // namespace input
 
 // ============================================================================
-// MC3D Remix Mobile Touch Controls + SVG Skin Atlas (LunaSVG)
+// MC3D Remix Native Vulkan 2D Touch Controls + Custom Zero-ImGui Editor
 // ============================================================================
 namespace touch {
 
@@ -496,7 +491,7 @@ namespace {
 
 using input::NowMs;
 
-enum class Role : uint8_t { None, Button, RadioSwipe, GarageSwipe, Drag, Pinch };
+enum class Role : uint8_t { None, Button, RadioSwipe, GarageSwipe, FmvHold, Drag, Pinch };
 
 // Controller press targets
 enum : int {
@@ -542,39 +537,34 @@ enum class SvgIcon : uint8_t {
 constexpr size_t kSvgIconCount = static_cast<size_t>(SvgIcon::Count);
 
 struct SvgSpec {
-    const char* file;     // basename without .svg
-    uint32_t cell_w;      // rasterized width in atlas
-    uint32_t cell_h;      // rasterized height in atlas
-    float aspect_w_over_h; // drawn W/H aspect ratio
+    const char* file;
+    uint32_t cell_w;
+    uint32_t cell_h;
 };
 
-// Rectangular aspect ratios matching user's mobile UX spec:
-//   steer-left / steer-right / gas : 1:2 (W:H -> 0.50)
-//   brake                          : 2:3 (W:H -> 0.667)
-//   all other icons                : 1:1 (W:H -> 1.00)
 constexpr SvgSpec kSvgSpecs[kSvgIconCount] = {
-    {"steer-left",   128, 256, 0.50f},
-    {"steer-right",  128, 256, 0.50f},
-    {"gas",          128, 256, 0.50f},
-    {"brake",        170, 256, 2.0f / 3.0f},
-    {"handbrake",    192, 192, 1.0f},
-    {"nitro",        192, 192, 1.0f},
-    {"turbo",        192, 192, 1.0f},
-    {"special",      192, 192, 1.0f},
-    {"special-zone", 192, 192, 1.0f},
-    {"special-agro", 192, 192, 1.0f},
-    {"special-roar", 192, 192, 1.0f},
-    {"start",        192, 192, 1.0f},
-    {"camera",       192, 192, 1.0f},
-    {"map",          192, 192, 1.0f},
-    {"flash-lights", 192, 192, 1.0f},
-    {"look-back",    192, 192, 1.0f},
-    {"dpad-up",      192, 192, 1.0f},
-    {"dpad-down",    192, 192, 1.0f},
-    {"dpad-left",    192, 192, 1.0f},
-    {"dpad-right",   192, 192, 1.0f},
-    {"ok",           192, 192, 1.0f},
-    {"back",         192, 192, 1.0f},
+    {"steer-left",   128, 256},
+    {"steer-right",  128, 256},
+    {"gas",          128, 256},
+    {"brake",        170, 256},
+    {"handbrake",    192, 192},
+    {"nitro",        192, 192},
+    {"turbo",        192, 192},
+    {"special",      192, 192},
+    {"special-zone", 192, 192},
+    {"special-agro", 192, 192},
+    {"special-roar", 192, 192},
+    {"start",        192, 192},
+    {"camera",       192, 192},
+    {"map",          192, 192},
+    {"flash-lights", 192, 192},
+    {"look-back",    192, 192},
+    {"dpad-up",      192, 192},
+    {"dpad-down",    192, 192},
+    {"dpad-left",    192, 192},
+    {"dpad-right",   192, 192},
+    {"ok",           192, 192},
+    {"back",         192, 192},
 };
 
 enum Skin : uint32_t { kOutline = 0, kFilledWhite = 1, kFilledDark = 2, kSkins = 3 };
@@ -582,12 +572,12 @@ constexpr const char* kSkinDirs[kSkins] = {"outline", "filled-white", "filled-da
 constexpr const char* kSkinNames[kSkins] = {"Outline", "Filled White", "Filled Dark"};
 
 enum class When : uint8_t {
-    Play,           // Always in active driving gameplay
-    PlayNos,        // Dynamic: gameplay only when NOS purchased (max_nos > 0)
-    PlayTurbo,      // Dynamic: gameplay only when slipstream filled AND speed >= 10 km/h
-    PlaySpecial,    // Dynamic: gameplay only when special ability ready
-    MainMenuOnly,   // Main Menu / Pause Menu only (hidden in Garage)
-    MenusAndGarage, // Main Menu / Pause Menu AND Garage
+    Play,
+    PlayNos,
+    PlayTurbo,
+    PlaySpecial,
+    MainMenuOnly,
+    MenusAndGarage,
 };
 
 struct Button {
@@ -595,77 +585,150 @@ struct Button {
     const char* label;
     SvgIcon icon;
     int press;
+    game::GameAction action;  // GameAction::Count = fixed menu control, otherwise synced with MC3D remap
     When when;
-    float w_over_h;  // width / height ratio (0.50 = 1:2, 0.667 = 2:3, 1.0 = 1:1)
+    float w_over_h;  // 0.50 = 1:2, 0.667 = 2:3, 1.0 = 1:1
     bool keep = false;
-    bool steer_pair = false;  // supports seamless left<->right thumb slide
+    bool steer_pair = false;
 };
 
 constexpr Button kButtons[] = {
-    // Gameplay driving controls
-    {"steer_left",  "Steer Left",       SvgIcon::SteerLeft,   kSteerLeft,    When::Play,           0.50f,       true,  true},
-    {"steer_right", "Steer Right",      SvgIcon::SteerRight,  kSteerRight,   When::Play,           0.50f,       true,  true},
-    {"gas",         "Gas",              SvgIcon::Gas,         kAnalogRT,     When::Play,           0.50f,       true,  false},
-    {"brake",       "Brake",            SvgIcon::Brake,       kAnalogLT,     When::Play,           2.0f / 3.0f, true,  false},
-    {"handbrake",   "Handbrake",        SvgIcon::Handbrake,   kAnalogA,      When::Play,           1.0f,        false, false},
-    {"nitro",       "Nitro",            SvgIcon::Nitro,       kAnalogX,      When::PlayNos,        1.0f,        false, false},
-    {"turbo",       "Slipstream Turbo", SvgIcon::Turbo,       kAnalogX,      When::PlayTurbo,      1.0f,        false, false},
-    {"special",     "Special Ability",  SvgIcon::Special,     kBit + 6,      When::PlaySpecial,    1.0f,        false, false},
-    {"pause",       "Pause",            SvgIcon::Start,       kBit + 4,      When::Play,           1.0f,        true,  false},
-    {"camera",      "Camera",           SvgIcon::Camera,      kAnalogBlack,  When::Play,           1.0f,        false, false},
-    {"map",         "Map",              SvgIcon::Map,         kBit + 5,      When::Play,           1.0f,        false, false},
-    {"flash",       "Flash Lights",     SvgIcon::FlashLights, kAnalogWhite,  When::Play,           1.0f,        false, false},
-    {"look_back",   "Look Back",        SvgIcon::LookBack,    kAnalogY,      When::Play,           1.0f,        false, false},
+    // Gameplay driving controls (auto-synced with MC3D's in-game Controller Configuration / Custom Remap!)
+    {"steer_left",  "STEER LEFT",  SvgIcon::SteerLeft,   kSteerLeft,    game::GameAction::SteerAxis,   When::Play,           0.50f,       true,  true},
+    {"steer_right", "STEER RIGHT", SvgIcon::SteerRight,  kSteerRight,   game::GameAction::SteerAxis,   When::Play,           0.50f,       true,  true},
+    {"gas",         "GAS",         SvgIcon::Gas,         kAnalogRT,     game::GameAction::Gas,         When::Play,           0.50f,       true,  false},
+    {"brake",       "BRAKE",       SvgIcon::Brake,       kAnalogLT,     game::GameAction::Brake,       When::Play,           2.0f / 3.0f, true,  false},
+    {"handbrake",   "HANDBRAKE",   SvgIcon::Handbrake,   kAnalogA,      game::GameAction::Handbrake,   When::Play,           1.0f,        false, false},
+    {"nitro",       "NITRO",       SvgIcon::Nitro,       kAnalogX,      game::GameAction::Nitro,       When::PlayNos,        1.0f,        false, false},
+    {"turbo",       "TURBO",       SvgIcon::Turbo,       kAnalogX,      game::GameAction::Nitro,       When::PlayTurbo,      1.0f,        false, false},
+    {"special",     "SPECIAL",     SvgIcon::Special,     kBit + 6,      game::GameAction::Special,     When::PlaySpecial,    1.0f,        false, false},
+    {"pause",       "PAUSE",       SvgIcon::Start,       kBit + 4,      game::GameAction::Pause,       When::Play,           1.0f,        true,  false},
+    {"camera",      "CAMERA",      SvgIcon::Camera,      kAnalogBlack,  game::GameAction::Camera,      When::Play,           1.0f,        false, false},
+    {"map",         "MAP",         SvgIcon::Map,         kBit + 5,      game::GameAction::Map,         When::Play,           1.0f,        false, false},
+    {"flash",       "FLASH",       SvgIcon::FlashLights, kAnalogWhite,  game::GameAction::FlashLights, When::Play,           1.0f,        false, false},
+    {"look_back",   "LOOK BACK",   SvgIcon::LookBack,    kAnalogY,      game::GameAction::LookBack,    When::Play,           1.0f,        false, false},
 
-    // Menu & Garage minimal navigation controls
-    {"dpad_up",     "D-Pad Up",         SvgIcon::DpadUp,      kBit + 0,      When::MainMenuOnly,   1.0f,        false, false},
-    {"dpad_down",   "D-Pad Down",       SvgIcon::DpadDown,    kBit + 1,      When::MainMenuOnly,   1.0f,        false, false},
-    {"dpad_left",   "D-Pad Left",       SvgIcon::DpadLeft,    kBit + 2,      When::MenusAndGarage, 1.0f,        true,  false},
-    {"dpad_right",  "D-Pad Right",      SvgIcon::DpadRight,   kBit + 3,      When::MenusAndGarage, 1.0f,        true,  false},
-    {"ok",          "OK",               SvgIcon::Ok,          kAnalogA,      When::MenusAndGarage, 1.0f,        true,  false},
-    {"back",        "Back",             SvgIcon::Back,        kAnalogB,      When::MenusAndGarage, 1.0f,        true,  false},
+    // Menu & Garage minimal navigation controls (1.25x sized, aspect-aware percentage placement)
+    {"dpad_up",     "DPAD UP",     SvgIcon::DpadUp,      kBit + 0,      game::GameAction::Count,       When::MainMenuOnly,   1.0f,        false, false},
+    {"dpad_down",   "DPAD DOWN",   SvgIcon::DpadDown,    kBit + 1,      game::GameAction::Count,       When::MainMenuOnly,   1.0f,        false, false},
+    {"dpad_left",   "DPAD LEFT",   SvgIcon::DpadLeft,    kBit + 2,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
+    {"dpad_right",  "DPAD RIGHT",  SvgIcon::DpadRight,   kBit + 3,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
+    {"ok",          "OK",          SvgIcon::Ok,          kAnalogA,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
+    {"back",        "BACK",        SvgIcon::Back,        kAnalogB,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
 };
 
 constexpr size_t kButtonCount = std::size(kButtons);
 constexpr size_t kIdxSteerLeft = 0;
 constexpr size_t kIdxSteerRight = 1;
+constexpr size_t kIdxGas = 2;
+constexpr size_t kIdxBrake = 3;
+constexpr size_t kIdxHandbrake = 4;
+constexpr size_t kIdxNitro = 5;
+constexpr size_t kIdxTurbo = 6;
+constexpr size_t kIdxSpecial = 7;
+constexpr size_t kIdxPause = 8;
+constexpr size_t kIdxCamera = 9;
+constexpr size_t kIdxMap = 10;
+constexpr size_t kIdxFlash = 11;
+constexpr size_t kIdxLookBack = 12;
+constexpr size_t kIdxDpadUp = 13;
+constexpr size_t kIdxDpadDown = 14;
+constexpr size_t kIdxDpadLeft = 15;
+constexpr size_t kIdxDpadRight = 16;
+constexpr size_t kIdxOk = 17;
+constexpr size_t kIdxBack = 18;
 
-// Centre (x, y) in screen shares; r = half-height in screen heights (drawn H = 2*r*scale*H, W = H * w_over_h)
+// Screen-percentage placement:
+//   x, y in [0..1] screen shares
+//   r = half-height as share of screen height (drawn H = 2*r*scale*ScreenH, W = H * w_over_h)
 struct Place {
-    float x, y, r;
+    float x = 0.5f, y = 0.5f, r = 0.07f;
     bool hidden = false;
 };
 using Layout = std::array<Place, kButtonCount>;
 
-constexpr Layout kDefaultLayout = {{
-    // Gameplay: tall 1:2 steering on bottom-left, tall 1:2 gas & 2:3 brake on bottom-right
-    {0.068f, 0.720f, 0.175f, false},  // steer_left  (1:2)
-    {0.184f, 0.720f, 0.175f, false},  // steer_right (1:2)
-    {0.932f, 0.720f, 0.185f, false},  // gas         (1:2)
-    {0.812f, 0.765f, 0.140f, false},  // brake       (2:3)
-    {0.812f, 0.485f, 0.066f, false},  // handbrake   (1:1)
-    {0.932f, 0.395f, 0.072f, false},  // nitro       (1:1, dynamic)
-    {0.700f, 0.560f, 0.074f, false},  // turbo       (1:1, dynamic)
-    {0.700f, 0.765f, 0.072f, false},  // special     (1:1, dynamic)
-    {0.500f, 0.082f, 0.048f, false},  // pause       (top center)
-    {0.422f, 0.082f, 0.046f, false},  // camera      (top left of pause)
-    {0.578f, 0.082f, 0.046f, false},  // map         (top right of pause)
-    {0.932f, 0.190f, 0.056f, false},  // flash       (upper right)
-    {0.344f, 0.082f, 0.046f, true},   // look_back   (hidden by default for minimal HUD; unhideable in editor)
+// Dynamic percentage-based aspect-aware layout so buttons match ANY screen ratio (16:9, 19.5:9, 20:9, 21:9, tablet)
+Layout ComputeDefaultLayout(float screen_w, float screen_h) {
+    const float aspect = std::clamp(screen_w / std::max(screen_h, 1.0f), 1.33f, 2.55f);
+    const float edge_x = 0.032f;  // 3.2% horizontal safe margin
+    const float edge_y = 0.055f;  // 5.5% vertical safe margin
 
-    // Menus & Garage: minimal D-Pad + OK + Back
-    {0.122f, 0.555f, 0.058f, false},  // dpad_up
-    {0.122f, 0.805f, 0.058f, false},  // dpad_down
-    {0.056f, 0.680f, 0.058f, false},  // dpad_left
-    {0.188f, 0.680f, 0.058f, false},  // dpad_right
-    {0.916f, 0.715f, 0.076f, false},  // ok
-    {0.798f, 0.800f, 0.066f, false},  // back
-}};
+    auto rx_of = [aspect](float r, float w_over_h) { return (r * w_over_h) / aspect; };
 
-constexpr uint64_t kShownMs = 8000;
+    Layout L{};
+
+    // --- Gameplay: 1:2 Steer Left/Right (bottom-left), 1:2 Gas & 2:3 Brake (bottom-right) ---
+    const float steer_r = 0.175f;  // 35% screen height, 1:2 W:H
+    const float steer_rx = rx_of(steer_r, 0.50f);
+    const float steer_y = 1.0f - edge_y - steer_r;
+    L[kIdxSteerLeft]  = {edge_x + steer_rx, steer_y, steer_r, false};
+    L[kIdxSteerRight] = {edge_x + steer_rx * 3.35f, steer_y, steer_r, false};
+
+    const float gas_r = 0.185f;    // 37% screen height, 1:2 W:H
+    const float gas_rx = rx_of(gas_r, 0.50f);
+    const float gas_x = 1.0f - edge_x - gas_rx;
+    const float gas_y = 1.0f - edge_y - gas_r;
+    L[kIdxGas] = {gas_x, gas_y, gas_r, false};
+
+    const float brk_r = 0.140f;    // 28% screen height, 2:3 W:H
+    const float brk_rx = rx_of(brk_r, 2.0f / 3.0f);
+    const float brk_x = gas_x - gas_rx - brk_rx - 0.022f;
+    const float brk_y = 1.0f - edge_y - brk_r;
+    L[kIdxBrake] = {brk_x, brk_y, brk_r, false};
+
+    const float hb_r = 0.068f;
+    L[kIdxHandbrake] = {brk_x, brk_y - brk_r - hb_r - 0.045f, hb_r, false};
+
+    const float nitro_r = 0.075f;
+    L[kIdxNitro] = {gas_x, gas_y - gas_r - nitro_r - 0.045f, nitro_r, false};
+
+    const float turbo_r = 0.078f;
+    const float turbo_rx = rx_of(turbo_r, 1.0f);
+    const float aux_x = brk_x - brk_rx - turbo_rx - 0.024f;
+    L[kIdxTurbo]   = {aux_x, brk_y - brk_r * 0.85f, turbo_r, false};
+    L[kIdxSpecial] = {aux_x, brk_y + brk_r * 0.25f, 0.074f, false};
+
+    const float top_r = 0.048f;
+    const float top_rx = rx_of(top_r, 1.0f);
+    const float top_y = 0.082f;
+    L[kIdxPause]    = {0.500f, top_y, top_r, false};
+    L[kIdxCamera]   = {0.500f - top_rx * 2.55f, top_y, top_r, false};
+    L[kIdxMap]      = {0.500f + top_rx * 2.55f, top_y, top_r, false};
+    L[kIdxLookBack] = {0.500f - top_rx * 5.10f, top_y, top_r, true};
+    L[kIdxFlash]    = {gas_x, 0.165f, 0.056f, false};
+
+    // --- Menus & Garage: 1.25x larger D-Pad, OK, and Back dynamically matched to screen ---
+    const float dp_r = 0.0725f;  // 1.25x of 0.058 (14.5% screen height per tile)
+    const float dp_rx = rx_of(dp_r, 1.0f);
+    const float dp_step_x = dp_rx * 2.12f;
+    const float dp_step_y = dp_r * 2.12f;
+    const float dp_cx = edge_x + dp_rx + dp_step_x;
+    const float dp_cy = 1.0f - edge_y - dp_r - dp_step_y;
+    L[kIdxDpadUp]    = {dp_cx, dp_cy - dp_step_y, dp_r, false};
+    L[kIdxDpadDown]  = {dp_cx, dp_cy + dp_step_y, dp_r, false};
+    L[kIdxDpadLeft]  = {dp_cx - dp_step_x, dp_cy, dp_r, false};
+    L[kIdxDpadRight] = {dp_cx + dp_step_x, dp_cy, dp_r, false};
+
+    const float ok_r = 0.095f;    // 1.25x of 0.076 (19.0% screen height)
+    const float ok_rx = rx_of(ok_r, 1.0f);
+    const float back_r = 0.0825f; // 1.25x of 0.066 (16.5% screen height)
+    const float back_rx = rx_of(back_r, 1.0f);
+    const float ok_x = 1.0f - edge_x - ok_rx - 0.008f;
+    const float ok_y = 1.0f - edge_y - ok_r - 0.065f;
+    const float back_x = ok_x - (ok_rx + back_rx) * 1.18f;
+    const float back_y = 1.0f - edge_y - back_r;
+    L[kIdxOk]   = {ok_x, ok_y, ok_r, false};
+    L[kIdxBack] = {back_x, back_y, back_r, false};
+
+    return L;
+}
+
+constexpr float kFadeMs = 200.0f;         // 200ms dynamic fade-out on controller / fade-in on touch
 constexpr uint64_t kBackTapMs = 120;
 constexpr uint64_t kPulseMs = 105;
 constexpr uint64_t kToastMs = 800;
+constexpr float kFmvHoldSkipMs = 850.0f;  // Hold anywhere 850ms during FMV to fill ring & skip
+constexpr uint64_t kFmvSkipPulseMs = 180;
 
 struct Finger {
     SDL_FingerID id = 0;
@@ -681,32 +744,45 @@ struct Finger {
 std::mutex g_lock;
 std::vector<Finger> g_fingers;
 bool g_pressed[kButtonCount] = {};
-std::atomic<uint64_t> g_touch_ms{0};
 std::atomic<uint64_t> g_back_until{0};
 
-// Radio swipe & Garage vertical swipe short pulses
-uint64_t g_pulse_until[4] = {};  // 0=DUp, 1=DDown, 2=DLeft (Radio Prev), 3=DRight (Radio Next)
-uint64_t g_radio_toast_until = 0;
-int g_radio_toast_dir = 0;       // -1 = prev, +1 = next
+// Smooth 200ms dynamic auto-fade state (under g_lock)
+float g_fade_target = 1.0f;
+float g_fade_from = 1.0f;
+uint64_t g_fade_start_ms = 0;
 
-Layout g_layout = kDefaultLayout;
+// Radio swipe & Garage vertical swipe short pulses
+uint64_t g_pulse_until[4] = {};  // 0=DUp, 1=DDown, 2=DLeft, 3=DRight
+uint64_t g_radio_toast_until = 0;
+int g_radio_toast_dir = 0;
+
+// FMV hold-anywhere skip animation state (under g_lock)
+float g_fmv_progress = 0.0f;
+uint64_t g_fmv_last_ms = 0;
+uint64_t g_fmv_skip_pulse_until = 0;
+bool g_fmv_skip_fired = false;
+
+Layout g_layout{};
 uint32_t g_skin = kOutline;
 float g_opacity = 0.85f;
 float g_scale = 1.0f;
 bool g_loaded = false;
+float g_layout_w = 1920.0f, g_layout_h = 1080.0f;
 
 std::atomic<bool> g_editing{false};
-Layout g_before = kDefaultLayout;
+bool g_edit_menu_tab = false;  // false = Gameplay controls, true = Menu controls
+Layout g_before{};
 float g_before_opacity = 0.85f;
 int g_selected = -1;
 
-// Atlas UV rects for each (skin, icon)
+// Atlas UV rects for SVG icons + built-in crisp 5x7 uppercase font
 struct AtlasUv {
     float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
     bool valid = false;
 };
 AtlasUv g_atlas_uv[kSkins][kSvgIconCount]{};
-ImTextureID g_skin_texture = nullptr;
+AtlasUv g_font_uv[64]{};  // ASCII 32..95
+std::atomic<bool> g_skin_ready{false};
 
 float Width() {
     int w, h;
@@ -719,11 +795,29 @@ float Height() {
     return float(std::max(h, 1));
 }
 
+float CurrentFadeAlphaLocked(uint64_t now) {
+    if (g_editing) return 1.0f;
+    if (g_fade_start_ms == 0 || now <= g_fade_start_ms) return g_fade_target;
+    float t = float(now - g_fade_start_ms) / kFadeMs;
+    if (t >= 1.0f) return g_fade_target;
+    float ease = t * (2.0f - t);
+    return std::clamp(g_fade_from + (g_fade_target - g_fade_from) * ease, 0.0f, 1.0f);
+}
+
+void StartFadeLocked(float target, uint64_t now) {
+    if (std::fabs(g_fade_target - target) < 0.01f) return;
+    g_fade_from = CurrentFadeAlphaLocked(now);
+    g_fade_target = target;
+    g_fade_start_ms = now;
+}
+
 std::filesystem::path LayoutFile() { return app::ExeDir() / "layout.toml"; }
 
 void LoadLayout() {
     g_loaded = true;
-    g_layout = kDefaultLayout;
+    g_layout_w = Width();
+    g_layout_h = Height();
+    g_layout = ComputeDefaultLayout(g_layout_w, g_layout_h);
     try {
         toml::table t = toml::parse_file(LayoutFile().string());
         g_opacity = std::clamp(float(t["opacity"].value_or(double(g_opacity))), 0.2f, 1.0f);
@@ -732,8 +826,8 @@ void LoadLayout() {
         for (uint32_t i = 0; i < kSkins; i++) {
             if (skin == kSkinDirs[i]) g_skin = i;
         }
-        // Only load per-button custom placement when saved with MC3D layout version >= 2
-        if (t["layout_version"].value_or(0) >= 2) {
+        // layout_version >= 3 includes 1.25x aspect-aware Menu/Garage buttons & Gameplay layout
+        if (t["layout_version"].value_or(0) >= 3) {
             for (size_t i = 0; i < kButtonCount; i++) {
                 const toml::table* p = t["controls"][kButtons[i].id].as_table();
                 if (!p) continue;
@@ -756,7 +850,7 @@ void SaveLayout() {
                         toml::table{{"x", double(p.x)}, {"y", double(p.y)}, {"r", double(p.r)}, {"hidden", p.hidden}});
     }
     toml::table t{
-        {"layout_version", 2},
+        {"layout_version", 3},
         {"opacity", double(g_opacity)},
         {"scale", double(g_scale)},
         {"skin", kSkinDirs[g_skin]},
@@ -782,12 +876,17 @@ bool IsGameplayButton(When w) {
 }
 
 bool ButtonShown(size_t i) {
-    if (!g_editing && !game::Opt().touch_controls) return false;
     const Button& b = kButtons[i];
-    if (g_editing) return IsGameplayButton(b.when);
+    if (g_editing) {
+        return g_edit_menu_tab ? !IsGameplayButton(b.when) : IsGameplayButton(b.when);
+    }
     if (g_layout[i].hidden) return false;
 
     const auto ctx = CurrentUiContext();
+    if (ctx == game::UiContext::Loading || ctx == game::UiContext::FmvUnskippable ||
+        ctx == game::UiContext::FmvSkippable) {
+        return false;
+    }
     switch (b.when) {
         case When::MainMenuOnly:
             return ctx == game::UiContext::MainMenu;
@@ -809,9 +908,11 @@ bool ButtonShown(size_t i) {
 }
 
 void ButtonRect(size_t i, float& x0, float& y0, float& x1, float& y1) {
-    const float cx = g_layout[i].x * Width();
-    const float cy = g_layout[i].y * Height();
-    const float half_h = g_layout[i].r * g_scale * Height();
+    const float w = Width();
+    const float h = Height();
+    const float cx = g_layout[i].x * w;
+    const float cy = g_layout[i].y * h;
+    const float half_h = g_layout[i].r * g_scale * h;
     const float half_w = half_h * kButtons[i].w_over_h;
     x0 = cx - half_w;
     y0 = cy - half_h;
@@ -819,7 +920,6 @@ void ButtonRect(size_t i, float& x0, float& y0, float& x1, float& y1) {
     y1 = cy + half_h;
 }
 
-// Hit test with generous touch slack around rectangular & circular controls
 size_t HitButton(float x, float y) {
     for (size_t i = 0; i < kButtonCount; i++) {
         if (!ButtonShown(i)) continue;
@@ -830,38 +930,52 @@ size_t HitButton(float x, float y) {
         const float hw = (x1 - x0) * 0.5f;
         const float hh = (y1 - y0) * 0.5f;
         if (kButtons[i].w_over_h < 0.95f) {
-            // Rectangular pedal / tall steering button: tight horizontal slack so Left & Right stay distinct
-            const float sx = hw * 1.12f;
-            const float sy = hh * 1.14f;
-            if (std::fabs(x - cx) <= sx && std::fabs(y - cy) <= sy) return i;
+            if (std::fabs(x - cx) <= hw * 1.12f && std::fabs(y - cy) <= hh * 1.14f) return i;
         } else {
-            const float r = hh * 1.22f;
+            const float r = hh * 1.18f;
             if ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r) return i;
         }
     }
     return kButtonCount;
 }
 
-// Editor top bar
-constexpr const char* kBarLabels[] = {"RESET", "-", "+", "HIDE", "CANCEL", "DONE"};
-enum { kBarReset, kBarSmaller, kBarBigger, kBarHide, kBarCancel, kBarDone, kBarCount };
-constexpr float kBarY = 0.16f, kBarH = 0.088f, kBarW = 0.135f, kBarGap = 0.018f;
-constexpr float kBarSizeW = 0.07f;
-constexpr float kMinRadius = 0.03f, kMaxRadius = 0.28f;
+// ============================================================================
+// Custom Native Vulkan Editor Top Toolbar (Zero ImGui!)
+// ============================================================================
+enum { kBarTab, kBarReset, kBarSmaller, kBarBigger, kBarHide, kBarCancel, kBarDone, kBarCount };
+constexpr float kBarY = 0.055f, kBarH = 0.088f, kBarGap = 0.012f;
+constexpr float kMinRadius = 0.035f, kMaxRadius = 0.28f;
 constexpr float kSizeStep = 1.1f;
 
-float BarWidth(int i) { return i == kBarSmaller || i == kBarBigger ? kBarSizeW : kBarW; }
+float BarWidth(int i) {
+    switch (i) {
+        case kBarTab:     return 0.125f;
+        case kBarSmaller:
+        case kBarBigger:  return 0.068f;
+        default:          return 0.115f;
+    }
+}
+
 bool Hideable(int i) { return i >= 0 && size_t(i) < kButtonCount && !kButtons[size_t(i)].keep; }
+
 const char* BarLabel(int i) {
-    if (i == kBarHide && Hideable(g_selected) && g_layout[size_t(g_selected)].hidden) return "SHOW";
-    return kBarLabels[i];
+    switch (i) {
+        case kBarTab:     return g_edit_menu_tab ? "MENU" : "PLAY";
+        case kBarReset:   return "RESET";
+        case kBarSmaller: return "-";
+        case kBarBigger:  return "+";
+        case kBarHide:    return (Hideable(g_selected) && g_layout[size_t(g_selected)].hidden) ? "SHOW" : "HIDE";
+        case kBarCancel:  return "CANCEL";
+        case kBarDone:    return "DONE";
+        default:          return "";
+    }
 }
 
 int BarAt(float x, float y, float rect[4] = nullptr, int which = -1) {
-    float w = Width(), h = Height();
+    const float w = Width(), h = Height();
     float total = (kBarCount - 1) * kBarGap;
     for (int i = 0; i < kBarCount; i++) total += BarWidth(i);
-    float left = 0.5f - total / 2;
+    float left = 0.5f - total * 0.5f;
     for (int i = 0; i < kBarCount; i++) {
         float x0 = left * w, y0 = kBarY * h;
         float x1 = x0 + BarWidth(i) * w, y1 = y0 + kBarH * h;
@@ -879,6 +993,7 @@ void OpenEditor() {
     g_before = g_layout;
     g_before_opacity = g_opacity;
     g_selected = -1;
+    g_edit_menu_tab = false;
     g_editing = true;
 }
 
@@ -918,8 +1033,12 @@ void Recount() {
 void EditDown(Finger& f, float x, float y) {
     int bar = BarAt(x, y);
     switch (bar) {
+        case kBarTab:
+            g_edit_menu_tab = !g_edit_menu_tab;
+            g_selected = -1;
+            return;
         case kBarReset:
-            g_layout = kDefaultLayout;
+            g_layout = ComputeDefaultLayout(Width(), Height());
             g_selected = -1;
             return;
         case kBarSmaller:
@@ -962,31 +1081,45 @@ void EditDown(Finger& f, float x, float y) {
 }
 
 void FingerDown(SDL_FingerID id, float x, float y) {
+    const uint64_t now = NowMs();
+    StartFadeLocked(1.0f, now);  // Smooth 200ms fade-in whenever screen is touched!
+
     Finger f;
     f.id = id;
     f.x0 = f.x = x;
     f.y0 = f.y = y;
-    f.down_ms = NowMs();
+    f.down_ms = now;
     if (g_editing) {
         EditDown(f, x, y);
         g_fingers.push_back(f);
         return;
     }
     input::g_touch = true;
+
+    const auto ctx = CurrentUiContext();
+    if (ctx == game::UiContext::FmvSkippable) {
+        // Touch & hold ANYWHERE on screen to animate start.svg circular ring and skip FMV!
+        f.role = Role::FmvHold;
+        g_fmv_skip_fired = false;
+        g_fingers.push_back(f);
+        return;
+    }
+    if (ctx == game::UiContext::FmvUnskippable || ctx == game::UiContext::Loading) {
+        g_fingers.push_back(f);
+        return;
+    }
+
     const size_t b = HitButton(x, y);
     if (b < kButtonCount) {
         f.role = Role::Button;
         f.button = b;
     } else {
-        const auto ctx = CurrentUiContext();
         const float w = Width();
         const float h = Height();
-        if (ctx == game::UiContext::Gameplay && game::Opt().touch_controls &&
+        if (ctx == game::UiContext::Gameplay &&
             x >= w * 0.25f && x <= w * 0.75f && y >= h * 0.62f) {
-            // Bottom-center screen horizontal swipe adjusts radio station / track
             f.role = Role::RadioSwipe;
-        } else if (ctx == game::UiContext::Garage && game::Opt().touch_controls) {
-            // Empty-screen vertical swipe in Garage pulses D-Pad Up/Down for upgrade lists
+        } else if (ctx == game::UiContext::Garage) {
             f.role = Role::GarageSwipe;
             f.notch_y = y;
         }
@@ -1018,7 +1151,6 @@ void FingerMove(SDL_FingerID id, float x, float y) {
             }
         }
         if (f.role == Role::Button && f.button < kButtonCount && kButtons[f.button].steer_pair) {
-            // Smooth thumb slide between Steer Left and Steer Right without lifting!
             const size_t hit = HitButton(x, y);
             if (hit == kIdxSteerLeft || hit == kIdxSteerRight) {
                 f.button = hit;
@@ -1030,10 +1162,10 @@ void FingerMove(SDL_FingerID id, float x, float y) {
             if (std::fabs(dx) >= w * 0.06f && std::fabs(dx) > std::fabs(dy) * 1.25f) {
                 f.swipe_fired = true;
                 if (dx > 0.0f) {
-                    g_pulse_until[3] = now + kPulseMs;  // D-Pad Right = Next Track
+                    g_pulse_until[3] = now + kPulseMs;
                     g_radio_toast_dir = 1;
                 } else {
-                    g_pulse_until[2] = now + kPulseMs;  // D-Pad Left = Prev Track
+                    g_pulse_until[2] = now + kPulseMs;
                     g_radio_toast_dir = -1;
                 }
                 g_radio_toast_until = now + kToastMs;
@@ -1043,10 +1175,10 @@ void FingerMove(SDL_FingerID id, float x, float y) {
             const float notch = h * 0.065f;
             if (y <= f.notch_y - notch) {
                 f.notch_y -= notch;
-                g_pulse_until[0] = now + kPulseMs;  // D-Pad Up
+                g_pulse_until[0] = now + kPulseMs;
             } else if (y >= f.notch_y + notch) {
                 f.notch_y += notch;
-                g_pulse_until[1] = now + kPulseMs;  // D-Pad Down
+                g_pulse_until[1] = now + kPulseMs;
             }
         }
     }
@@ -1056,12 +1188,6 @@ void FingerMove(SDL_FingerID id, float x, float y) {
 void FingerUp(SDL_FingerID id) {
     std::erase_if(g_fingers, [id](const Finger& f) { return f.id == id; });
     Recount();
-}
-
-bool PadPlugged() {
-    int n = 0;
-    if (SDL_JoystickID* ids = SDL_GetGamepads(&n)) SDL_free(ids);
-    return n > 0;
 }
 
 void KeyEvent(const SDL_KeyboardEvent& k) {
@@ -1081,15 +1207,158 @@ void KeyEvent(const SDL_KeyboardEvent& k) {
     if (!k.down) return;
     input::g_keyboard = true;
     input::g_touch = false;
+    {
+        std::lock_guard lock(g_lock);
+        StartFadeLocked(0.0f, NowMs());  // External keyboard smoothly fades out touch controls
+    }
     if (!k.repeat && input::HudKey(vk)) game::g_hide_hud = !game::g_hide_hud;
     if (vk == VK_BACK) input::OnChar('\b');
     if (vk == VK_RETURN) input::OnChar('\r');
 }
 
 // ============================================================================
+// Built-in Crisp 5x7 Uppercase Font (Baked into Atlas — Zero External Fonts / Zero ImGui!)
+// ============================================================================
+// Compact 5-column x 7-row bitmap glyphs for ASCII 32..95 (bit 4 = leftmost col, bit 0 = rightmost col)
+constexpr uint8_t kFont5x7[64][7] = {
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // ' ' 32
+    {0x04,0x04,0x04,0x04,0x04,0x00,0x04}, // '!' 33
+    {0x0A,0x0A,0x00,0x00,0x00,0x00,0x00}, // '"' 34
+    {0x0A,0x1F,0x0A,0x0A,0x1F,0x0A,0x00}, // '#' 35
+    {0x04,0x0F,0x14,0x0E,0x05,0x1E,0x04}, // '$' 36
+    {0x18,0x19,0x02,0x04,0x08,0x13,0x03}, // '%' 37
+    {0x08,0x14,0x14,0x08,0x15,0x12,0x0D}, // '&' 38
+    {0x04,0x04,0x00,0x00,0x00,0x00,0x00}, // ''' 39
+    {0x02,0x04,0x08,0x08,0x08,0x04,0x02}, // '(' 40
+    {0x08,0x04,0x02,0x02,0x02,0x04,0x08}, // ')' 41
+    {0x00,0x0A,0x04,0x1F,0x04,0x0A,0x00}, // '*' 42
+    {0x00,0x04,0x04,0x1F,0x04,0x04,0x00}, // '+' 43
+    {0x00,0x00,0x00,0x00,0x00,0x04,0x08}, // ',' 44
+    {0x00,0x00,0x00,0x1F,0x00,0x00,0x00}, // '-' 45
+    {0x00,0x00,0x00,0x00,0x00,0x04,0x04}, // '.' 46
+    {0x01,0x02,0x02,0x04,0x08,0x08,0x10}, // '/' 47
+    {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E}, // '0' 48
+    {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E}, // '1' 49
+    {0x0E,0x11,0x01,0x06,0x08,0x10,0x1F}, // '2' 50
+    {0x1F,0x02,0x04,0x06,0x01,0x11,0x0E}, // '3' 51
+    {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02}, // '4' 52
+    {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E}, // '5' 53
+    {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E}, // '6' 54
+    {0x1F,0x01,0x02,0x04,0x08,0x08,0x08}, // '7' 55
+    {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E}, // '8' 56
+    {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C}, // '9' 57
+    {0x00,0x04,0x04,0x00,0x04,0x04,0x00}, // ':' 58
+    {0x00,0x04,0x04,0x00,0x04,0x04,0x08}, // ';' 59
+    {0x02,0x04,0x08,0x10,0x08,0x04,0x02}, // '<' 60
+    {0x00,0x00,0x1F,0x00,0x1F,0x00,0x00}, // '=' 61
+    {0x08,0x04,0x02,0x01,0x02,0x04,0x08}, // '>' 62
+    {0x0E,0x11,0x01,0x06,0x04,0x00,0x04}, // '?' 63
+    {0x0E,0x11,0x17,0x15,0x17,0x10,0x0E}, // '@' 64
+    {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11}, // 'A' 65
+    {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E}, // 'B' 66
+    {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E}, // 'C' 67
+    {0x1E,0x11,0x11,0x11,0x11,0x11,0x1E}, // 'D' 68
+    {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F}, // 'E' 69
+    {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10}, // 'F' 70
+    {0x0E,0x11,0x10,0x17,0x11,0x11,0x0F}, // 'G' 71
+    {0x11,0x11,0x11,0x1F,0x11,0x11,0x11}, // 'H' 72
+    {0x0E,0x04,0x04,0x04,0x04,0x04,0x0E}, // 'I' 73
+    {0x07,0x02,0x02,0x02,0x12,0x12,0x0C}, // 'J' 74
+    {0x11,0x12,0x14,0x18,0x14,0x12,0x11}, // 'K' 75
+    {0x10,0x10,0x10,0x10,0x10,0x10,0x1F}, // 'L' 76
+    {0x11,0x1B,0x15,0x15,0x11,0x11,0x11}, // 'M' 77
+    {0x11,0x19,0x15,0x13,0x11,0x11,0x11}, // 'N' 78
+    {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E}, // 'O' 79
+    {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10}, // 'P' 80
+    {0x0E,0x11,0x11,0x11,0x15,0x12,0x0D}, // 'Q' 81
+    {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11}, // 'R' 82
+    {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E}, // 'S' 83
+    {0x1F,0x04,0x04,0x04,0x04,0x04,0x04}, // 'T' 84
+    {0x11,0x11,0x11,0x11,0x11,0x11,0x0E}, // 'U' 85
+    {0x11,0x11,0x11,0x11,0x11,0x0A,0x04}, // 'V' 86
+    {0x11,0x11,0x11,0x15,0x15,0x1B,0x11}, // 'W' 87
+    {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11}, // 'X' 88
+    {0x11,0x11,0x0A,0x04,0x04,0x04,0x04}, // 'Y' 89
+    {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F}, // 'Z' 90
+    {0x0E,0x08,0x08,0x08,0x08,0x08,0x0E}, // '[' 91
+    {0x10,0x08,0x08,0x04,0x02,0x02,0x01}, // '\' 92
+    {0x0E,0x02,0x02,0x02,0x02,0x02,0x0E}, // ']' 93
+    {0x04,0x0A,0x11,0x00,0x00,0x00,0x00}, // '^' 94
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x1F}, // '_' 95
+};
+
+void BakeFontIntoAtlas(std::vector<uint8_t>& rgba, uint32_t atlas_w, uint32_t atlas_h, uint32_t base_y) {
+    constexpr uint32_t kScale = 3;   // 15x21 px per glyph -> crisp & smooth when filtered
+    constexpr uint32_t kCellW = 5 * kScale + 4;  // 19 px
+    constexpr uint32_t kCellH = 7 * kScale + 4;  // 25 px
+    constexpr uint32_t kCols = 64;
+    for (uint32_t g = 0; g < 64; ++g) {
+        const uint32_t ox = 8 + (g % kCols) * (kCellW + 2);
+        const uint32_t oy = base_y + (g / kCols) * (kCellH + 2);
+        if (ox + kCellW >= atlas_w || oy + kCellH >= atlas_h) continue;
+        for (uint32_t row = 0; row < 7; ++row) {
+            const uint8_t bits = kFont5x7[g][row];
+            for (uint32_t col = 0; col < 5; ++col) {
+                if ((bits & (1u << (4 - col))) == 0u) continue;
+                for (uint32_t dy = 0; dy < kScale; ++dy) {
+                    for (uint32_t dx = 0; dx < kScale; ++dx) {
+                        const uint32_t px = ox + 2 + col * kScale + dx;
+                        const uint32_t py = oy + 2 + row * kScale + dy;
+                        uint8_t* dst = &rgba[(size_t(py) * atlas_w + px) * 4u];
+                        dst[0] = 255; dst[1] = 255; dst[2] = 255; dst[3] = 255;
+                    }
+                }
+            }
+        }
+        g_font_uv[g] = AtlasUv{
+            float(ox + 1) / float(atlas_w),
+            float(oy + 1) / float(atlas_h),
+            float(ox + kCellW - 1) / float(atlas_w),
+            float(oy + kCellH - 1) / float(atlas_h),
+            true,
+        };
+    }
+}
+
+void EmitPanel(std::vector<Quad>& out, float x0, float y0, float x1, float y1,
+               float r, float g, float b, float a, float radius_px,
+               float border_px = 0.0f, float br = 1.0f, float bg = 1.0f, float bb = 1.0f, float ba = 0.0f) {
+    out.push_back(Quad{x0, y0, x1, y1, 0, 0, 1, 1, r, g, b, a, radius_px, border_px, br, bg, bb, ba, 1u});
+}
+
+void EmitRing(std::vector<Quad>& out, float cx, float cy, float radius_px, float thickness_px, float progress,
+              float r, float g, float b, float a, float br, float bg, float bb, float ba) {
+    out.push_back(Quad{cx - radius_px, cy - radius_px, cx + radius_px, cy + radius_px,
+                       0, 0, 1, 1, r, g, b, a, progress, thickness_px, br, bg, bb, ba, 2u});
+}
+
+void EmitTextCentered(std::vector<Quad>& out, float cx, float cy, float char_h,
+                      float r, float g, float b, float a, const char* text) {
+    if (!text || !text[0] || !g_skin_ready.load(std::memory_order_relaxed)) return;
+    const size_t len = std::strlen(text);
+    const float char_w = char_h * (17.0f / 23.0f);
+    const float adv = char_w * 1.18f;
+    const float total_w = (len > 0) ? (float(len - 1) * adv + char_w) : 0.0f;
+    float x = cx - total_w * 0.5f;
+    const float y0 = cy - char_h * 0.5f;
+    const float y1 = cy + char_h * 0.5f;
+    for (size_t i = 0; i < len; ++i) {
+        unsigned char ch = static_cast<unsigned char>(std::toupper(static_cast<unsigned char>(text[i])));
+        if (ch == '|') ch = 'I';
+        if (ch >= 32 && ch <= 95 && ch != ' ') {
+            const AtlasUv& uv = g_font_uv[ch - 32];
+            if (uv.valid) {
+                out.push_back(Quad{x, y0, x + char_w, y1, uv.u0, uv.v0, uv.u1, uv.v1,
+                                   r, g, b, a, 0, 0, 0, 0, 0, 0, 0u});
+            }
+        }
+        x += adv;
+    }
+}
+
+// ============================================================================
 // Live SVG Loader & Aspect-Preserving Container Expansion for 1:2 / 2:3 Pedals
 // ============================================================================
-
 void ReplaceAll(std::string& s, std::string_view from, std::string_view to) {
     if (from.empty()) return;
     size_t pos = 0;
@@ -1099,12 +1368,8 @@ void ReplaceAll(std::string& s, std::string_view from, std::string_view to) {
     }
 }
 
-// Expand stock 512x512 square SVGs for tall 1:2 (steer-left, steer-right, gas) and 2:3 (brake)
-// buttons so the outer rounded pill/pedal stretches cleanly while inner icons stay un-distorted 1:1.
-// Custom user-supplied SVGs that already use a non-square viewBox are rendered untouched.
 void AdaptRectangularSvg(SvgIcon icon, std::string& svg) {
     if (svg.find("viewBox=\"0 0 512 512\"") == std::string::npos) return;
-
     if (icon == SvgIcon::SteerLeft || icon == SvgIcon::SteerRight) {
         ReplaceAll(svg, "viewBox=\"0 0 512 512\" width=\"512\" height=\"512\"",
                         "viewBox=\"0 0 512 1024\" width=\"512\" height=\"1024\"");
@@ -1131,7 +1396,6 @@ void AdaptRectangularSvg(SvgIcon icon, std::string& svg) {
 }
 
 bool ReadSvgFile(const char* skin_dir, const char* icon_name, std::string& out) {
-    // 1. User-configurable override on storage: <mc3dr>/skins/<skin>/<name>.svg
     const auto user_path = app::ExeDir() / "skins" / skin_dir / (std::string(icon_name) + ".svg");
     {
         std::ifstream f(user_path, std::ios::binary);
@@ -1140,7 +1404,6 @@ bool ReadSvgFile(const char* skin_dir, const char* icon_name, std::string& out) 
             if (!out.empty()) return true;
         }
     }
-    // 2. Bundled APK asset: assets/skins/mc3dr/<skin>/<name>.svg
     const std::string asset_path = std::string("skins/mc3dr/") + skin_dir + "/" + icon_name + ".svg";
     size_t sz = 0;
     void* data = SDL_LoadFile(asset_path.c_str(), &sz);
@@ -1164,31 +1427,34 @@ SvgIcon ActiveIconForButton(size_t i) {
     return b.icon;
 }
 
-ImU32 Fade(int r, int g, int b, int a) {
-    return IM_COL32(r, g, b, int(float(a) * g_opacity));
-}
-
-void CentredText(ImDrawList* dl, ImVec2 at, float size, ImU32 colour, const char* text) {
-    ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(size, FLT_MAX, 0, text);
-    dl->AddText(ImGui::GetFont(), size, ImVec2(at.x - ts.x / 2, at.y - ts.y / 2), colour, text);
-}
-
-void DrawEditorBar(ImDrawList* dl, float th) {
-    float h = Height();
-    for (int i = 0; i < kBarCount; i++) {
-        float r[4];
-        BarAt(0, 0, r, i);
-        bool done = i == kBarDone;
-        bool size = i == kBarSmaller || i == kBarBigger;
-        int alpha = (size && g_selected < 0) || (i == kBarHide && !Hideable(g_selected)) ? 90 : 240;
-        dl->AddRectFilled(ImVec2(r[0], r[1]), ImVec2(r[2], r[3]),
-                          done ? IM_COL32(150, 115, 45, 235) : IM_COL32(20, 18, 14, 225), h * 0.015f);
-        dl->AddRect(ImVec2(r[0], r[1]), ImVec2(r[2], r[3]), IM_COL32(220, 180, 100, alpha), h * 0.015f, 0, th * 0.7f);
-        CentredText(dl, ImVec2((r[0] + r[2]) / 2, (r[1] + r[3]) / 2), h * (size ? 0.056f : 0.038f),
-                    IM_COL32(255, 255, 255, alpha), BarLabel(i));
+void UpdateFmvHoldLocked(uint64_t now) {
+    const auto ctx = CurrentUiContext();
+    if (ctx != game::UiContext::FmvSkippable || g_editing) {
+        g_fmv_progress = 0.0f;
+        g_fmv_last_ms = now;
+        g_fmv_skip_fired = false;
+        return;
     }
-    CentredText(dl, ImVec2(Width() / 2, (kBarY + kBarH + 0.045f) * h), h * 0.033f, IM_COL32(255, 255, 255, 225),
-                "DRAG TO MOVE  |  PINCH OR -/+ TO RESIZE  |  TAP THEN HIDE/SHOW");
+    const uint64_t dt_ms = (g_fmv_last_ms != 0 && now >= g_fmv_last_ms) ? std::min<uint64_t>(now - g_fmv_last_ms, 100u) : 16u;
+    g_fmv_last_ms = now;
+
+    bool holding = false;
+    for (const Finger& f : g_fingers) {
+        if (f.role == Role::FmvHold) {
+            holding = true;
+            break;
+        }
+    }
+    if (holding) {
+        g_fmv_progress = std::min(1.0f, g_fmv_progress + float(dt_ms) / kFmvHoldSkipMs);
+        if (g_fmv_progress >= 1.0f && !g_fmv_skip_fired) {
+            g_fmv_skip_fired = true;
+            g_fmv_skip_pulse_until = now + kFmvSkipPulseMs;
+            LOGI("[OK] touch: FMV hold-to-skip triggered");
+        }
+    } else {
+        g_fmv_progress = std::max(0.0f, g_fmv_progress - float(dt_ms) / 220.0f);
+    }
 }
 
 }  // namespace
@@ -1198,38 +1464,35 @@ bool OnEvent(const SDL_Event& e) {
         case SDL_EVENT_KEY_DOWN:
         case SDL_EVENT_KEY_UP:
             KeyEvent(e.key);
-            return app::MenuOpen() ? false : true;
+            return true;
         case SDL_EVENT_TEXT_INPUT:
             for (const char* c = e.text.text; c && *c; c++)
                 if (uint8_t(*c) < 0x80 && *c >= ' ') input::OnChar(unsigned(*c));
-            return !app::MenuOpen();
+            return true;
         case SDL_EVENT_MOUSE_MOTION:
             if (e.motion.which == SDL_TOUCH_MOUSEID) return true;
             input::g_keyboard = true;
             input::g_touch = false;
-            if (input::Active() && input::Play()) {
-                AddLook(e.motion.xrel, e.motion.yrel);
-            }
-            return !app::MenuOpen();
+            if (input::Active() && input::Play()) AddLook(e.motion.xrel, e.motion.yrel);
+            return true;
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
         case SDL_EVENT_MOUSE_BUTTON_UP:
             if (e.button.which == SDL_TOUCH_MOUSEID) return true;
             if (int vk = input::VkOfButton(e.button.button)) input::g_down[size_t(vk)] = e.button.down;
             input::g_keyboard = true;
             input::g_touch = false;
-            return !app::MenuOpen();
+            return true;
         case SDL_EVENT_MOUSE_WHEEL:
             if (e.wheel.y != 0) {
                 int notch = e.wheel.y > 0 ? 1 : -1;
                 input::g_wheel_ms[notch < 0] = NowMs();
                 if (input::Active() && !input::Play() && !input::KeyCaptureUp()) input::g_wheel += notch;
             }
-            return !app::MenuOpen();
+            return true;
         case SDL_EVENT_FINGER_DOWN:
         case SDL_EVENT_FINGER_MOTION:
         case SDL_EVENT_FINGER_UP:
         case SDL_EVENT_FINGER_CANCELED: {
-            g_touch_ms = NowMs();
             float x = e.tfinger.x * Width(), y = e.tfinger.y * Height();
             std::lock_guard lock(g_lock);
             EnsureLayout();
@@ -1249,13 +1512,92 @@ bool OnEvent(const SDL_Event& e) {
     }
 }
 
+// Translate MC3D's live remapped (dev, key) binding directly into Xbox pad state (verified from x86_recomp.7.cpp)
+void ApplyFallbackPress(input::Pad& pad, int p) {
+    if (p == kSteerLeft) {
+        pad.lx = int16_t(-32767);
+    } else if (p == kSteerRight) {
+        pad.lx = int16_t(32767);
+    } else if (p >= 0 && p < kBit) {
+        pad.analog[p] = 0xFF;
+    } else if (p >= kBit) {
+        pad.buttons |= uint16_t(1u << (p - kBit));
+    }
+}
+
+void ApplyRemappedAction(input::Pad& pad, game::GameAction act, int dir_sign, int fallback_press) {
+    if (act >= game::GameAction::Count) {
+        ApplyFallbackPress(pad, fallback_press);
+        return;
+    }
+    const auto& slot = game::Telemetry().bindings[static_cast<size_t>(act)];
+    const uint32_t dev = slot.dev.load(std::memory_order_relaxed);
+    const uint32_t key = slot.key.load(std::memory_order_relaxed);
+
+    if (act == game::GameAction::SteerAxis) {
+        if (dir_sign == 0) return;
+        const int16_t val = (dir_sign < 0) ? int16_t(-32767) : int16_t(32767);
+        if (dev == 0x09u) {
+            if (key == 0x0000u) { pad.lx = val; return; }            // Left Analog X
+            if (key == 0x0002u) { pad.rx = val; return; }            // Right Analog X
+            if (key == 0x000Cu) {                                    // D-Pad Left / Right
+                pad.buttons |= uint16_t(dir_sign < 0 ? (1u << 2) : (1u << 3));
+                return;
+            }
+        }
+        pad.lx = val;
+        return;
+    }
+
+    if (dev == 0x06u && key != 0u) {
+        // MC3D internal gamepad button bitmask -> exact Xbox XINPUT_GAMEPAD mapping
+        if (key & 0x0001u) pad.analog[kAnalogWhite] = 0xFF;  // L2 -> White
+        if (key & 0x0002u) pad.analog[kAnalogBlack] = 0xFF;  // R2 -> Black
+        if (key & 0x0004u) pad.analog[kAnalogLT] = 0xFF;     // L1 -> LT
+        if (key & 0x0008u) pad.analog[kAnalogRT] = 0xFF;     // R1 -> RT
+        if (key & 0x0010u) pad.analog[kAnalogY] = 0xFF;      // Triangle -> Y
+        if (key & 0x0020u) pad.analog[kAnalogB] = 0xFF;      // Circle -> B
+        if (key & 0x0040u) pad.analog[kAnalogA] = 0xFF;      // XButton -> A
+        if (key & 0x0080u) pad.analog[kAnalogX] = 0xFF;      // Square -> X
+        if (key & 0x0100u) pad.buttons |= uint16_t(1u << 5); // Select -> Back
+        if (key & 0x0200u) pad.buttons |= uint16_t(1u << 6); // L3
+        if (key & 0x0400u) pad.buttons |= uint16_t(1u << 7); // R3
+        if (key & 0x0800u) pad.buttons |= uint16_t(1u << 4); // Start
+        if (key & 0x1000u) pad.buttons |= uint16_t(1u << 0); // D-Pad Up
+        if (key & 0x2000u) pad.buttons |= uint16_t(1u << 3); // D-Pad Right
+        if (key & 0x4000u) pad.buttons |= uint16_t(1u << 1); // D-Pad Down
+        if (key & 0x8000u) pad.buttons |= uint16_t(1u << 2); // D-Pad Left
+        return;
+    }
+    if (dev == 0x08u) {
+        if (key == 0x0008u) { pad.analog[kAnalogLT] = 0xFF; return; }
+        if (key == 0x0009u) { pad.analog[kAnalogRT] = 0xFF; return; }
+    }
+    if (dev == 0x09u) {
+        switch (key) {
+            case 0x0004u: pad.ly = int16_t(32767); return;   // L Analog Up
+            case 0x0005u: pad.ly = int16_t(-32767); return;  // L Analog Down
+            case 0x0006u: pad.lx = int16_t(-32767); return;  // L Analog Left
+            case 0x0007u: pad.lx = int16_t(32767); return;   // L Analog Right
+            case 0x0008u: pad.ry = int16_t(32767); return;   // R Analog Up
+            case 0x0009u: pad.ry = int16_t(-32767); return;  // R Analog Down
+            case 0x000Au: pad.rx = int16_t(-32767); return;  // R Analog Left
+            case 0x000Bu: pad.rx = int16_t(32767); return;   // R Analog Right
+            default: break;
+        }
+    }
+    ApplyFallbackPress(pad, fallback_press);
+}
+
 void Apply(int port, input::Pad& pad) {
     if (port != 0 || g_editing) return;
     std::lock_guard lock(g_lock);
-    Recount();
     const uint64_t now = NowMs();
+    UpdateFmvHoldLocked(now);
+    Recount();
     bool used = false;
     int steer = 0;
+    const auto ctx = CurrentUiContext();
 
     for (size_t i = 0; i < kButtonCount; i++) {
         if (!g_pressed[i]) continue;
@@ -1265,50 +1607,117 @@ void Apply(int port, input::Pad& pad) {
             steer -= 1;
         } else if (p == kSteerRight) {
             steer += 1;
-        } else if (p >= 0 && p < kBit) {
-            pad.analog[p] = 0xFF;
-        } else if (p >= kBit) {
-            pad.buttons |= uint16_t(1u << (p - kBit));
+        } else {
+            ApplyRemappedAction(pad, kButtons[i].action, 0, p);
         }
     }
 
     if (steer != 0) {
-        pad.lx = (steer < 0) ? int16_t(-32767) : int16_t(32767);
+        ApplyRemappedAction(pad, game::GameAction::SteerAxis, steer, steer < 0 ? kSteerLeft : kSteerRight);
     }
 
-    // Radio swipe (D-Pad Left/Right) & Garage vertical swipe (D-Pad Up/Down) pulses
+    // Swipe gestures: during Gameplay, Radio Left/Right follow remapped MUSIC_DOWN / MUSIC_UP!
     for (int bit = 0; bit < 4; ++bit) {
         if (now < g_pulse_until[bit]) {
-            pad.buttons |= uint16_t(1u << bit);
             used = true;
+            if (ctx == game::UiContext::Gameplay && bit == 2) {
+                ApplyRemappedAction(pad, game::GameAction::RadioPrev, 0, kBit + 2);
+            } else if (ctx == game::UiContext::Gameplay && bit == 3) {
+                ApplyRemappedAction(pad, game::GameAction::RadioNext, 0, kBit + 3);
+            } else {
+                pad.buttons |= uint16_t(1u << bit);
+            }
         }
+    }
+
+    // FMV hold-anywhere skip completed -> fire Start + A to skip movie cleanly
+    if (now < g_fmv_skip_pulse_until) {
+        pad.buttons |= uint16_t(1u << 4);  // Start
+        pad.analog[kAnalogA] = 0xFF;       // A
+        used = true;
     }
 
     if (now < g_back_until) {
         used = true;
-        if (IsMenuLike(CurrentUiContext())) pad.analog[kAnalogB] = 0xFF;
-        else pad.buttons |= uint16_t(1u << 4);  // Start (Pause)
+        if (IsMenuLike(ctx)) pad.analog[kAnalogB] = 0xFF;
+        else ApplyRemappedAction(pad, game::GameAction::Pause, 0, kBit + 4);
     }
 
     if (used) pad.connected = true;
 }
 
-bool Shown() { return !PadPlugged() || NowMs() - g_touch_ms < kShownMs; }
+bool Shown() {
+    std::lock_guard lock(g_lock);
+    return CurrentFadeAlphaLocked(NowMs()) > 0.005f;
+}
 
-void Draw() {
+void BuildOverlay(std::vector<Quad>& out) {
     std::lock_guard lock(g_lock);
     EnsureLayout();
-    const bool editing = g_editing;
-    if (!editing && (!game::Opt().touch_controls || !Shown())) return;
+    const uint64_t now = NowMs();
+    UpdateFmvHoldLocked(now);
 
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    const bool editing = g_editing;
+    const float fade_alpha = CurrentFadeAlphaLocked(now);
+    if (!editing && fade_alpha <= 0.004f) return;
+
     const float w = Width();
     const float h = Height();
     const float th = std::max(2.0f, h / 360.0f);
-    if (editing) dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), IM_COL32(0, 0, 0, 105));
-
     const uint32_t skin = std::min<uint32_t>(g_skin, kSkins - 1);
+    const bool atlas_ok = g_skin_ready.load(std::memory_order_relaxed);
 
+    // 1. Editor backdrop + alignment guides (zero ImGui!)
+    if (editing) {
+        EmitPanel(out, 0, 0, w, h, 0.03f, 0.04f, 0.06f, 0.56f, 0.0f);
+        // Subtle 25% / 50% / 75% screen alignment grid lines
+        for (float f : {0.25f, 0.50f, 0.75f}) {
+            EmitPanel(out, w * f - 0.5f, 0, w * f + 0.5f, h, 1.0f, 1.0f, 1.0f, 0.09f, 0.0f);
+            EmitPanel(out, 0, h * f - 0.5f, w, h * f + 0.5f, 1.0f, 1.0f, 1.0f, 0.09f, 0.0f);
+        }
+    }
+
+    // 2. FMV Skippable Cinema Mode: ONLY start.svg + animated circular hold-anywhere progress ring!
+    const auto ctx = CurrentUiContext();
+    if (!editing && ctx == game::UiContext::FmvSkippable) {
+        const float aspect = std::clamp(w / std::max(h, 1.0f), 1.33f, 2.55f);
+        const float r_share = 0.072f;
+        const float btn_r = r_share * h;
+        const float ring_r = btn_r * 1.24f;
+        const float cx = (1.0f - 0.045f - (r_share * 1.24f) / aspect) * w;
+        const float cy = (1.0f - 0.115f - r_share) * h;
+
+        const float prog = g_fmv_progress;
+        const float pulse = 1.0f + prog * 0.09f;
+        const float vis_a = fade_alpha * g_opacity;
+
+        // Circular progress ring (subtle track at rest, bright white/gold clockwise fill when holding anywhere!)
+        const float track_a = (prog > 0.01f ? 0.35f : 0.22f) * vis_a;
+        const float active_a = 0.98f * vis_a;
+        EmitRing(out, cx, cy, ring_r * pulse, std::max(4.0f, h * 0.0085f), prog,
+                 1.0f, 0.88f, 0.38f, active_a,
+                 1.0f, 1.0f, 1.0f, track_a);
+
+        // start.svg icon inside the ring
+        const AtlasUv& uv = g_atlas_uv[skin][static_cast<size_t>(SvgIcon::Start)];
+        const float ir = btn_r * 0.92f * pulse;
+        if (atlas_ok && uv.valid) {
+            out.push_back(Quad{cx - ir, cy - ir, cx + ir, cy + ir,
+                               uv.u0, uv.v0, uv.u1, uv.v1,
+                               1.0f, 1.0f, 1.0f, std::min(1.0f, vis_a * (prog > 0.01f ? 1.15f : 0.95f)),
+                               0, 0, 0, 0, 0, 0, 0u});
+        } else {
+            EmitPanel(out, cx - ir, cy - ir, cx + ir, cy + ir,
+                      0.10f, 0.10f, 0.14f, 0.65f * vis_a, ir, th, 1.0f, 1.0f, 1.0f, 0.85f * vis_a);
+        }
+
+        // Crisp "HOLD TO SKIP" label beneath ring
+        EmitTextCentered(out, cx, cy + ring_r + h * 0.032f, h * 0.022f,
+                         1.0f, 1.0f, 1.0f, 0.82f * vis_a, "HOLD TO SKIP");
+        return;
+    }
+
+    // 3. Draw active touch buttons (Gameplay, Main Menu, Garage, or Editor)
     for (size_t i = 0; i < kButtonCount; i++) {
         if (!ButtonShown(i)) continue;
         float x0, y0, x1, y1;
@@ -1320,7 +1729,7 @@ void Draw() {
 
         const bool hidden = g_layout[i].hidden;
         const bool on = !editing && g_pressed[i];
-        const int fade = hidden ? 40 : 100;
+        const float vis = (hidden ? 0.35f : 1.0f) * g_opacity * fade_alpha;
         const float press_scale = on ? 0.94f : 1.0f;
 
         const float dx0 = cx - bw * 0.5f * press_scale;
@@ -1331,63 +1740,92 @@ void Draw() {
         const SvgIcon icon = ActiveIconForButton(i);
         const AtlasUv& uv = g_atlas_uv[skin][static_cast<size_t>(icon)];
 
-        if (g_skin_texture && uv.valid) {
-            ImU32 tint;
+        if (atlas_ok && uv.valid) {
+            float tr = 1.0f, tg = 1.0f, tb = 1.0f, ta = std::min(1.0f, vis * (on ? 1.15f : 0.92f));
             if (kButtons[i].when == When::PlayTurbo && !editing) {
-                // Highlight ready Slipstream Turbo with warm electric cyan/gold tint
-                tint = on ? Fade(255, 240, 180, 255) : Fade(120, 235, 255, 245);
-            } else {
-                tint = Fade(255, 255, 255, on ? 255 : (225 * fade / 100));
+                tr = on ? 1.0f : 0.48f;
+                tg = on ? 0.94f : 0.92f;
+                tb = on ? 0.72f : 1.0f;
+                ta = std::min(1.0f, vis * 1.10f);
             }
-            dl->AddImage(g_skin_texture, ImVec2(dx0, dy0), ImVec2(dx1, dy1),
-                         ImVec2(uv.u0, uv.v0), ImVec2(uv.u1, uv.v1), tint);
+            out.push_back(Quad{dx0, dy0, dx1, dy1, uv.u0, uv.v0, uv.u1, uv.v1,
+                               tr, tg, tb, ta, 0, 0, 0, 0, 0, 0, 0u});
         } else {
-            // Crisp fallback vector pill if SVG atlas unavailable
-            const float rounding = std::min(bw, bh) * 0.25f;
-            dl->AddRectFilled(ImVec2(dx0, dy0), ImVec2(dx1, dy1),
-                              on ? Fade(255, 255, 255, 95) : Fade(15, 15, 20, 120 * fade / 100), rounding);
-            dl->AddRect(ImVec2(dx0, dy0), ImVec2(dx1, dy1),
-                        Fade(255, 255, 255, 190 * fade / 100), rounding, 0, th);
-            CentredText(dl, ImVec2(cx, cy), std::min(bw, bh) * 0.24f,
-                        Fade(255, 255, 255, 220 * fade / 100), kButtons[i].label);
+            EmitPanel(out, dx0, dy0, dx1, dy1,
+                      on ? 0.9f : 0.08f, on ? 0.9f : 0.09f, on ? 0.95f : 0.12f, (on ? 0.42f : 0.55f) * vis,
+                      std::min(bw, bh) * 0.25f, th, 1.0f, 1.0f, 1.0f, 0.8f * vis);
         }
 
         if (editing) {
             if (int(i) == g_selected) {
-                dl->AddRect(ImVec2(x0 - th * 2, y0 - th * 2), ImVec2(x1 + th * 2, y1 + th * 2),
-                            IM_COL32(255, 200, 60, 255), std::min(bw, bh) * 0.22f, 0, th * 1.5f);
+                EmitPanel(out, x0 - th * 2.5f, y0 - th * 2.5f, x1 + th * 2.5f, y1 + th * 2.5f,
+                          1.0f, 0.80f, 0.25f, 0.14f, std::min(bw, bh) * 0.22f,
+                          th * 1.6f, 1.0f, 0.80f, 0.25f, 0.98f);
+            } else if (hidden) {
+                EmitPanel(out, x0, y0, x1, y1,
+                          0.95f, 0.25f, 0.20f, 0.18f, std::min(bw, bh) * 0.22f,
+                          th, 0.95f, 0.30f, 0.25f, 0.85f);
             }
-            if (hidden) {
-                dl->AddLine(ImVec2(x0 + bw * 0.2f, y0 + bh * 0.2f), ImVec2(x1 - bw * 0.2f, y1 - bh * 0.2f),
-                            IM_COL32(255, 80, 60, 220), th * 1.2f);
-                dl->AddLine(ImVec2(x0 + bw * 0.2f, y1 - bh * 0.2f), ImVec2(x1 - bw * 0.2f, y0 + bh * 0.2f),
-                            IM_COL32(255, 80, 60, 220), th * 1.2f);
-            }
-            CentredText(dl, ImVec2(cx, y1 + h * 0.020f), h * 0.022f, IM_COL32(255, 255, 255, 210), kButtons[i].label);
+            EmitTextCentered(out, cx, y1 + h * 0.022f, h * 0.020f,
+                             1.0f, 1.0f, 1.0f, hidden ? 0.55f : 0.90f, kButtons[i].label);
         }
     }
 
-    // Subtle fading Radio swipe toast at bottom-center during gameplay
-    const uint64_t now = NowMs();
-    if (!editing && CurrentUiContext() == game::UiContext::Gameplay && now < g_radio_toast_until) {
+    // 4. Radio swipe subtle toast during gameplay
+    if (!editing && ctx == game::UiContext::Gameplay && now < g_radio_toast_until) {
         const float remain = float(g_radio_toast_until - now) / float(kToastMs);
-        const int alpha = int(std::clamp(remain * 1.5f, 0.0f, 1.0f) * 220.0f);
+        const float alpha = std::clamp(remain * 1.5f, 0.0f, 1.0f) * fade_alpha;
         const char* msg = (g_radio_toast_dir > 0) ? "RADIO  >" : "<  RADIO";
         const float ty = h * 0.88f;
-        const float fs = h * 0.036f;
-        const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0, msg);
-        dl->AddRectFilled(ImVec2(w * 0.5f - ts.x * 0.7f, ty - ts.y * 0.7f),
-                          ImVec2(w * 0.5f + ts.x * 0.7f, ty + ts.y * 0.7f),
-                          IM_COL32(15, 15, 20, alpha * 2 / 3), h * 0.018f);
-        CentredText(dl, ImVec2(w * 0.5f, ty), fs, IM_COL32(255, 255, 255, alpha), msg);
+        const float pw = h * 0.24f;
+        const float ph = h * 0.060f;
+        EmitPanel(out, w * 0.5f - pw * 0.5f, ty - ph * 0.5f, w * 0.5f + pw * 0.5f, ty + ph * 0.5f,
+                  0.06f, 0.07f, 0.10f, 0.68f * alpha, ph * 0.45f,
+                  th * 0.7f, 1.0f, 1.0f, 1.0f, 0.35f * alpha);
+        EmitTextCentered(out, w * 0.5f, ty, h * 0.028f, 1.0f, 1.0f, 1.0f, 0.95f * alpha, msg);
     }
 
+    // 5. Custom Native Vulkan Editor Floating Toolbar (100% Zero ImGui!)
     if (editing) {
-        DrawEditorBar(dl, th);
+        for (int i = 0; i < kBarCount; i++) {
+            float r[4];
+            BarAt(0, 0, r, i);
+            const bool done = (i == kBarDone);
+            const bool tab = (i == kBarTab);
+            const bool size_btn = (i == kBarSmaller || i == kBarBigger);
+            const bool disabled = (size_btn && g_selected < 0) || (i == kBarHide && !Hideable(g_selected));
+            const float a = disabled ? 0.42f : 0.95f;
+
+            float fr = 0.09f, fg = 0.10f, fb = 0.13f, fa = 0.90f;
+            float br = 0.75f, bg = 0.78f, bb = 0.85f, ba = 0.55f * a;
+            if (done) {
+                fr = 0.78f; fg = 0.56f; fb = 0.16f; fa = 0.95f;
+                br = 1.0f;  bg = 0.84f; bb = 0.45f; ba = 0.95f;
+            } else if (tab) {
+                fr = 0.14f; fg = 0.36f; fb = 0.58f; fa = 0.92f;
+                br = 0.45f; bg = 0.78f; bb = 1.0f;  ba = 0.90f;
+            }
+
+            EmitPanel(out, r[0], r[1], r[2], r[3], fr, fg, fb, fa, h * 0.018f, th * 0.9f, br, bg, bb, ba);
+            EmitTextCentered(out, (r[0] + r[2]) * 0.5f, (r[1] + r[3]) * 0.5f,
+                             h * (size_btn ? 0.040f : 0.026f), 1.0f, 1.0f, 1.0f, a, BarLabel(i));
+        }
+
+        // Clean status / hint pill beneath toolbar
+        char info[96];
+        if (g_selected >= 0 && size_t(g_selected) < kButtonCount) {
+            const int pct = int(std::lround(g_layout[size_t(g_selected)].r * 200.0f));
+            std::snprintf(info, sizeof(info), "%s  -  HEIGHT %d%%  -  DRAG OR PINCH",
+                          kButtons[size_t(g_selected)].label, pct);
+        } else {
+            std::snprintf(info, sizeof(info), "DRAG TO MOVE  -  PINCH OR +/- TO RESIZE  -  TAP %s TO SWITCH",
+                          g_edit_menu_tab ? "MENU" : "PLAY");
+        }
+        const float iy = (kBarY + kBarH + 0.042f) * h;
+        EmitTextCentered(out, w * 0.5f, iy, h * 0.021f, 0.95f, 0.95f, 0.98f, 0.88f, info);
     }
 }
 
-// Rasterize all 3 SVG skins (outline, filled-white, filled-dark) into one Vulkan RGBA atlas using LunaSVG
 bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& out_w, uint32_t& out_h) {
     constexpr uint32_t kAtlasW = 2048;
     constexpr uint32_t kAtlasH = 2048;
@@ -1426,7 +1864,7 @@ bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& out_w, uint32_t& out_h) {
                 cur_y += row_h + kPad;
                 row_h = 0;
             }
-            if (cur_y + spec.cell_h + kPad > kAtlasH) {
+            if (cur_y + spec.cell_h + kPad > 1900u) {
                 LOGE("touch: SVG atlas overflow at %s/%s", kSkinDirs[s], spec.file);
                 break;
             }
@@ -1451,19 +1889,22 @@ bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& out_w, uint32_t& out_h) {
         }
     }
 
+    // Bake crisp 5x7 UI font into bottom strip (y = 1920..2000) for zero-ImGui editor & toasts
+    BakeFontIntoAtlas(rgba, kAtlasW, kAtlasH, 1920u);
+
     out_w = kAtlasW;
     out_h = kAtlasH;
-    LOGI("[OK] touch: rasterized %d SVG button icons across %u skins into %ux%u atlas",
-         loaded_count, kSkins, out_w, out_h);
+    LOGI("[OK] touch: rasterized %d SVG icons + UI font into %ux%u native Vulkan atlas",
+         loaded_count, out_w, out_h);
     return loaded_count > 0;
 }
 
-void SetSkinTexture(uint64_t texture) {
-    g_skin_texture = reinterpret_cast<ImTextureID>(uintptr_t(texture));
+void SetSkinReady(bool ready) {
+    g_skin_ready.store(ready, std::memory_order_relaxed);
 }
 
 // ============================================================================
-// Options API (called from src/common/menu.cpp Touchscreen Options)
+// Options API (src/common/menu.cpp Touchscreen Options)
 // ============================================================================
 namespace {
 uint32_t Percent(float f) { return uint32_t(std::lround(f * 100.0f)); }
@@ -1525,7 +1966,7 @@ void EditLayout() {
 void ResetLayout() {
     std::lock_guard lock(g_lock);
     EnsureLayout();
-    g_layout = kDefaultLayout;
+    g_layout = ComputeDefaultLayout(Width(), Height());
     g_opacity = 0.85f;
     g_scale = 1.0f;
     SaveLayout();
@@ -1542,7 +1983,12 @@ void AddLook(float dx, float dy) {
     input::g_dy += iy;
 }
 
-void PadUsed() { input::g_touch = false; }
+void PadUsed() {
+    input::g_touch = false;
+    std::lock_guard lock(g_lock);
+    StartFadeLocked(0.0f, NowMs());  // Smooth 200ms fade-out when external controller pressed!
+}
+
 bool LookActive() { return !g_editing && input::Active() && input::Play() && !IsMenuLike(CurrentUiContext()); }
 
 bool Firing() {
@@ -1587,9 +2033,7 @@ std::string TouchName(int button) {
     for (size_t i = 0; i < touch::kButtonCount; i++) {
         const touch::Button& b = touch::kButtons[i];
         if (b.press != button || touch::g_layout[i].hidden) continue;
-        std::string name = b.label;
-        std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return char(std::toupper(c)); });
-        return name;
+        return b.label;
     }
     return {};
 }

@@ -1,5 +1,6 @@
 #include "game/aspect_fix.h"
 #include "game/guest_mem_safe.h"
+#include "game/touch_context.h"
 #include "game/ui_aspect_rules.h"
 
 #include <cstdint>
@@ -40,15 +41,17 @@ extern "C" void sub_002D4D30(X86Context& ctx, uint8_t* base) {
     __imp__sub_002D4D30(ctx, base);
 }
 
-// 5. Bink FMV renderer (intro, story, tutorial, reward videos) -> native pass-through.
+// 5. Bink FMV renderer (intro, story, tutorial, reward videos) -> native pass-through + FMV active heartbeat.
 extern "C" void __imp__sub_0015AF30(X86Context& ctx, uint8_t* base);
 extern "C" void sub_0015AF30(X86Context& ctx, uint8_t* base) {
+    game::NotifyFmvFrame();
     game::aspect_fix::ScopedFullScreenBypass guard;
     __imp__sub_0015AF30(ctx, base);
 }
 
 extern "C" void __imp__sub_00363950(X86Context& ctx, uint8_t* base);
 extern "C" void sub_00363950(X86Context& ctx, uint8_t* base) {
+    game::NotifyFmvFrame();
     game::aspect_fix::ScopedFullScreenBypass guard;
     __imp__sub_00363950(ctx, base);
 }

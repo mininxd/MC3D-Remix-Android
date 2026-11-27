@@ -24,8 +24,6 @@
 #include <vector>
 
 #include <dxgiformat.h>
-#include <imgui.h>
-#include <backends/imgui_impl_vulkan.h>
 
 #include "app/app.h"
 #include "common/aspect.h"
@@ -89,6 +87,71 @@ float4 psmain(O i) : SV_Target {
     c.rgb *= opts.w;
     if (opts.x > 0) c.rgb = float3(lut.Sample(ps, float2(c.r, 0.5)).r, lut.Sample(ps, float2(c.g, 0.5)).g, lut.Sample(ps, float2(c.b, 0.5)).b);
     return float4(c.rgb, opts.y > 0 ? c.a : 1);
+}
+)";
+
+// Native 2D overlay shader (zero ImGui): textured SVG/font atlas quads + SDF rounded panels/borders
+const char* kOverlayHlsl = R"(
+cbuffer B : register(b1) {
+    float4 uvrect;
+    float4 tint;
+    float4 geom;
+    float4 bcol;
+    float4 mode;
+};
+Texture2D img : register(t0);
+SamplerState ls : register(s0);
+struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; float2 loc : TEXCOORD1; };
+O vs(uint id : SV_VertexID) {
+    float tx = (id == 1 || id == 3 || id == 4) ? 1.0 : 0.0;
+    float ty = (id == 2 || id == 4 || id == 5) ? 1.0 : 0.0;
+    float2 t = float2(tx, ty);
+    O o;
+    o.p = float4(t * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+    o.uv = uvrect.xy + t * uvrect.zw;
+    o.loc = t;
+    return o;
+}
+float4 psmain(O i) : SV_Target {
+    if (mode.x < 0.5) {
+        float4 c = img.SampleLevel(ls, i.uv, 0) * tint;
+        return float4(c.rgb * c.a, c.a);
+    }
+    if (mode.x > 1.5) {
+        // mode 2: Anti-aliased circular progress ring (clockwise from 12 o'clock)
+        // geom.xy = size px, geom.z = progress (0..1), geom.w = stroke thickness px
+        float2 p = (i.loc - 0.5) * geom.xy;
+        float outerR = min(geom.x, geom.y) * 0.5 - 1.5;
+        float innerR = max(outerR - max(geom.w, 2.0), 1.0);
+        float dist = length(p);
+        float ringMask = saturate(0.5 - (dist - outerR)) * saturate(0.5 - (innerR - dist));
+        float ang = atan2(p.x, -p.y);
+        float frac = (ang < 0.0) ? (ang * 0.15915494 + 1.0) : (ang * 0.15915494);
+        float prog = saturate(geom.z);
+        float fillMask = (prog >= 0.999) ? 1.0 : ((prog <= 0.001) ? 0.0 : saturate((prog - frac) * 90.0));
+        float fa = tint.a * ringMask * fillMask;
+        float ba = bcol.a * ringMask * (1.0 - fillMask);
+        float outA = fa + ba;
+        float3 outRgb = (outA > 1e-4) ? ((tint.rgb * fa + bcol.rgb * ba) / outA) : float3(0.0, 0.0, 0.0);
+        return float4(outRgb * outA, outA);
+    }
+    float2 halfSz = max(geom.xy * 0.5, float2(1.0, 1.0));
+    float2 p = (i.loc - 0.5) * geom.xy;
+    float r = min(geom.z, min(halfSz.x, halfSz.y));
+    float2 q = abs(p) - (halfSz - float2(r, r));
+    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+    float fillMask = saturate(0.5 - d);
+    float4 outCol = float4(tint.rgb, tint.a * fillMask);
+    if (geom.w > 0.01) {
+        float innerMask = saturate(0.5 - (d + geom.w));
+        float borderMask = saturate(fillMask - innerMask);
+        float fa = tint.a * innerMask;
+        float ba = bcol.a * borderMask;
+        float outA = ba + fa * (1.0 - ba);
+        float3 outRgb = (outA > 1e-4) ? ((bcol.rgb * ba + tint.rgb * fa * (1.0 - ba)) / outA) : float3(0.0, 0.0, 0.0);
+        outCol = float4(outRgb, outA);
+    }
+    return float4(outCol.rgb * outCol.a, outCol.a);
 }
 )";
 
@@ -1338,7 +1401,6 @@ private:
     bool CreateLayouts();
     bool CreateFrames();
     bool CreateFixedImages();
-    bool InitUi();
 
     // memory and objects
     bool CreateImage(Image& im, VkFormat fmt, uint32_t w, uint32_t h, uint32_t d, uint32_t layers, uint32_t levels,
@@ -1544,8 +1606,6 @@ private:
     Image lut_;
     Image dummy_[3];  // 2D, 3D, cube
     VkSampler linear_ = VK_NULL_HANDLE, point_ = VK_NULL_HANDLE;
-    VkDescriptorPool ui_pool_ = VK_NULL_HANDLE;
-    bool ui_ = false;
     uint8_t ramp_[768] = {};
     bool ramp_dirty_ = false;
     Image skin_;  // the touch controls' button skins (touch.cpp), made once
@@ -1585,7 +1645,6 @@ bool VulkanBackend::Init(uint32_t width, uint32_t height) {
     alloc_.Init(pd_, dev_);
     if (!CreateLayouts() || !CreateFrames() || !CreateSwapchain() || !CreateFixedImages()) return false;
     Begin();
-    ui_ = InitUi();
     scale_ = app::RenderScale(guest_h_);
     LOGI("vulkan: %ux%u guest, %ux%u screen, render scale %.3f", width, height, swap_extent_.width,
          swap_extent_.height, scale_);
@@ -1971,35 +2030,6 @@ bool VulkanBackend::CreateFixedImages() {
     vkEndCommandBuffer(Cb());
     vkResetCommandPool(dev_, CurrentFrame().pool, 0);
     return true;
-}
-
-bool VulkanBackend::InitUi() {
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16};
-    VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    pi.maxSets = 16;
-    pi.poolSizeCount = 1;
-    pi.pPoolSizes = &ps;
-    if (vkCreateDescriptorPool(dev_, &pi, nullptr, &ui_pool_) != VK_SUCCESS) return false;
-    std::lock_guard lock(app::UiLock());
-    if (!ImGui::GetCurrentContext()) return false;
-    ImGui_ImplVulkan_InitInfo ii{};
-    ii.Instance = instance_;
-    ii.PhysicalDevice = pd_;
-    ii.Device = dev_;
-    ii.QueueFamily = qfam_;
-    ii.Queue = queue_;
-    ii.DescriptorPool = ui_pool_;
-    ii.MinImageCount = 2;
-    ii.ImageCount = uint32_t(std::max<size_t>(swap_images_.size(), 2));
-    ii.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
-    ii.UseDynamicRendering = dynamic_;
-    ii.PipelineRenderingCreateInfo = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR};
-    ii.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
-    ii.PipelineRenderingCreateInfo.pColorAttachmentFormats = &swap_fmt_;
-    if (!dynamic_) ii.RenderPass = Pass(swap_fmt_, VK_FORMAT_UNDEFINED);
-    ImGui::GetIO().BackendRendererName = "vulkan";
-    return ImGui_ImplVulkan_Init(&ii);
 }
 
 // ---- memory and objects
@@ -4065,15 +4095,39 @@ void VulkanBackend::DrawFrame(Target* t, uint32_t index) {
 }
 
 void VulkanBackend::RenderUi() {
-    if (!ui_) return;
-    std::lock_guard lock(app::UiLock());
-    ImGui_ImplVulkan_NewFrame();
-    ui::NewFrame(float(swap_extent_.width), float(swap_extent_.height));
-    ImGui::NewFrame();
     if (app::kGame.ui) app::kGame.ui(fps_);
-    touch::Draw();
-    ImGui::Render();
-    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), Cb());
+    static std::vector<touch::Quad> quads;
+    quads.clear();
+    touch::BuildOverlay(quads);
+    if (quads.empty()) return;
+
+    VkPipeline pipe = FullScreenPipeline(kOverlayHlsl, "psmain", swap_fmt_, VK_FORMAT_UNDEFINED, true);
+    if (!pipe) return;
+    VkImageView atlas_view = skin_.view ? skin_.view : dummy_[0].view;
+    const VkImageView views[4] = {atlas_view, dummy_[0].view, VK_NULL_HANDLE, VK_NULL_HANDLE};
+    const VkSampler samplers[4] = {linear_, point_, point_, point_};
+    VkDescriptorSet set = Set(views, samplers);
+
+    VkCommandBuffer cb = Cb();
+    BindPipeline(pipe);
+    SetScissor(0, 0, int32_t(swap_extent_.width), int32_t(swap_extent_.height));
+    for (const touch::Quad& q : quads) {
+        const float qw = q.x1 - q.x0;
+        const float qh = q.y1 - q.y0;
+        if (qw <= 0.5f || qh <= 0.5f) continue;
+        float c[20] = {
+            q.u0, q.v0, q.u1 - q.u0, q.v1 - q.v0,
+            q.r, q.g, q.b, q.a,
+            qw, qh, q.radius_px, q.border_px,
+            q.br, q.bg, q.bb, q.ba,
+            float(q.mode), 0.0f, 0.0f, 0.0f,
+        };
+        Alloc cbuf = Constants(c, sizeof(c));
+        if (!cbuf.cpu) break;
+        BindSet(set, cbuf.off, cbuf.off);
+        SetViewport(q.x0, q.y0, qw, qh);
+        vkCmdDraw(cb, 6, 1, 0, 0);
+    }
 }
 
 void VulkanBackend::UploadGammaRamp() {
@@ -4095,12 +4149,12 @@ void VulkanBackend::UploadGammaRamp() {
     Transition(lut_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
-// the touch controls' skins as an ImGui texture; without them the controls keep their drawn icons
+// Rasterized SVG button skins + built-in crisp UI font uploaded directly as a native Vulkan texture
 void VulkanBackend::UploadSkin() {
     skin_tried_ = true;
     std::vector<uint8_t> rgba;
     uint32_t w = 0, h = 0;
-    if (!ui_ || !touch::LoadSkin(rgba, w, h)) return;
+    if (!touch::LoadSkin(rgba, w, h)) return;
     constexpr VkImageUsageFlags kSampled = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (!CreateImage(skin_, VK_FORMAT_R8G8B8A8_UNORM, w, h, 1, 1, 1, kSampled, VK_IMAGE_VIEW_TYPE_2D)) return;
     Alloc a = Upload(rgba.size(), 16);
@@ -4113,9 +4167,7 @@ void VulkanBackend::UploadSkin() {
     VkBufferImageCopy c{a.off, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {w, h, 1}};
     vkCmdCopyBufferToImage(Cb(), a.buf, skin_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
     Transition(skin_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    std::lock_guard lock(app::UiLock());
-    VkDescriptorSet set = ImGui_ImplVulkan_AddTexture(linear_, skin_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    touch::SetSkinTexture(uint64_t(reinterpret_cast<uintptr_t>(set)));
+    touch::SetSkinReady(true);
 }
 
 void VulkanBackend::ReleaseOldTextures() {

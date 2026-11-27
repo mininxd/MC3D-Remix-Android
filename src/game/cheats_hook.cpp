@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -684,8 +685,17 @@ void RunWithZeroCost(X86Context& ctx, uint8_t* base, Fn orig_fn) {
 
 }  // namespace
 
+uint64_t SteadyNowMs() {
+    auto since = std::chrono::steady_clock::now().time_since_epoch();
+    return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(since).count()) + 1u;
+}
+
 void UpdateTouchTelemetry() {
     auto& tel = game::Telemetry();
+
+    const uint64_t now_ms = SteadyNowMs();
+    const uint64_t last_fmv = tel.fmv_frame_ms.load(std::memory_order_relaxed);
+    const bool fmv_active = (last_fmv != 0u) && (now_ms >= last_fmv) && ((now_ms - last_fmv) < 280u);
 
     const uint32_t state_mgr = safe_mem::Read32(0x00557ED0u, 0u);
     const uint32_t app_state = state_mgr ? safe_mem::Read32(state_mgr + 0x04u, 0u) : 0u;
@@ -698,17 +708,23 @@ void UpdateTouchTelemetry() {
     const uint32_t car_mgr = safe_mem::Read32(0x00558814u, 0u);
     const uint32_t player_car = car_mgr ? safe_mem::Read32(car_mgr + 0x08u, 0u) : 0u;
 
-    UiContext ctx = UiContext::MainMenu;
-    if (app_state == 0x03u) {
+    UiContext ctx = UiContext::Loading;
+    if (fmv_active || app_state == 0x04u) {
+        ctx = tel.fmv_unskippable.load(std::memory_order_relaxed)
+                  ? UiContext::FmvUnskippable
+                  : UiContext::FmvSkippable;
+    } else if (app_state == 0x03u) {
         ctx = UiContext::Garage;
-    } else if (app_state == 0x06u) {
-        ctx = UiContext::Loading;
+    } else if (app_state == 0x05u || app_state == 0x07u) {
+        // Frontend / Title / Profile Select / Main Menu / Submenus
+        ctx = UiContext::MainMenu;
     } else if (app_state == 0x02u) {
         if (menu_visible) ctx = UiContext::MainMenu;
         else if (player_car != 0u) ctx = UiContext::Gameplay;
         else ctx = UiContext::Loading;
     } else {
-        ctx = UiContext::MainMenu;
+        // Boot / idle / loading transitions (state 0, 1, 6): hide all controls
+        ctx = UiContext::Loading;
     }
     tel.ui_context.store(static_cast<uint8_t>(ctx), std::memory_order_relaxed);
 
@@ -767,6 +783,46 @@ void UpdateTouchTelemetry() {
     tel.special_ready.store(special_ready, std::memory_order_relaxed);
     tel.special_type.store(special_type, std::memory_order_relaxed);
     tel.speed_kmh.store(speed_kmh, std::memory_order_relaxed);
+
+    // Sync active in-game Controller Configuration / Custom Remap table so remapped controls
+    // automatically mirror onto touch buttons (sub_002693D0 -> [profile_mgr + 0x114 + 0x18], table @ 0x00558848).
+    const uint32_t profile_mgr = safe_mem::Read32(0x0053F2E0u, 0u);
+    if (profile_mgr != 0u) {
+        const uint32_t config_idx = safe_mem::Read32(profile_mgr + 0x12Cu, 0xFFFFFFFFu);
+        if (config_idx < 16u) {
+            const uint32_t cfg_base = 0x00558848u + config_idx * 0x140u;
+            static constexpr uint32_t kMc3dActionId[static_cast<size_t>(GameAction::Count)] = {
+                0x00u,  // SteerAxis
+                0x02u,  // Gas
+                0x03u,  // Brake
+                0x07u,  // Handbrake
+                0x09u,  // Nitro
+                0x0Au,  // LookBack
+                0x0Bu,  // Camera (CAM_UP)
+                0x0Du,  // Map
+                0x10u,  // FlashLights (HEADLIGHTS)
+                0x12u,  // Pause
+                0x14u,  // RadioNext (MUSIC_UP)
+                0x15u,  // RadioPrev (MUSIC_DOWN)
+                0x23u,  // Special (IN_ZONE)
+            };
+            for (size_t i = 0; i < static_cast<size_t>(GameAction::Count); ++i) {
+                uint32_t aid = kMc3dActionId[i];
+                uint32_t dev = safe_mem::Read32(cfg_base + aid * 8u, 0u);
+                uint32_t key = safe_mem::Read32(cfg_base + aid * 8u + 4u, 0u);
+                if (i == static_cast<size_t>(GameAction::Gas) && (dev == 0u || config_idx == 9u)) {
+                    const uint32_t alt_dev = safe_mem::Read32(cfg_base + 0x04u * 8u, 0u);
+                    const uint32_t alt_key = safe_mem::Read32(cfg_base + 0x04u * 8u + 4u, 0u);
+                    if (alt_dev != 0u) {
+                        dev = alt_dev;
+                        key = alt_key;
+                    }
+                }
+                tel.bindings[i].dev.store(dev, std::memory_order_relaxed);
+                tel.bindings[i].key.store(key, std::memory_order_relaxed);
+            }
+        }
+    }
 }
 
 void OnFrameTick() {
@@ -862,6 +918,30 @@ const char* GetCheatMenuLabel(CheatId id) {
 }
 
 }  // namespace game::cheats
+
+namespace game {
+
+void NotifyFmvOpen(const char* raw_name) {
+    auto& tel = Telemetry();
+    std::string name = raw_name ? raw_name : "";
+    for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const bool unskippable =
+        name.find("rockstar") != std::string::npos ||
+        name.find("sdlogo") != std::string::npos ||
+        name.find("sandiego") != std::string::npos ||
+        name.find("legal") != std::string::npos ||
+        name.find("esrb") != std::string::npos ||
+        name.find("rsg") != std::string::npos;
+    tel.fmv_unskippable.store(unskippable, std::memory_order_relaxed);
+    tel.fmv_frame_ms.store(cheats::SteadyNowMs(), std::memory_order_relaxed);
+    LOGI("[OK] fmv: opened '%s' (%s)", name.c_str(), unskippable ? "unskippable-hide-all" : "skippable-hold-start");
+}
+
+void NotifyFmvFrame() {
+    Telemetry().fmv_frame_ms.store(cheats::SteadyNowMs(), std::memory_order_relaxed);
+}
+
+}  // namespace game
 
 // Active savegame name setter: __thiscall void sub_000197C0(const char* name) [ret 0x04].
 // Immediately sync saves_cheat.db whenever a savefile is loaded or saved.

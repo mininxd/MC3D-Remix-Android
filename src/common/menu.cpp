@@ -13,7 +13,6 @@
 #include <vector>
 
 #include <SDL3/SDL.h>
-#include <imgui.h>
 
 #include "app/app.h"
 #include "audio/output.h"
@@ -22,7 +21,6 @@
 #include "common/mouse_keyboard.h"
 #include "common/options.h"
 #include "common/translations.h"
-#include "game/cheats_hook.h"
 
 // native/gyro.cpp: aiming by turning the phone
 namespace gyro {
@@ -150,14 +148,13 @@ void Changed() {
     Save();
 }
 
-enum RowId { kRenderResolution, kMaxFps, kVsync, kFpsCounter, kAniso, kReloadBlur, kSkipIntros, kSensitivity,
+enum RowId { kRenderResolution, kMaxFps, kVsync, kFpsCounter, kAniso, kReloadBlur, kSensitivity,
              kInvertMouse, kWalkSpeed, kFov, kViewmodelFov, kHoldAim, kDrawDistance, kAudioOutput, kLanguage,
              kFmvScale, kGyro, kGyroSensitivity, kTouchLayout, kTouchOpacity, kTouchSize, kTouchEdit,
              kCheckUpdates, kTouchSensitivity, kLeftDeadzone, kRightDeadzone, kLeftSensitivity, kRightSensitivity,
              kScreenFilter, kGyroInvertX, kGyroInvertY, kTouchSkin, kCredit, kBloom,
              kFog, kAntiAliasing, kMotionBlur, kReflections, kTouchStick, kDynamicRes, kDynamicTarget, kDynamicMin,
-             kDynamicMax, kDynamicHold, kAutoUpdate, kDebugLogging, kBackupSaves, kRestoreSaves,
-             kTouchControls, kTouchReset };
+             kDynamicMax, kDynamicHold, kAutoUpdate, kTouchReset };
 
 using rows::Kind;
 using rows::Row;
@@ -169,9 +166,6 @@ constexpr Row kDisplayRows[] = {
     {Kind::Value, kMaxFps, "Max FPS"},
     {Kind::Value, kScreenFilter, "Screen Filter"},
     {Kind::Value, kVsync, "VSync"},
-    {Kind::Value, kSkipIntros, "Skip Intros"},
-    {Kind::Action, kBackupSaves, "Backup Saves"},
-    {Kind::Action, kRestoreSaves, "Restore Saves"},
 };
 
 // native Quality Options rows
@@ -181,12 +175,10 @@ constexpr Row kQualityRows[] = {
     {Kind::Value, kMotionBlur, "Motion Blur"},
     {Kind::Value, kReflections, "Reflections"},
     {Kind::Value, kAniso, "Anisotropic Filtering"},
-    {Kind::Value, kDebugLogging, "Debug Logging"},
 };
 
-// native Touchscreen Options rows
+// native Touchscreen Options rows (visibility is dynamic: 200ms auto fade-out on controller / fade-in on touch)
 constexpr Row kTouchRows[] = {
-    {Kind::Value, kTouchControls, "Touch Controls"},
     {Kind::Value, kTouchSkin, "Button Style"},
     {Kind::Value, kTouchOpacity, "Controls Opacity"},
     {Kind::Value, kTouchSize, "Controls Size"},
@@ -205,7 +197,6 @@ constexpr Row kControllerRows[] = {
 // LANGUAGE always shows: Indonesian is there whatever the disc
 constexpr Row kGeneralRows[] = {
     {Kind::Value, kLanguage, "LANGUAGE"},
-    {Kind::Value, kSkipIntros, "SKIP INTROS"},
     {Kind::Value, kAudioOutput, "AUDIO OUTPUT"},
     {Kind::Heading, -1, "UPDATES"},
     {Kind::Value, kCheckUpdates, "CHECK FOR UPDATES"},
@@ -274,9 +265,6 @@ bool* ToggleFlag(Settings& s, int id) {
         case kReloadBlur: return &o.reload_blur;
         case kBloom: return &o.bloom;
         case kFog: return &o.fog;
-        case kSkipIntros: return &o.skip_intros;
-        case kDebugLogging: return &o.debug_logging;
-        case kTouchControls: return &o.touch_controls;
         case kInvertMouse: return &o.invert_mouse;
         case kHoldAim: return &o.hold_aim;
         case kDynamicRes: return &o.dynamic_resolution;
@@ -521,81 +509,6 @@ void StepInputRow(int id, int step, char (&text)[64]) {
             if (step) host::SetStartupCheck(!host::StartupCheck());
             std::snprintf(text, sizeof(text), "%s", OnOff(host::StartupCheck()));
             break;
-        case kBackupSaves: {
-            static std::string s_backup_status;
-            const auto src_dir = ExeDir() / "hdd" / "UDATA" / "54540079";
-            const auto bak_dir = ExeDir() / "hdd" / "UDATA" / "54540079_backup";
-            const auto cheat_db = ExeDir() / "saves_cheat.db";
-            const auto cheat_bak = ExeDir() / "saves_cheat.db.bak";
-            if (step) {
-                std::error_code ec;
-                if (!std::filesystem::exists(src_dir, ec)) {
-                    s_backup_status = "No Saves";
-                } else {
-                    std::filesystem::remove_all(bak_dir, ec);
-                    ec.clear();
-                    std::filesystem::copy(src_dir, bak_dir,
-                                          std::filesystem::copy_options::recursive |
-                                              std::filesystem::copy_options::overwrite_existing,
-                                          ec);
-                    if (!ec) {
-                        if (std::filesystem::exists(cheat_db, ec)) {
-                            std::filesystem::copy_file(cheat_db, cheat_bak,
-                                                       std::filesystem::copy_options::overwrite_existing, ec);
-                        }
-                        s_backup_status = "Saved!";
-                    } else {
-                        s_backup_status = "Failed";
-                    }
-                }
-            }
-            if (s_backup_status.empty()) {
-                std::error_code ec;
-                std::snprintf(text, sizeof(text), "%s",
-                              std::filesystem::exists(bak_dir, ec) ? "Overwrite" : "Create");
-            } else {
-                std::snprintf(text, sizeof(text), "%s", s_backup_status.c_str());
-            }
-            break;
-        }
-        case kRestoreSaves: {
-            static std::string s_restore_status;
-            const auto src_dir = ExeDir() / "hdd" / "UDATA" / "54540079";
-            const auto bak_dir = ExeDir() / "hdd" / "UDATA" / "54540079_backup";
-            const auto cheat_db = ExeDir() / "saves_cheat.db";
-            const auto cheat_bak = ExeDir() / "saves_cheat.db.bak";
-            if (step) {
-                std::error_code ec;
-                if (!std::filesystem::exists(bak_dir, ec)) {
-                    s_restore_status = "No Backup";
-                } else {
-                    std::filesystem::remove_all(src_dir, ec);
-                    ec.clear();
-                    std::filesystem::copy(bak_dir, src_dir,
-                                          std::filesystem::copy_options::recursive |
-                                              std::filesystem::copy_options::overwrite_existing,
-                                          ec);
-                    if (!ec) {
-                        if (std::filesystem::exists(cheat_bak, ec)) {
-                            std::filesystem::copy_file(cheat_bak, cheat_db,
-                                                       std::filesystem::copy_options::overwrite_existing, ec);
-                            game::cheats::ReloadCheatDb();
-                        }
-                        s_restore_status = "Restored!";
-                    } else {
-                        s_restore_status = "Failed";
-                    }
-                }
-            }
-            if (s_restore_status.empty()) {
-                std::error_code ec;
-                std::snprintf(text, sizeof(text), "%s",
-                              std::filesystem::exists(bak_dir, ec) ? "Ready" : "None");
-            } else {
-                std::snprintf(text, sizeof(text), "%s", s_restore_status.c_str());
-            }
-            break;
-        }
     }
 }
 
@@ -784,8 +697,6 @@ bool MenuOpen() { return false; }
 
 void DrawUi(double fps) {
     game::g_fps = float(fps);
-    ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 }
 
 }  // namespace app

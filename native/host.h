@@ -37,13 +37,23 @@ void OnPadEvent(const SDL_Event& e);
 
 // the touch controls and SDL's keyboard and mouse (touch.cpp)
 namespace touch {
+// Native Vulkan 2D overlay primitive (mode 0 = textured SVG/font atlas, mode 1 = SDF rounded panel/border)
+struct Quad {
+    float x0, y0, x1, y1;
+    float u0, v0, u1, v1;
+    float r, g, b, a;
+    float radius_px;
+    float border_px;
+    float br, bg, bb, ba;
+    uint32_t mode;
+};
 // main thread, every input event; true when the touch controls took it
 bool OnEvent(const SDL_Event& e);
 // the touch controls' buttons and stick onto port 0's pad, before the game reads it
 void Apply(int port, input::Pad& pad);
-// inside the ImGui frame: the controls over the picture
-void Draw();
-// any touch on the screen in the last few seconds: the controls show
+// render thread: emit all visible touch controls / custom editor quads (zero ImGui)
+void BuildOverlay(std::vector<Quad>& out);
+// any touch on the screen active / fading in
 bool Shown();
 // main thread, each turn of the event loop: what the input asks of the window (the on-screen keyboard)
 void Pump();
@@ -51,24 +61,24 @@ void Pump();
 void AddLook(float dx, float dy);
 bool LookActive();  // in play, in front, no menu or panel up
 bool Firing();      // a fire button of the touch controls, or a controller's right trigger, is held
-// a controller was used: the game's hints name its buttons again, not the touch controls
+// an external controller was used: smoothly fades out touch controls over 200ms
 void PadUsed();
 // the layout's settings in the game's options (src/common/menu.cpp), saved at once
-const char* LayoutName();  // the preset's, or CUSTOM
+const char* LayoutName();
 void StepLayout(int step);
 uint32_t ControlsOpacity();  // percent
 void StepOpacity(int step);
 uint32_t ControlsSize();  // percent of each control's own size
 void StepSize(int step);
-void EditLayout();  // the controls over the screen to drag where they go
+void EditLayout();  // custom native Vulkan editor over the screen to drag/resize/hide controls
 void ResetLayout(); // reset touch control positions, sizes, and visibility to default
-const char* SkinName();  // the buttons' look: OUTLINE, FILLED WHITE, FILLED DARK
+const char* SkinName();  // OUTLINE, FILLED WHITE, FILLED DARK
 void StepSkin(int step);
-const char* StickModeName();  // FLOATING (under the thumb) or FIXED (in its place)
+const char* StickModeName();
 void StepStickMode(int step);
-// render thread, once: the skins' atlas as RGBA from the APK's assets, then its ImGui texture
+// render thread, once: rasterize SVG skins + crisp UI font into RGBA atlas
 bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& w, uint32_t& h);
-void SetSkinTexture(uint64_t texture);
+void SetSkinReady(bool ready);
 }  // namespace touch
 
 // aiming by turning the phone (gyro.cpp), main thread
@@ -80,10 +90,3 @@ void NextMode();  // off, always on, while firing; saved at once
 void OnEvent(const SDL_Event& e);
 void Pump();  // the sensor opened while a mode wants it, closed otherwise
 }  // namespace gyro
-
-// ImGui's input from SDL's events (ui.cpp), main thread, under app::UiLock
-namespace ui {
-void OnEvent(const SDL_Event& e);
-// render thread, before ImGui::NewFrame: the display size and the frame time
-void NewFrame(float width, float height);
-}  // namespace ui

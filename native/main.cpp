@@ -20,7 +20,6 @@
 #include <string>
 #include <thread>
 
-#include <imgui.h>
 #include <toml++/toml.hpp>
 
 #include "app/app.h"
@@ -303,15 +302,6 @@ void Pace() {
 
 namespace {
 
-void InitUi() {
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO();
-    io.IniFilename = nullptr;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad | ImGuiConfigFlags_IsTouchScreen;
-    io.BackendPlatformName = "android_sdl3";
-}
-
 void Dispatch(const SDL_Event& e) {
     switch (e.type) {
         case SDL_EVENT_QUIT:
@@ -339,9 +329,7 @@ void Dispatch(const SDL_Event& e) {
         default:
             break;
     }
-    if (touch::OnEvent(e)) return;
-    std::lock_guard lock(app::UiLock());
-    ui::OnEvent(e);
+    (void)touch::OnEvent(e);
 }
 
 }  // namespace
@@ -380,7 +368,6 @@ int main(int, char**) {
         return 1;
     }
 
-    InitUi();
     input::Init();
     if (app::kGame.window) app::kGame.window(g_window);
     if (!kernel::Boot(std::move(game.xbe), IMAGE_XBE, game.dir.string(), (app::ExeDir() / "hdd").string())) {
