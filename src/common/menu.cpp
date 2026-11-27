@@ -183,7 +183,7 @@ constexpr Row kTouchRows[] = {
     {Kind::Value, kTouchSkin, "Button Style"},
     {Kind::Value, kTouchOpacity, "Controls Opacity"},
     {Kind::Value, kTouchSize, "Controls Size"},
-    {Kind::Action, kTouchEdit, "Edit Controls Layout"},
+    {Kind::Action, kTouchEdit, "Edit Control Layout"},
     {Kind::Action, kTouchReset, "Reset Controls Layout"},
 };
 
@@ -445,7 +445,7 @@ void StepInputRow(int id, int step, char (&text)[64]) {
                 o.touch_controls = true;
                 touch::EditLayout();
             }
-            std::snprintf(text, sizeof(text), "Open");
+            text[0] = '\0';
             break;
         case kTouchReset: {
             static bool s_reset_done = false;

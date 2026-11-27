@@ -184,7 +184,9 @@ std::string FormatEntryLabel(const NativeEntry& e) {
         return std::string(game::cheats::GetCheatMenuLabel(e.cheat_id)) + ": " +
                (game::cheats::IsCheatActive(e.cheat_id) ? "On" : "Off");
     }
-    return std::string(e.row.label) + ": " + app::rows::Value(e.row, 0);
+    const std::string val = app::rows::Value(e.row, 0);
+    if (val.empty()) return std::string(e.row.label);
+    return std::string(e.row.label) + ": " + val;
 }
 
 void UpdateListRowText(X86Context& ctx, uint8_t* base, uint32_t list_va, uint32_t handle, const std::string& text) {

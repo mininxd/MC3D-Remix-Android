@@ -6,6 +6,9 @@
 #include <lunasvg.h>
 #include <toml++/toml.hpp>
 
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "stb_truetype.h"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -601,28 +604,28 @@ struct Button {
 
 constexpr Button kButtons[] = {
     // Gameplay driving controls (auto-synced with MC3D's in-game Controller Configuration / Custom Remap!)
-    {"steer_left",  "STEER LEFT",  SvgIcon::SteerLeft,   kSteerLeft,    game::GameAction::SteerAxis,   When::Play,           0.50f,       true,  true},
-    {"steer_right", "STEER RIGHT", SvgIcon::SteerRight,  kSteerRight,   game::GameAction::SteerAxis,   When::Play,           0.50f,       true,  true},
-    {"gas",         "GAS",         SvgIcon::Gas,         kAnalogRT,     game::GameAction::Gas,         When::Play,           0.50f,       true,  false},
-    {"brake",       "BRAKE",       SvgIcon::Brake,       kAnalogLT,     game::GameAction::Brake,       When::Play,           2.0f / 3.0f, true,  false},
-    {"handbrake",   "HANDBRAKE",   SvgIcon::Handbrake,   kAnalogA,      game::GameAction::Handbrake,   When::Play,           1.0f,        false, false},
-    {"burnout",     "BURNOUT",     SvgIcon::Burnout,     kBurnout,      game::GameAction::Count,       When::Play,           1.0f,        false, false},
-    {"nitro",       "NITRO",       SvgIcon::Nitro,       kAnalogX,      game::GameAction::Nitro,       When::PlayNos,        1.0f,        false, false},
-    {"turbo",       "TURBO",       SvgIcon::Turbo,       kAnalogX,      game::GameAction::Nitro,       When::PlayTurbo,      1.0f,        false, false},
-    {"special",     "SPECIAL",     SvgIcon::Special,     kBit + 6,      game::GameAction::Special,     When::PlaySpecial,    1.0f,        false, false},
-    {"pause",       "PAUSE",       SvgIcon::Start,       kBit + 4,      game::GameAction::Pause,       When::Play,           1.0f,        true,  false},
-    {"camera",      "CAMERA",      SvgIcon::Camera,      kAnalogBlack,  game::GameAction::Camera,      When::Play,           1.0f,        false, false},
-    {"map",         "MAP",         SvgIcon::Map,         kBit + 5,      game::GameAction::Map,         When::Play,           1.0f,        false, false},
-    {"flash",       "FLASH",       SvgIcon::FlashLights, kAnalogWhite,  game::GameAction::FlashLights, When::Play,           1.0f,        false, false},
-    {"look_back",   "LOOK BACK",   SvgIcon::LookBack,    kAnalogY,      game::GameAction::LookBack,    When::Play,           1.0f,        false, false},
+    {"steer_left",  "Steer Left",  SvgIcon::SteerLeft,   kSteerLeft,    game::GameAction::SteerAxis,   When::Play,           0.50f,       true,  true},
+    {"steer_right", "Steer Right", SvgIcon::SteerRight,  kSteerRight,   game::GameAction::SteerAxis,   When::Play,           0.50f,       true,  true},
+    {"gas",         "Gas",         SvgIcon::Gas,         kAnalogRT,     game::GameAction::Gas,         When::Play,           0.50f,       true,  false},
+    {"brake",       "Brake",       SvgIcon::Brake,       kAnalogLT,     game::GameAction::Brake,       When::Play,           2.0f / 3.0f, true,  false},
+    {"handbrake",   "Handbrake",   SvgIcon::Handbrake,   kAnalogA,      game::GameAction::Handbrake,   When::Play,           1.0f,        false, false},
+    {"burnout",     "Burnout",     SvgIcon::Burnout,     kBurnout,      game::GameAction::Count,       When::Play,           1.0f,        false, false},
+    {"nitro",       "Nitro",       SvgIcon::Nitro,       kAnalogX,      game::GameAction::Nitro,       When::PlayNos,        1.0f,        false, false},
+    {"turbo",       "Turbo",       SvgIcon::Turbo,       kAnalogX,      game::GameAction::Nitro,       When::PlayTurbo,      1.0f,        false, false},
+    {"special",     "Special",     SvgIcon::Special,     kBit + 6,      game::GameAction::Special,     When::PlaySpecial,    1.0f,        false, false},
+    {"pause",       "Pause",       SvgIcon::Start,       kBit + 4,      game::GameAction::Pause,       When::Play,           1.0f,        true,  false},
+    {"camera",      "Camera",      SvgIcon::Camera,      kAnalogBlack,  game::GameAction::Camera,      When::Play,           1.0f,        false, false},
+    {"map",         "Map",         SvgIcon::Map,         kBit + 5,      game::GameAction::Map,         When::Play,           1.0f,        false, false},
+    {"flash",       "Flash",       SvgIcon::FlashLights, kAnalogWhite,  game::GameAction::FlashLights, When::Play,           1.0f,        false, false},
+    {"look_back",   "Look Back",   SvgIcon::LookBack,    kAnalogY,      game::GameAction::LookBack,    When::Play,           1.0f,        false, false},
 
     // Menu & Garage minimal navigation controls (1.25x sized, aspect-aware percentage placement)
-    {"dpad_up",     "DPAD UP",     SvgIcon::DpadUp,      kBit + 0,      game::GameAction::Count,       When::MainMenuOnly,   1.0f,        false, false},
-    {"dpad_down",   "DPAD DOWN",   SvgIcon::DpadDown,    kBit + 1,      game::GameAction::Count,       When::MainMenuOnly,   1.0f,        false, false},
-    {"dpad_left",   "DPAD LEFT",   SvgIcon::DpadLeft,    kBit + 2,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
-    {"dpad_right",  "DPAD RIGHT",  SvgIcon::DpadRight,   kBit + 3,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
+    {"dpad_up",     "D-Pad Up",    SvgIcon::DpadUp,      kBit + 0,      game::GameAction::Count,       When::MainMenuOnly,   1.0f,        false, false},
+    {"dpad_down",   "D-Pad Down",  SvgIcon::DpadDown,    kBit + 1,      game::GameAction::Count,       When::MainMenuOnly,   1.0f,        false, false},
+    {"dpad_left",   "D-Pad Left",  SvgIcon::DpadLeft,    kBit + 2,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
+    {"dpad_right",  "D-Pad Right", SvgIcon::DpadRight,   kBit + 3,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
     {"ok",          "OK",          SvgIcon::Ok,          kAnalogA,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
-    {"back",        "BACK",        SvgIcon::Back,        kAnalogB,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
+    {"back",        "Back",        SvgIcon::Back,        kAnalogB,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
 };
 
 constexpr size_t kButtonCount = std::size(kButtons);
@@ -790,13 +793,21 @@ Layout g_before{};
 float g_before_opacity = 0.85f;
 int g_selected = -1;
 
-// Atlas UV rects for SVG icons + built-in crisp 5x7 uppercase font
+// Atlas UV rects for SVG icons + anti-aliased proportional Roboto font glyphs (ASCII 32..126)
 struct AtlasUv {
     float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
     bool valid = false;
 };
+struct GlyphUv {
+    float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+    float xoff = 0, yoff = 0;  // normalized to raster pixel height
+    float w = 0, h = 0;        // normalized to raster pixel height
+    float adv = 0.28f;         // normalized advance width
+    bool valid = false;
+};
 AtlasUv g_atlas_uv[kSkins][kSvgIconCount]{};
-AtlasUv g_font_uv[64]{};  // ASCII 32..95
+GlyphUv g_font_uv[95]{};  // ASCII 32..126
+float g_font_cap_center = 0.36f;  // baseline offset from vertical center (fraction of line_h)
 std::atomic<bool> g_skin_ready{false};
 
 float Width() {
@@ -966,20 +977,22 @@ size_t HitButton(float x, float y) {
 }
 
 // ============================================================================
-// Custom Native Vulkan Editor Top Toolbar (Zero ImGui!) + Snap-to-Grid & Symmetry
+// Custom Skin-Matched Native Vulkan Layout Editor (Outline / Filled White / Filled Dark)
 // ============================================================================
-enum { kBarTab, kBarSnap, kBarReset, kBarSmaller, kBarBigger, kBarHide, kBarCancel, kBarDone, kBarCount };
-constexpr float kBarY = 0.055f, kBarH = 0.088f, kBarGap = 0.010f;
+enum { kBarTab, kBarSnap, kBarReset, kBarCancel, kBarDone, kBarCount };
+enum { kDockNone = -1, kDockBody = 0, kDockSmaller = 1, kDockBigger = 2, kDockHide = 3 };
+constexpr float kBarY = 0.042f, kBarH = 0.076f, kBarGap = 0.011f;
 constexpr float kMinRadius = 0.035f, kMaxRadius = 0.28f;
 constexpr float kSizeStep = 1.1f;
 
 float BarWidth(int i) {
     switch (i) {
-        case kBarTab:     return 0.105f;
-        case kBarSnap:    return 0.105f;
-        case kBarSmaller:
-        case kBarBigger:  return 0.060f;
-        default:          return 0.105f;
+        case kBarTab:    return 0.130f;
+        case kBarSnap:   return 0.125f;
+        case kBarReset:  return 0.100f;
+        case kBarCancel: return 0.105f;
+        case kBarDone:   return 0.105f;
+        default:         return 0.105f;
     }
 }
 
@@ -987,16 +1000,25 @@ bool Hideable(int i) { return i >= 0 && size_t(i) < kButtonCount && !kButtons[si
 
 const char* BarLabel(int i) {
     switch (i) {
-        case kBarTab:     return g_edit_menu_tab ? "MENU" : "PLAY";
-        case kBarSnap:    return g_snap_grid ? "SNAP ON" : "SNAP";
-        case kBarReset:   return "RESET";
-        case kBarSmaller: return "-";
-        case kBarBigger:  return "+";
-        case kBarHide:    return (Hideable(g_selected) && g_layout[size_t(g_selected)].hidden) ? "SHOW" : "HIDE";
-        case kBarCancel:  return "CANCEL";
-        case kBarDone:    return "DONE";
-        default:          return "";
+        case kBarTab:    return g_edit_menu_tab ? "Menu" : "Gameplay";
+        case kBarSnap:   return g_snap_grid ? "Snap On" : "Snap Off";
+        case kBarReset:  return "Reset";
+        case kBarCancel: return "Cancel";
+        case kBarDone:   return "Save";
+        default:         return "";
     }
+}
+
+void BarDockRect(float rect[4]) {
+    const float w = Width(), h = Height();
+    float total = (kBarCount - 1) * kBarGap;
+    for (int i = 0; i < kBarCount; i++) total += BarWidth(i);
+    const float pad_x = 0.014f * w;
+    const float pad_y = 0.014f * h;
+    rect[0] = (0.5f - total * 0.5f) * w - pad_x;
+    rect[1] = kBarY * h - pad_y;
+    rect[2] = (0.5f + total * 0.5f) * w + pad_x;
+    rect[3] = (kBarY + kBarH) * h + pad_y;
 }
 
 int BarAt(float x, float y, float rect[4] = nullptr, int which = -1) {
@@ -1015,6 +1037,66 @@ int BarAt(float x, float y, float rect[4] = nullptr, int which = -1) {
         if (which < 0 && x >= x0 && x <= x1 && y >= y0 && y <= y1) return i;
     }
     return -1;
+}
+
+struct DockLayout {
+    float dock[4];
+    float label_cx, label_cy;
+    float minus[4];
+    float plus[4];
+    float hide[4];
+    bool has_hide = false;
+};
+
+DockLayout ComputeInspectorDock() {
+    const float w = Width(), h = Height();
+    DockLayout d{};
+    d.has_hide = Hideable(g_selected);
+    const float dock_h = h * 0.098f;
+    const float btn_h = h * 0.068f;
+    const float circ_d = btn_h;
+    const float hide_w = d.has_hide ? (h * 0.155f) : 0.0f;
+    const float gap = h * 0.018f;
+    const float pad_x = h * 0.032f;
+    const float label_w = h * 0.34f;
+    const float dock_w = pad_x + label_w + gap + circ_d + gap + circ_d + (d.has_hide ? (gap + hide_w) : 0.0f) + pad_x;
+    const float cy = h * 0.905f;
+    const float cx = w * 0.5f;
+
+    d.dock[0] = cx - dock_w * 0.5f;
+    d.dock[1] = cy - dock_h * 0.5f;
+    d.dock[2] = cx + dock_w * 0.5f;
+    d.dock[3] = cy + dock_h * 0.5f;
+
+    float cur_x = d.dock[0] + pad_x;
+    d.label_cx = cur_x + label_w * 0.5f;
+    d.label_cy = cy;
+    cur_x += label_w + gap;
+
+    d.minus[0] = cur_x; d.minus[1] = cy - btn_h * 0.5f;
+    d.minus[2] = cur_x + circ_d; d.minus[3] = cy + btn_h * 0.5f;
+    cur_x += circ_d + gap;
+
+    d.plus[0] = cur_x; d.plus[1] = cy - btn_h * 0.5f;
+    d.plus[2] = cur_x + circ_d; d.plus[3] = cy + btn_h * 0.5f;
+    cur_x += circ_d + gap;
+
+    if (d.has_hide) {
+        d.hide[0] = cur_x; d.hide[1] = cy - btn_h * 0.5f;
+        d.hide[2] = cur_x + hide_w; d.hide[3] = cy + btn_h * 0.5f;
+    }
+    return d;
+}
+
+int DockAt(float x, float y) {
+    if (g_selected < 0 || size_t(g_selected) >= kButtonCount) return kDockNone;
+    const DockLayout d = ComputeInspectorDock();
+    auto in_rect = [x, y](const float r[4]) { return x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3]; };
+    if (in_rect(d.minus)) return kDockSmaller;
+    if (in_rect(d.plus)) return kDockBigger;
+    if (d.has_hide && in_rect(d.hide)) return kDockHide;
+    if (in_rect(d.dock)) return kDockBody;
+    return kDockNone;
 }
 
 void OpenEditor() {
@@ -1091,16 +1173,6 @@ void EditDown(Finger& f, float x, float y) {
             g_selected = -1;
             g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
             return;
-        case kBarSmaller:
-        case kBarBigger:
-            if (g_selected >= 0) {
-                float r = g_layout[size_t(g_selected)].r;
-                Resize(size_t(g_selected), bar == kBarBigger ? r * kSizeStep : r / kSizeStep);
-            }
-            return;
-        case kBarHide:
-            if (Hideable(g_selected)) g_layout[size_t(g_selected)].hidden ^= true;
-            return;
         case kBarCancel:
             CloseEditor(false);
             return;
@@ -1110,6 +1182,24 @@ void EditDown(Finger& f, float x, float y) {
         default:
             break;
     }
+    // Check bottom floating inspector dock when a control is selected
+    const int dock = DockAt(x, y);
+    if (dock == kDockSmaller || dock == kDockBigger) {
+        float r = g_layout[size_t(g_selected)].r;
+        Resize(size_t(g_selected), dock == kDockBigger ? r * kSizeStep : r / kSizeStep);
+        return;
+    }
+    if (dock == kDockHide) {
+        if (Hideable(g_selected)) g_layout[size_t(g_selected)].hidden ^= true;
+        return;
+    }
+    if (dock == kDockBody) {
+        return;
+    }
+    // Ignore taps inside the top dock container margin
+    float bdock[4];
+    BarDockRect(bdock);
+    if (x >= bdock[0] && x <= bdock[2] && y >= bdock[1] && y <= bdock[3]) return;
     for (const Finger& d : g_fingers) {
         if (d.role != Role::Drag) continue;
         f.role = Role::Pinch;
@@ -1314,107 +1404,119 @@ void KeyEvent(const SDL_KeyboardEvent& k) {
 }
 
 // ============================================================================
-// Built-in Crisp 5x7 Uppercase Font (Baked into Atlas — Zero External Fonts / Zero ImGui!)
+// Anti-Aliased Proportional Google Roboto Font Atlas (stb_truetype — Zero ImGui!)
 // ============================================================================
-// Compact 5-column x 7-row bitmap glyphs for ASCII 32..95 (bit 4 = leftmost col, bit 0 = rightmost col)
-constexpr uint8_t kFont5x7[64][7] = {
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // ' ' 32
-    {0x04,0x04,0x04,0x04,0x04,0x00,0x04}, // '!' 33
-    {0x0A,0x0A,0x00,0x00,0x00,0x00,0x00}, // '"' 34
-    {0x0A,0x1F,0x0A,0x0A,0x1F,0x0A,0x00}, // '#' 35
-    {0x04,0x0F,0x14,0x0E,0x05,0x1E,0x04}, // '$' 36
-    {0x18,0x19,0x02,0x04,0x08,0x13,0x03}, // '%' 37
-    {0x08,0x14,0x14,0x08,0x15,0x12,0x0D}, // '&' 38
-    {0x04,0x04,0x00,0x00,0x00,0x00,0x00}, // ''' 39
-    {0x02,0x04,0x08,0x08,0x08,0x04,0x02}, // '(' 40
-    {0x08,0x04,0x02,0x02,0x02,0x04,0x08}, // ')' 41
-    {0x00,0x0A,0x04,0x1F,0x04,0x0A,0x00}, // '*' 42
-    {0x00,0x04,0x04,0x1F,0x04,0x04,0x00}, // '+' 43
-    {0x00,0x00,0x00,0x00,0x00,0x04,0x08}, // ',' 44
-    {0x00,0x00,0x00,0x1F,0x00,0x00,0x00}, // '-' 45
-    {0x00,0x00,0x00,0x00,0x00,0x04,0x04}, // '.' 46
-    {0x01,0x02,0x02,0x04,0x08,0x08,0x10}, // '/' 47
-    {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E}, // '0' 48
-    {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E}, // '1' 49
-    {0x0E,0x11,0x01,0x06,0x08,0x10,0x1F}, // '2' 50
-    {0x1F,0x02,0x04,0x06,0x01,0x11,0x0E}, // '3' 51
-    {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02}, // '4' 52
-    {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E}, // '5' 53
-    {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E}, // '6' 54
-    {0x1F,0x01,0x02,0x04,0x08,0x08,0x08}, // '7' 55
-    {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E}, // '8' 56
-    {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C}, // '9' 57
-    {0x00,0x04,0x04,0x00,0x04,0x04,0x00}, // ':' 58
-    {0x00,0x04,0x04,0x00,0x04,0x04,0x08}, // ';' 59
-    {0x02,0x04,0x08,0x10,0x08,0x04,0x02}, // '<' 60
-    {0x00,0x00,0x1F,0x00,0x1F,0x00,0x00}, // '=' 61
-    {0x08,0x04,0x02,0x01,0x02,0x04,0x08}, // '>' 62
-    {0x0E,0x11,0x01,0x06,0x04,0x00,0x04}, // '?' 63
-    {0x0E,0x11,0x17,0x15,0x17,0x10,0x0E}, // '@' 64
-    {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11}, // 'A' 65
-    {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E}, // 'B' 66
-    {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E}, // 'C' 67
-    {0x1E,0x11,0x11,0x11,0x11,0x11,0x1E}, // 'D' 68
-    {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F}, // 'E' 69
-    {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10}, // 'F' 70
-    {0x0E,0x11,0x10,0x17,0x11,0x11,0x0F}, // 'G' 71
-    {0x11,0x11,0x11,0x1F,0x11,0x11,0x11}, // 'H' 72
-    {0x0E,0x04,0x04,0x04,0x04,0x04,0x0E}, // 'I' 73
-    {0x07,0x02,0x02,0x02,0x12,0x12,0x0C}, // 'J' 74
-    {0x11,0x12,0x14,0x18,0x14,0x12,0x11}, // 'K' 75
-    {0x10,0x10,0x10,0x10,0x10,0x10,0x1F}, // 'L' 76
-    {0x11,0x1B,0x15,0x15,0x11,0x11,0x11}, // 'M' 77
-    {0x11,0x19,0x15,0x13,0x11,0x11,0x11}, // 'N' 78
-    {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E}, // 'O' 79
-    {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10}, // 'P' 80
-    {0x0E,0x11,0x11,0x11,0x15,0x12,0x0D}, // 'Q' 81
-    {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11}, // 'R' 82
-    {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E}, // 'S' 83
-    {0x1F,0x04,0x04,0x04,0x04,0x04,0x04}, // 'T' 84
-    {0x11,0x11,0x11,0x11,0x11,0x11,0x0E}, // 'U' 85
-    {0x11,0x11,0x11,0x11,0x11,0x0A,0x04}, // 'V' 86
-    {0x11,0x11,0x11,0x15,0x15,0x1B,0x11}, // 'W' 87
-    {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11}, // 'X' 88
-    {0x11,0x11,0x0A,0x04,0x04,0x04,0x04}, // 'Y' 89
-    {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F}, // 'Z' 90
-    {0x0E,0x08,0x08,0x08,0x08,0x08,0x0E}, // '[' 91
-    {0x10,0x08,0x08,0x04,0x02,0x02,0x01}, // '\' 92
-    {0x0E,0x02,0x02,0x02,0x02,0x02,0x0E}, // ']' 93
-    {0x04,0x0A,0x11,0x00,0x00,0x00,0x00}, // '^' 94
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x1F}, // '_' 95
-};
+bool LoadRobotoTtfBytes(std::vector<uint8_t>& out) {
+    // 1. Primary: bundled Google Roboto-Bold.ttf inside APK assets (identical across all OEMs)
+    size_t sz = 0;
+    void* data = SDL_LoadFile("fonts/Roboto-Bold.ttf", &sz);
+    if (data && sz > 0) {
+        out.assign(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + sz);
+        SDL_free(data);
+        LOGI("[OK] touch: loaded bundled Roboto-Bold.ttf (%zu bytes)", out.size());
+        return true;
+    }
+    if (data) SDL_free(data);
 
-void BakeFontIntoAtlas(std::vector<uint8_t>& rgba, uint32_t atlas_w, uint32_t atlas_h, uint32_t base_y) {
-    constexpr uint32_t kScale = 3;   // 15x21 px per glyph -> crisp & smooth when filtered
-    constexpr uint32_t kCellW = 5 * kScale + 4;  // 19 px
-    constexpr uint32_t kCellH = 7 * kScale + 4;  // 25 px
-    constexpr uint32_t kCols = 64;
-    for (uint32_t g = 0; g < 64; ++g) {
-        const uint32_t ox = 8 + (g % kCols) * (kCellW + 2);
-        const uint32_t oy = base_y + (g / kCols) * (kCellH + 2);
-        if (ox + kCellW >= atlas_w || oy + kCellH >= atlas_h) continue;
-        for (uint32_t row = 0; row < 7; ++row) {
-            const uint8_t bits = kFont5x7[g][row];
-            for (uint32_t col = 0; col < 5; ++col) {
-                if ((bits & (1u << (4 - col))) == 0u) continue;
-                for (uint32_t dy = 0; dy < kScale; ++dy) {
-                    for (uint32_t dx = 0; dx < kScale; ++dx) {
-                        const uint32_t px = ox + 2 + col * kScale + dx;
-                        const uint32_t py = oy + 2 + row * kScale + dy;
-                        uint8_t* dst = &rgba[(size_t(py) * atlas_w + px) * 4u];
-                        dst[0] = 255; dst[1] = 255; dst[2] = 255; dst[3] = 255;
-                    }
-                }
+    // 2. Fallback: Android system Roboto font files
+    for (const char* path : {"/system/fonts/Roboto-Bold.ttf", "/system/fonts/Roboto-Medium.ttf",
+                             "/system/fonts/Roboto-Regular.ttf"}) {
+        std::ifstream f(path, std::ios::binary);
+        if (!f) continue;
+        out.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        if (!out.empty()) {
+            LOGI("[OK] touch: loaded system Roboto font %s (%zu bytes)", path, out.size());
+            return true;
+        }
+    }
+    LOGW("touch: failed to load Roboto TTF font");
+    return false;
+}
+
+void BakeRobotoIntoAtlas(std::vector<uint8_t>& rgba, uint32_t atlas_w, uint32_t atlas_h, uint32_t base_y) {
+    std::vector<uint8_t> ttf;
+    if (!LoadRobotoTtfBytes(ttf)) return;
+
+    stbtt_fontinfo font{};
+    if (!stbtt_InitFont(&font, ttf.data(), stbtt_GetFontOffsetForIndex(ttf.data(), 0))) {
+        LOGE("touch: stbtt_InitFont failed on Roboto TTF");
+        return;
+    }
+
+    constexpr float kFontPx = 64.0f;
+    constexpr uint32_t kPad = 4u;
+    const float scale = stbtt_ScaleForPixelHeight(&font, kFontPx);
+
+    // Measure capital 'H' vertical bounds for crisp optical centering inside pills & circles
+    int hx0 = 0, hy0 = 0, hx1 = 0, hy1 = 0;
+    stbtt_GetCodepointBitmapBox(&font, 'H', scale, scale, &hx0, &hy0, &hx1, &hy1);
+    if (hy1 > hy0) {
+        g_font_cap_center = -0.5f * float(hy0 + hy1) / kFontPx;
+    } else {
+        g_font_cap_center = 0.36f;
+    }
+
+    uint32_t cur_x = kPad;
+    uint32_t cur_y = base_y + kPad;
+    uint32_t row_h = 0u;
+    int baked = 0;
+
+    for (uint32_t g = 0; g < 95u; ++g) {
+        g_font_uv[g] = GlyphUv{};
+        const int ch = int(32u + g);
+        int adv_w = 0, lsb = 0;
+        stbtt_GetCodepointHMetrics(&font, ch, &adv_w, &lsb);
+        g_font_uv[g].adv = float(adv_w) * scale / kFontPx;
+
+        if (ch == ' ') continue;
+
+        int bw = 0, bh = 0, xoff = 0, yoff = 0;
+        unsigned char* bmp = stbtt_GetCodepointBitmap(&font, 0.0f, scale, ch, &bw, &bh, &xoff, &yoff);
+        if (!bmp || bw <= 0 || bh <= 0) {
+            if (bmp) stbtt_FreeBitmap(bmp, nullptr);
+            continue;
+        }
+
+        if (cur_x + uint32_t(bw) + kPad > atlas_w) {
+            cur_x = kPad;
+            cur_y += row_h + kPad;
+            row_h = 0u;
+        }
+        if (cur_y + uint32_t(bh) + kPad > atlas_h) {
+            stbtt_FreeBitmap(bmp, nullptr);
+            LOGE("touch: Roboto atlas overflow at ASCII %d", ch);
+            break;
+        }
+
+        for (int y = 0; y < bh; ++y) {
+            uint8_t* dst = &rgba[(size_t(cur_y + uint32_t(y)) * atlas_w + cur_x) * 4u];
+            const unsigned char* src_row = bmp + size_t(y) * size_t(bw);
+            for (int x = 0; x < bw; ++x) {
+                dst[x * 4 + 0] = 255u;
+                dst[x * 4 + 1] = 255u;
+                dst[x * 4 + 2] = 255u;
+                dst[x * 4 + 3] = src_row[x];
             }
         }
-        g_font_uv[g] = AtlasUv{
-            float(ox + 1) / float(atlas_w),
-            float(oy + 1) / float(atlas_h),
-            float(ox + kCellW - 1) / float(atlas_w),
-            float(oy + kCellH - 1) / float(atlas_h),
+        stbtt_FreeBitmap(bmp, nullptr);
+
+        g_font_uv[g] = GlyphUv{
+            float(cur_x) / float(atlas_w),
+            float(cur_y) / float(atlas_h),
+            float(cur_x + uint32_t(bw)) / float(atlas_w),
+            float(cur_y + uint32_t(bh)) / float(atlas_h),
+            float(xoff) / kFontPx,
+            float(yoff) / kFontPx,
+            float(bw) / kFontPx,
+            float(bh) / kFontPx,
+            float(adv_w) * scale / kFontPx,
             true,
         };
+        cur_x += uint32_t(bw) + kPad;
+        row_h = std::max(row_h, uint32_t(bh));
+        ++baked;
     }
+    LOGI("[OK] touch: baked %d anti-aliased Roboto glyphs into atlas (y=%u..%u)", baked, base_y, cur_y + row_h);
 }
 
 void EmitPanel(std::vector<Quad>& out, float x0, float y0, float x1, float y1,
@@ -1429,28 +1531,71 @@ void EmitRing(std::vector<Quad>& out, float cx, float cy, float radius_px, float
                        0, 0, 1, 1, r, g, b, a, progress, thickness_px, br, bg, bb, ba, 2u});
 }
 
-void EmitTextCentered(std::vector<Quad>& out, float cx, float cy, float char_h,
+void EmitTextCentered(std::vector<Quad>& out, float cx, float cy, float line_h,
                       float r, float g, float b, float a, const char* text) {
     if (!text || !text[0] || !g_skin_ready.load(std::memory_order_relaxed)) return;
     const size_t len = std::strlen(text);
-    const float char_w = char_h * (17.0f / 23.0f);
-    const float adv = char_w * 1.18f;
-    const float total_w = (len > 0) ? (float(len - 1) * adv + char_w) : 0.0f;
-    float x = cx - total_w * 0.5f;
-    const float y0 = cy - char_h * 0.5f;
-    const float y1 = cy + char_h * 0.5f;
+    const float tracking = line_h * 0.015f;
+    float total_w = 0.0f;
     for (size_t i = 0; i < len; ++i) {
-        unsigned char ch = static_cast<unsigned char>(std::toupper(static_cast<unsigned char>(text[i])));
-        if (ch == '|') ch = 'I';
-        if (ch >= 32 && ch <= 95 && ch != ' ') {
-            const AtlasUv& uv = g_font_uv[ch - 32];
-            if (uv.valid) {
-                out.push_back(Quad{x, y0, x + char_w, y1, uv.u0, uv.v0, uv.u1, uv.v1,
-                                   r, g, b, a, 0, 0, 0, 0, 0, 0, 0u});
-            }
-        }
-        x += adv;
+        unsigned char ch = static_cast<unsigned char>(text[i]);
+        if (ch < 32u || ch > 126u) ch = ' ';
+        const GlyphUv& uv = g_font_uv[ch - 32u];
+        total_w += uv.adv * line_h + ((i + 1u < len) ? tracking : 0.0f);
     }
+    float x = cx - total_w * 0.5f;
+    const float baseline_y = cy + g_font_cap_center * line_h;
+    for (size_t i = 0; i < len; ++i) {
+        unsigned char ch = static_cast<unsigned char>(text[i]);
+        if (ch < 32u || ch > 126u) ch = ' ';
+        const GlyphUv& uv = g_font_uv[ch - 32u];
+        if (ch != ' ' && uv.valid) {
+            const float gx0 = x + uv.xoff * line_h;
+            const float gy0 = baseline_y + uv.yoff * line_h;
+            const float gx1 = gx0 + uv.w * line_h;
+            const float gy1 = gy0 + uv.h * line_h;
+            out.push_back(Quad{gx0, gy0, gx1, gy1, uv.u0, uv.v0, uv.u1, uv.v1,
+                               r, g, b, a, 0, 0, 0, 0, 0, 0, 0u});
+        }
+        x += uv.adv * line_h + tracking;
+    }
+}
+
+// Dynamic editor UI palette synced with active Button Style (Outline / Filled White / Filled Dark)
+struct EditorTheme {
+    float pill_r, pill_g, pill_b, pill_a;
+    float pill_br, pill_bg, pill_bb, pill_ba;
+    float pill_bw;
+    float pill_tr, pill_tg, pill_tb;
+    float act_r, act_g, act_b, act_a;
+    float act_br, act_bg, act_bb, act_ba;
+    float act_tr, act_tg, act_tb;
+    float dock_r, dock_g, dock_b, dock_a;
+    float dock_br, dock_bg, dock_bb, dock_ba;
+    float dock_tr, dock_tg, dock_tb;
+};
+
+EditorTheme EditorThemeForSkin(uint32_t skin, float th) {
+    if (skin == kFilledWhite) {
+        return EditorTheme{
+            0.96f, 0.97f, 0.99f, 0.92f,  1.00f, 1.00f, 1.00f, 0.98f,  th * 0.6f,  0.07f, 0.08f, 0.11f,
+            0.09f, 0.10f, 0.13f, 0.96f,  1.00f, 1.00f, 1.00f, 0.95f,              1.00f, 1.00f, 1.00f,
+            0.96f, 0.97f, 1.00f, 0.24f,  1.00f, 1.00f, 1.00f, 0.55f,              1.00f, 1.00f, 1.00f,
+        };
+    }
+    if (skin == kFilledDark) {
+        return EditorTheme{
+            0.08f, 0.09f, 0.12f, 0.92f,  1.00f, 1.00f, 1.00f, 0.20f,  th * 0.7f,  0.97f, 0.98f, 1.00f,
+            0.97f, 0.98f, 1.00f, 0.96f,  1.00f, 1.00f, 1.00f, 1.00f,              0.07f, 0.08f, 0.11f,
+            0.05f, 0.06f, 0.08f, 0.68f,  1.00f, 1.00f, 1.00f, 0.16f,              0.96f, 0.97f, 1.00f,
+        };
+    }
+    // kOutline: sleek transparent capsules with crisp pure-white vector borders matching outline/*.svg
+    return EditorTheme{
+        0.04f, 0.05f, 0.07f, 0.24f,  1.00f, 1.00f, 1.00f, 0.94f,  th * 1.15f, 1.00f, 1.00f, 1.00f,
+        1.00f, 1.00f, 1.00f, 0.96f,  1.00f, 1.00f, 1.00f, 1.00f,              0.06f, 0.07f, 0.10f,
+        0.04f, 0.05f, 0.07f, 0.40f,  1.00f, 1.00f, 1.00f, 0.45f,              1.00f, 1.00f, 1.00f,
+    };
 }
 
 // ============================================================================
@@ -1841,11 +1986,13 @@ void BuildOverlay(std::vector<Quad>& out) {
                       0.10f, 0.10f, 0.14f, 0.65f * vis_a, ir, th, 1.0f, 1.0f, 1.0f, 0.85f * vis_a);
         }
 
-        // Crisp "HOLD TO SKIP" label beneath ring
-        EmitTextCentered(out, cx, cy + ring_r + h * 0.032f, h * 0.022f,
-                         1.0f, 1.0f, 1.0f, 0.82f * vis_a, "HOLD TO SKIP");
+        // Crisp Roboto "Hold to Skip" label beneath ring
+        EmitTextCentered(out, cx, cy + ring_r + h * 0.032f, h * 0.030f,
+                         1.0f, 1.0f, 1.0f, 0.88f * vis_a, "Hold to Skip");
         return;
     }
+
+    const EditorTheme theme = EditorThemeForSkin(skin, th);
 
     // 3. Draw active touch buttons (Gameplay, Main Menu, Garage, or Editor)
     for (size_t i = 0; i < kButtonCount; i++) {
@@ -1859,7 +2006,7 @@ void BuildOverlay(std::vector<Quad>& out) {
 
         const bool hidden = g_layout[i].hidden;
         const bool on = !editing && g_pressed[i];
-        const float vis = (hidden ? 0.35f : 1.0f) * g_opacity * fade_alpha;
+        const float vis = (hidden ? 0.32f : 1.0f) * g_opacity * fade_alpha;
         const float press_scale = on ? 0.94f : 1.0f;
 
         const float dx0 = cx - bw * 0.5f * press_scale;
@@ -1888,81 +2035,121 @@ void BuildOverlay(std::vector<Quad>& out) {
 
         if (editing) {
             if (int(i) == g_selected) {
-                EmitPanel(out, x0 - th * 2.5f, y0 - th * 2.5f, x1 + th * 2.5f, y1 + th * 2.5f,
-                          1.0f, 0.80f, 0.25f, 0.14f, std::min(bw, bh) * 0.22f,
-                          th * 1.6f, 1.0f, 0.80f, 0.25f, 0.98f);
+                const float pad = th * 3.0f;
+                EmitPanel(out, x0 - pad, y0 - pad, x1 + pad, y1 + pad,
+                          1.0f, 1.0f, 1.0f, 0.10f, std::min(bw, bh) * 0.26f + pad * 0.5f,
+                          th * 1.35f, 1.0f, 1.0f, 1.0f, 0.98f);
             } else if (hidden) {
                 EmitPanel(out, x0, y0, x1, y1,
-                          0.95f, 0.25f, 0.20f, 0.18f, std::min(bw, bh) * 0.22f,
-                          th, 0.95f, 0.30f, 0.25f, 0.85f);
+                          0.95f, 0.28f, 0.24f, 0.14f, std::min(bw, bh) * 0.24f,
+                          th * 0.9f, 0.98f, 0.36f, 0.32f, 0.78f);
             }
-            EmitTextCentered(out, cx, y1 + h * 0.022f, h * 0.020f,
-                             1.0f, 1.0f, 1.0f, hidden ? 0.55f : 0.90f, kButtons[i].label);
+            EmitTextCentered(out, cx, y1 + h * 0.025f, h * 0.025f,
+                             1.0f, 1.0f, 1.0f, hidden ? 0.50f : 0.92f, kButtons[i].label);
         }
     }
 
-    // 4. Radio swipe subtle toast during gameplay
+    // 4. Radio swipe subtle capsule toast during gameplay (matches active Button Style + Roboto)
     if (!editing && ctx == game::UiContext::Gameplay && now < g_radio_toast_until) {
         const float remain = float(g_radio_toast_until - now) / float(kToastMs);
         const float alpha = std::clamp(remain * 1.5f, 0.0f, 1.0f) * fade_alpha;
-        const char* msg = (g_radio_toast_dir > 0) ? "RADIO  >" : "<  RADIO";
+        const char* msg = (g_radio_toast_dir > 0) ? "Radio  >" : "<  Radio";
         const float ty = h * 0.88f;
         const float pw = h * 0.24f;
-        const float ph = h * 0.060f;
+        const float ph = h * 0.064f;
         EmitPanel(out, w * 0.5f - pw * 0.5f, ty - ph * 0.5f, w * 0.5f + pw * 0.5f, ty + ph * 0.5f,
-                  0.06f, 0.07f, 0.10f, 0.68f * alpha, ph * 0.45f,
-                  th * 0.7f, 1.0f, 1.0f, 1.0f, 0.35f * alpha);
-        EmitTextCentered(out, w * 0.5f, ty, h * 0.028f, 1.0f, 1.0f, 1.0f, 0.95f * alpha, msg);
+                  theme.pill_r, theme.pill_g, theme.pill_b, theme.pill_a * alpha, ph * 0.48f,
+                  theme.pill_bw, theme.pill_br, theme.pill_bg, theme.pill_bb, theme.pill_ba * alpha);
+        EmitTextCentered(out, w * 0.5f, ty, h * 0.032f,
+                         theme.pill_tr, theme.pill_tg, theme.pill_tb, 0.96f * alpha, msg);
     }
 
-    // 5. Custom Native Vulkan Editor Floating Toolbar (100% Zero ImGui!)
+    // 5. Custom Skin-Matched Mobile Layout Editor UI (Outline / Filled White / Filled Dark + Roboto)
     if (editing) {
+        // Top floating capsule dock backing
+        float bdock[4];
+        BarDockRect(bdock);
+        const float bdock_h = bdock[3] - bdock[1];
+        EmitPanel(out, bdock[0], bdock[1], bdock[2], bdock[3],
+                  theme.dock_r, theme.dock_g, theme.dock_b, theme.dock_a, bdock_h * 0.48f,
+                  th * 0.75f, theme.dock_br, theme.dock_bg, theme.dock_bb, theme.dock_ba);
+
         for (int i = 0; i < kBarCount; i++) {
             float r[4];
             BarAt(0, 0, r, i);
-            const bool done = (i == kBarDone);
-            const bool tab = (i == kBarTab);
-            const bool snap_on = (i == kBarSnap && g_snap_grid);
-            const bool size_btn = (i == kBarSmaller || i == kBarBigger);
-            const bool disabled = (size_btn && g_selected < 0) || (i == kBarHide && !Hideable(g_selected));
-            const float a = disabled ? 0.42f : 0.95f;
-
-            float fr = 0.09f, fg = 0.10f, fb = 0.13f, fa = 0.90f;
-            float br = 0.75f, bg = 0.78f, bb = 0.85f, ba = 0.55f * a;
-            if (done) {
-                fr = 0.78f; fg = 0.56f; fb = 0.16f; fa = 0.95f;
-                br = 1.0f;  bg = 0.84f; bb = 0.45f; ba = 0.95f;
-            } else if (tab) {
-                fr = 0.14f; fg = 0.36f; fb = 0.58f; fa = 0.92f;
-                br = 0.45f; bg = 0.78f; bb = 1.0f;  ba = 0.90f;
-            } else if (snap_on) {
-                fr = 0.10f; fg = 0.44f; fb = 0.48f; fa = 0.92f;
-                br = 0.32f; bg = 0.92f; bb = 0.96f; ba = 0.90f;
+            const float ph = r[3] - r[1];
+            const bool active = (i == kBarDone) || (i == kBarSnap && g_snap_grid);
+            if (active) {
+                EmitPanel(out, r[0], r[1], r[2], r[3],
+                          theme.act_r, theme.act_g, theme.act_b, theme.act_a, ph * 0.48f,
+                          theme.pill_bw, theme.act_br, theme.act_bg, theme.act_bb, theme.act_ba);
+                EmitTextCentered(out, (r[0] + r[2]) * 0.5f, (r[1] + r[3]) * 0.5f,
+                                 h * 0.030f, theme.act_tr, theme.act_tg, theme.act_tb, 0.98f, BarLabel(i));
+            } else {
+                EmitPanel(out, r[0], r[1], r[2], r[3],
+                          theme.pill_r, theme.pill_g, theme.pill_b, theme.pill_a, ph * 0.48f,
+                          theme.pill_bw, theme.pill_br, theme.pill_bg, theme.pill_bb, theme.pill_ba);
+                EmitTextCentered(out, (r[0] + r[2]) * 0.5f, (r[1] + r[3]) * 0.5f,
+                                 h * 0.030f, theme.pill_tr, theme.pill_tg, theme.pill_tb, 0.96f, BarLabel(i));
             }
-
-            EmitPanel(out, r[0], r[1], r[2], r[3], fr, fg, fb, fa, h * 0.018f, th * 0.9f, br, bg, bb, ba);
-            EmitTextCentered(out, (r[0] + r[2]) * 0.5f, (r[1] + r[3]) * 0.5f,
-                             h * (size_btn ? 0.040f : 0.026f), 1.0f, 1.0f, 1.0f, a, BarLabel(i));
         }
 
-        // Clean status / hint pill beneath toolbar
-        char info[96];
+        // Bottom floating inspector dock when a control is selected; subtle hint line when none selected
         if (g_selected >= 0 && size_t(g_selected) < kButtonCount) {
+            const DockLayout d = ComputeInspectorDock();
+            const float dh = d.dock[3] - d.dock[1];
+            EmitPanel(out, d.dock[0], d.dock[1], d.dock[2], d.dock[3],
+                      theme.dock_r, theme.dock_g, theme.dock_b, std::max(theme.dock_a, 0.62f), dh * 0.48f,
+                      th * 0.85f, theme.dock_br, theme.dock_bg, theme.dock_bb, std::max(theme.dock_ba, 0.55f));
+
+            char title[64];
             const int pct = int(std::lround(g_layout[size_t(g_selected)].r * 200.0f));
-            std::snprintf(info, sizeof(info), "%s  -  HEIGHT %d%%  -  DRAG OR PINCH",
-                          kButtons[size_t(g_selected)].label, pct);
+            std::snprintf(title, sizeof(title), "%s  %d%%", kButtons[size_t(g_selected)].label, pct);
+            EmitTextCentered(out, d.label_cx, d.label_cy, h * 0.031f,
+                             theme.dock_tr, theme.dock_tg, theme.dock_tb, 0.96f, title);
+
+            // Circular ( - ) and ( + ) resize pills
+            const float mr = (d.minus[3] - d.minus[1]) * 0.5f;
+            EmitPanel(out, d.minus[0], d.minus[1], d.minus[2], d.minus[3],
+                      theme.pill_r, theme.pill_g, theme.pill_b, theme.pill_a, mr,
+                      theme.pill_bw, theme.pill_br, theme.pill_bg, theme.pill_bb, theme.pill_ba);
+            EmitTextCentered(out, (d.minus[0] + d.minus[2]) * 0.5f, (d.minus[1] + d.minus[3]) * 0.5f,
+                             h * 0.042f, theme.pill_tr, theme.pill_tg, theme.pill_tb, 0.98f, "-");
+
+            EmitPanel(out, d.plus[0], d.plus[1], d.plus[2], d.plus[3],
+                      theme.pill_r, theme.pill_g, theme.pill_b, theme.pill_a, mr,
+                      theme.pill_bw, theme.pill_br, theme.pill_bg, theme.pill_bb, theme.pill_ba);
+            EmitTextCentered(out, (d.plus[0] + d.plus[2]) * 0.5f, (d.plus[1] + d.plus[3]) * 0.5f,
+                             h * 0.042f, theme.pill_tr, theme.pill_tg, theme.pill_tb, 0.98f, "+");
+
+            if (d.has_hide) {
+                const bool is_hidden = g_layout[size_t(g_selected)].hidden;
+                const float hr = (d.hide[3] - d.hide[1]) * 0.48f;
+                if (is_hidden) {
+                    EmitPanel(out, d.hide[0], d.hide[1], d.hide[2], d.hide[3],
+                              theme.act_r, theme.act_g, theme.act_b, theme.act_a, hr,
+                              theme.pill_bw, theme.act_br, theme.act_bg, theme.act_bb, theme.act_ba);
+                    EmitTextCentered(out, (d.hide[0] + d.hide[2]) * 0.5f, (d.hide[1] + d.hide[3]) * 0.5f,
+                                     h * 0.029f, theme.act_tr, theme.act_tg, theme.act_tb, 0.98f, "Show");
+                } else {
+                    EmitPanel(out, d.hide[0], d.hide[1], d.hide[2], d.hide[3],
+                              theme.pill_r, theme.pill_g, theme.pill_b, theme.pill_a, hr,
+                              theme.pill_bw, theme.pill_br, theme.pill_bg, theme.pill_bb, theme.pill_ba);
+                    EmitTextCentered(out, (d.hide[0] + d.hide[2]) * 0.5f, (d.hide[1] + d.hide[3]) * 0.5f,
+                                     h * 0.029f, theme.pill_tr, theme.pill_tg, theme.pill_tb, 0.96f, "Hide");
+                }
+            }
         } else {
-            std::snprintf(info, sizeof(info), "DRAG TO MOVE  -  PINCH OR +/- TO RESIZE  -  TAP %s TO SWITCH",
-                          g_edit_menu_tab ? "MENU" : "PLAY");
+            const float iy = bdock[3] + h * 0.032f;
+            EmitTextCentered(out, w * 0.5f, iy, h * 0.026f, 0.96f, 0.97f, 1.00f, 0.84f,
+                             "Drag to move  |  Tap a control to resize or hide");
         }
-        const float iy = (kBarY + kBarH + 0.042f) * h;
-        EmitTextCentered(out, w * 0.5f, iy, h * 0.021f, 0.95f, 0.95f, 0.98f, 0.88f, info);
     }
 }
 
 bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& out_w, uint32_t& out_h) {
     constexpr uint32_t kAtlasW = 2048;
-    constexpr uint32_t kAtlasH = 2048;
+    constexpr uint32_t kAtlasH = 2560;
     constexpr uint32_t kPad = 4;
 
     rgba.assign(size_t(kAtlasW) * kAtlasH * 4u, 0u);
@@ -1998,7 +2185,7 @@ bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& out_w, uint32_t& out_h) {
                 cur_y += row_h + kPad;
                 row_h = 0;
             }
-            if (cur_y + spec.cell_h + kPad > 1950u) {
+            if (cur_y + spec.cell_h + kPad > 1910u) {
                 LOGE("touch: SVG atlas overflow at %s/%s", kSkinDirs[s], spec.file);
                 break;
             }
@@ -2023,12 +2210,12 @@ bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& out_w, uint32_t& out_h) {
         }
     }
 
-    // Bake crisp 5x7 UI font into bottom strip (y = 1960..2000) for zero-ImGui editor & toasts
-    BakeFontIntoAtlas(rgba, kAtlasW, kAtlasH, 1960u);
+    // Bake anti-aliased proportional Google Roboto font into bottom region (y = 1920..2496)
+    BakeRobotoIntoAtlas(rgba, kAtlasW, kAtlasH, 1920u);
 
     out_w = kAtlasW;
     out_h = kAtlasH;
-    LOGI("[OK] touch: rasterized %d SVG icons + UI font into %ux%u native Vulkan atlas",
+    LOGI("[OK] touch: rasterized %d SVG icons + Roboto font into %ux%u native Vulkan atlas",
          loaded_count, out_w, out_h);
     return loaded_count > 0;
 }
