@@ -497,6 +497,7 @@ enum class Role : uint8_t { None, Button, RadioSwipe, GarageSwipe, FmvHold, Drag
 enum : int {
     kSteerLeft = -10,
     kSteerRight = -11,
+    kBurnout = -12,  // Simultaneous Gas + Handbrake (synced with remapped bindings)
     kAnalogA = 0,
     kAnalogB = 1,
     kAnalogX = 2,
@@ -514,6 +515,7 @@ enum class SvgIcon : uint8_t {
     Gas,
     Brake,
     Handbrake,
+    Burnout,
     Nitro,
     Turbo,
     Special,
@@ -529,6 +531,8 @@ enum class SvgIcon : uint8_t {
     DpadDown,
     DpadLeft,
     DpadRight,
+    DpadLeftGarage,
+    DpadRightGarage,
     Ok,
     Back,
     Count,
@@ -548,6 +552,7 @@ constexpr SvgSpec kSvgSpecs[kSvgIconCount] = {
     {"gas",          128, 256},
     {"brake",        170, 256},
     {"handbrake",    192, 192},
+    {"burnout",      192, 192},
     {"nitro",        192, 192},
     {"turbo",        192, 192},
     {"special",      192, 192},
@@ -563,6 +568,8 @@ constexpr SvgSpec kSvgSpecs[kSvgIconCount] = {
     {"dpad-down",    192, 192},
     {"dpad-left",    192, 192},
     {"dpad-right",   192, 192},
+    {"dpad-left",    170, 256},
+    {"dpad-right",   170, 256},
     {"ok",           192, 192},
     {"back",         192, 192},
 };
@@ -599,6 +606,7 @@ constexpr Button kButtons[] = {
     {"gas",         "GAS",         SvgIcon::Gas,         kAnalogRT,     game::GameAction::Gas,         When::Play,           0.50f,       true,  false},
     {"brake",       "BRAKE",       SvgIcon::Brake,       kAnalogLT,     game::GameAction::Brake,       When::Play,           2.0f / 3.0f, true,  false},
     {"handbrake",   "HANDBRAKE",   SvgIcon::Handbrake,   kAnalogA,      game::GameAction::Handbrake,   When::Play,           1.0f,        false, false},
+    {"burnout",     "BURNOUT",     SvgIcon::Burnout,     kBurnout,      game::GameAction::Count,       When::Play,           1.0f,        false, false},
     {"nitro",       "NITRO",       SvgIcon::Nitro,       kAnalogX,      game::GameAction::Nitro,       When::PlayNos,        1.0f,        false, false},
     {"turbo",       "TURBO",       SvgIcon::Turbo,       kAnalogX,      game::GameAction::Nitro,       When::PlayTurbo,      1.0f,        false, false},
     {"special",     "SPECIAL",     SvgIcon::Special,     kBit + 6,      game::GameAction::Special,     When::PlaySpecial,    1.0f,        false, false},
@@ -623,20 +631,21 @@ constexpr size_t kIdxSteerRight = 1;
 constexpr size_t kIdxGas = 2;
 constexpr size_t kIdxBrake = 3;
 constexpr size_t kIdxHandbrake = 4;
-constexpr size_t kIdxNitro = 5;
-constexpr size_t kIdxTurbo = 6;
-constexpr size_t kIdxSpecial = 7;
-constexpr size_t kIdxPause = 8;
-constexpr size_t kIdxCamera = 9;
-constexpr size_t kIdxMap = 10;
-constexpr size_t kIdxFlash = 11;
-constexpr size_t kIdxLookBack = 12;
-constexpr size_t kIdxDpadUp = 13;
-constexpr size_t kIdxDpadDown = 14;
-constexpr size_t kIdxDpadLeft = 15;
-constexpr size_t kIdxDpadRight = 16;
-constexpr size_t kIdxOk = 17;
-constexpr size_t kIdxBack = 18;
+constexpr size_t kIdxBurnout = 5;
+constexpr size_t kIdxNitro = 6;
+constexpr size_t kIdxTurbo = 7;
+constexpr size_t kIdxSpecial = 8;
+constexpr size_t kIdxPause = 9;
+constexpr size_t kIdxCamera = 10;
+constexpr size_t kIdxMap = 11;
+constexpr size_t kIdxFlash = 12;
+constexpr size_t kIdxLookBack = 13;
+constexpr size_t kIdxDpadUp = 14;
+constexpr size_t kIdxDpadDown = 15;
+constexpr size_t kIdxDpadLeft = 16;
+constexpr size_t kIdxDpadRight = 17;
+constexpr size_t kIdxOk = 18;
+constexpr size_t kIdxBack = 19;
 
 // Screen-percentage placement:
 //   x, y in [0..1] screen shares
@@ -677,7 +686,8 @@ Layout ComputeDefaultLayout(float screen_w, float screen_h) {
     L[kIdxBrake] = {brk_x, brk_y, brk_r, false};
 
     const float hb_r = 0.068f;
-    L[kIdxHandbrake] = {brk_x, brk_y - brk_r - hb_r - 0.045f, hb_r, false};
+    const float hb_y = brk_y - brk_r - hb_r - 0.045f;
+    L[kIdxHandbrake] = {brk_x, hb_y, hb_r, false};
 
     const float nitro_r = 0.075f;
     L[kIdxNitro] = {gas_x, gas_y - gas_r - nitro_r - 0.045f, nitro_r, false};
@@ -685,6 +695,7 @@ Layout ComputeDefaultLayout(float screen_w, float screen_h) {
     const float turbo_r = 0.078f;
     const float turbo_rx = rx_of(turbo_r, 1.0f);
     const float aux_x = brk_x - brk_rx - turbo_rx - 0.024f;
+    L[kIdxBurnout] = {aux_x, hb_y - 0.045f, 0.064f, false};
     L[kIdxTurbo]   = {aux_x, brk_y - brk_r * 0.85f, turbo_r, false};
     L[kIdxSpecial] = {aux_x, brk_y + brk_r * 0.25f, 0.074f, false};
 
@@ -771,6 +782,10 @@ float g_layout_w = 1920.0f, g_layout_h = 1080.0f;
 
 std::atomic<bool> g_editing{false};
 bool g_edit_menu_tab = false;  // false = Gameplay controls, true = Menu controls
+bool g_snap_grid = true;       // #7 QoL: Snap-to-grid + magnetic partner/symmetry alignment
+float g_guide_x = -1.0f;       // Active magnetic vertical alignment guide (0..1, <0 hidden)
+float g_guide_y = -1.0f;       // Active magnetic horizontal alignment guide (0..1, <0 hidden)
+float g_guide_mirror_x = -1.0f;// Active mirror symmetry partner guide (0..1, <0 hidden)
 Layout g_before{};
 float g_before_opacity = 0.85f;
 int g_selected = -1;
@@ -907,13 +922,24 @@ bool ButtonShown(size_t i) {
     return false;
 }
 
+bool IsGarageTallDpad(size_t i) {
+    return !g_editing && CurrentUiContext() == game::UiContext::Garage &&
+           (i == kIdxDpadLeft || i == kIdxDpadRight);
+}
+
 void ButtonRect(size_t i, float& x0, float& y0, float& x1, float& y1) {
     const float w = Width();
     const float h = Height();
     const float cx = g_layout[i].x * w;
     const float cy = g_layout[i].y * h;
-    const float half_h = g_layout[i].r * g_scale * h;
-    const float half_w = half_h * kButtons[i].w_over_h;
+    float half_h = g_layout[i].r * g_scale * h;
+    float aspect_wh = kButtons[i].w_over_h;
+    if (IsGarageTallDpad(i)) {
+        // Garage mode: 2:3 W:H ratio for Left/Right car browsing buttons
+        aspect_wh = 2.0f / 3.0f;
+        half_h = g_layout[i].r * 1.5f * g_scale * h;
+    }
+    const float half_w = half_h * aspect_wh;
     x0 = cx - half_w;
     y0 = cy - half_h;
     x1 = cx + half_w;
@@ -929,7 +955,7 @@ size_t HitButton(float x, float y) {
         const float cy = (y0 + y1) * 0.5f;
         const float hw = (x1 - x0) * 0.5f;
         const float hh = (y1 - y0) * 0.5f;
-        if (kButtons[i].w_over_h < 0.95f) {
+        if (kButtons[i].w_over_h < 0.95f || IsGarageTallDpad(i)) {
             if (std::fabs(x - cx) <= hw * 1.12f && std::fabs(y - cy) <= hh * 1.14f) return i;
         } else {
             const float r = hh * 1.18f;
@@ -940,19 +966,20 @@ size_t HitButton(float x, float y) {
 }
 
 // ============================================================================
-// Custom Native Vulkan Editor Top Toolbar (Zero ImGui!)
+// Custom Native Vulkan Editor Top Toolbar (Zero ImGui!) + Snap-to-Grid & Symmetry
 // ============================================================================
-enum { kBarTab, kBarReset, kBarSmaller, kBarBigger, kBarHide, kBarCancel, kBarDone, kBarCount };
-constexpr float kBarY = 0.055f, kBarH = 0.088f, kBarGap = 0.012f;
+enum { kBarTab, kBarSnap, kBarReset, kBarSmaller, kBarBigger, kBarHide, kBarCancel, kBarDone, kBarCount };
+constexpr float kBarY = 0.055f, kBarH = 0.088f, kBarGap = 0.010f;
 constexpr float kMinRadius = 0.035f, kMaxRadius = 0.28f;
 constexpr float kSizeStep = 1.1f;
 
 float BarWidth(int i) {
     switch (i) {
-        case kBarTab:     return 0.125f;
+        case kBarTab:     return 0.105f;
+        case kBarSnap:    return 0.105f;
         case kBarSmaller:
-        case kBarBigger:  return 0.068f;
-        default:          return 0.115f;
+        case kBarBigger:  return 0.060f;
+        default:          return 0.105f;
     }
 }
 
@@ -961,6 +988,7 @@ bool Hideable(int i) { return i >= 0 && size_t(i) < kButtonCount && !kButtons[si
 const char* BarLabel(int i) {
     switch (i) {
         case kBarTab:     return g_edit_menu_tab ? "MENU" : "PLAY";
+        case kBarSnap:    return g_snap_grid ? "SNAP ON" : "SNAP";
         case kBarReset:   return "RESET";
         case kBarSmaller: return "-";
         case kBarBigger:  return "+";
@@ -1005,10 +1033,26 @@ void CloseEditor(bool keep) {
         g_opacity = g_before_opacity;
     }
     g_selected = -1;
+    g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
     g_editing = false;
 }
 
-void Resize(size_t i, float r) { g_layout[i].r = std::clamp(r, kMinRadius, kMaxRadius); }
+void Resize(size_t i, float r) {
+    const float clamped = std::clamp(r, kMinRadius, kMaxRadius);
+    g_layout[i].r = clamped;
+    // Symmetry pair sizing when SNAP is active: keep Steer L/R and D-Pad tiles uniform
+    if (g_snap_grid) {
+        if (i == kIdxSteerLeft || i == kIdxSteerRight) {
+            g_layout[kIdxSteerLeft].r = clamped;
+            g_layout[kIdxSteerRight].r = clamped;
+        } else if (i == kIdxDpadUp || i == kIdxDpadDown || i == kIdxDpadLeft || i == kIdxDpadRight) {
+            g_layout[kIdxDpadUp].r = clamped;
+            g_layout[kIdxDpadDown].r = clamped;
+            g_layout[kIdxDpadLeft].r = clamped;
+            g_layout[kIdxDpadRight].r = clamped;
+        }
+    }
+}
 
 constexpr uint64_t kStepMs = 110, kRepeatAfterMs = 420, kRepeatMs = 160;
 bool DpadStep(uint64_t held) {
@@ -1036,10 +1080,16 @@ void EditDown(Finger& f, float x, float y) {
         case kBarTab:
             g_edit_menu_tab = !g_edit_menu_tab;
             g_selected = -1;
+            g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
+            return;
+        case kBarSnap:
+            g_snap_grid = !g_snap_grid;
+            g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
             return;
         case kBarReset:
             g_layout = ComputeDefaultLayout(Width(), Height());
             g_selected = -1;
+            g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
             return;
         case kBarSmaller:
         case kBarBigger:
@@ -1139,8 +1189,51 @@ void FingerMove(SDL_FingerID id, float x, float y) {
         f.y = y;
         if (f.role == Role::Drag) {
             Place& p = g_layout[f.button];
-            p.x = std::clamp((x - f.x0) / w, 0.02f, 0.98f);
-            p.y = std::clamp((y - f.y0) / h, 0.04f, 0.96f);
+            float nx = std::clamp((x - f.x0) / w, 0.02f, 0.98f);
+            float ny = std::clamp((y - f.y0) / h, 0.04f, 0.96f);
+            g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
+            if (g_snap_grid) {
+                bool snapped_x = false, snapped_y = false;
+                // 1. Magnetic center-screen alignment
+                if (std::fabs(nx - 0.50f) < 0.012f) { nx = 0.50f; g_guide_x = 0.50f; snapped_x = true; }
+                if (std::fabs(ny - 0.50f) < 0.014f) { ny = 0.50f; g_guide_y = 0.50f; snapped_y = true; }
+                // 2. Magnetic partner & horizontal mirror symmetry alignment with other visible buttons
+                float best_dx = 0.012f, best_dy = 0.014f, best_mx = 0.012f;
+                for (size_t j = 0; j < kButtonCount; ++j) {
+                    if (j == f.button || !ButtonShown(j)) continue;
+                    const Place& o = g_layout[j];
+                    if (!snapped_y) {
+                        const float dy = std::fabs(ny - o.y);
+                        if (dy < best_dy) {
+                            best_dy = dy;
+                            ny = o.y;
+                            g_guide_y = o.y;
+                        }
+                    }
+                    if (!snapped_x) {
+                        const float dx = std::fabs(nx - o.x);
+                        if (dx < best_dx) {
+                            best_dx = dx;
+                            nx = o.x;
+                            g_guide_x = o.x;
+                            g_guide_mirror_x = -1.0f;
+                        }
+                        const float mx = 1.0f - o.x;
+                        const float dmx = std::fabs(nx - mx);
+                        if (dmx < best_mx && dmx < best_dx) {
+                            best_mx = dmx;
+                            nx = mx;
+                            g_guide_x = mx;
+                            g_guide_mirror_x = o.x;
+                        }
+                    }
+                }
+                // 3. Soft 2.5% grid snap on free axes
+                if (g_guide_x < 0.0f) nx = std::clamp(std::round(nx / 0.025f) * 0.025f, 0.02f, 0.98f);
+                if (g_guide_y < 0.0f) ny = std::clamp(std::round(ny / 0.025f) * 0.025f, 0.04f, 0.96f);
+            }
+            p.x = nx;
+            p.y = ny;
         }
         if (f.role == Role::Drag || f.role == Role::Pinch) {
             for (const Finger& o : g_fingers) {
@@ -1187,6 +1280,10 @@ void FingerMove(SDL_FingerID id, float x, float y) {
 
 void FingerUp(SDL_FingerID id) {
     std::erase_if(g_fingers, [id](const Finger& f) { return f.id == id; });
+    if (std::none_of(g_fingers.begin(), g_fingers.end(),
+                     [](const Finger& f) { return f.role == Role::Drag; })) {
+        g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
+    }
     Recount();
 }
 
@@ -1392,6 +1489,13 @@ void AdaptRectangularSvg(SvgIcon icon, std::string& svg) {
         ReplaceAll(svg, "x=\"12\" y=\"24\" width=\"104\" height=\"80\" rx=\"22\"",
                         "x=\"12\" y=\"12\" width=\"104\" height=\"168\" rx=\"24\"");
         ReplaceAll(svg, "<rect x=\"31\" ", "<rect transform=\"translate(0 32)\" x=\"31\" ");
+    } else if (icon == SvgIcon::DpadLeftGarage || icon == SvgIcon::DpadRightGarage) {
+        ReplaceAll(svg, "viewBox=\"0 0 512 512\" width=\"512\" height=\"512\"",
+                        "viewBox=\"0 0 512 768\" width=\"512\" height=\"768\"");
+        ReplaceAll(svg, "width=\"512\" height=\"512\"", "width=\"512\" height=\"768\"");
+        ReplaceAll(svg, "x=\"12\" y=\"12\" width=\"104\" height=\"104\"",
+                        "x=\"12\" y=\"12\" width=\"104\" height=\"168\"");
+        ReplaceAll(svg, "<path ", "<path transform=\"translate(0 32)\" ");
     }
 }
 
@@ -1418,6 +1522,9 @@ bool ReadSvgFile(const char* skin_dir, const char* icon_name, std::string& out) 
 
 SvgIcon ActiveIconForButton(size_t i) {
     const Button& b = kButtons[i];
+    if (IsGarageTallDpad(i)) {
+        return (i == kIdxDpadLeft) ? SvgIcon::DpadLeftGarage : SvgIcon::DpadRightGarage;
+    }
     if (b.when == When::PlaySpecial && !g_editing) {
         const int8_t st = game::Telemetry().special_type.load(std::memory_order_relaxed);
         if (st == 0) return SvgIcon::SpecialZone;
@@ -1607,6 +1714,10 @@ void Apply(int port, input::Pad& pad) {
             steer -= 1;
         } else if (p == kSteerRight) {
             steer += 1;
+        } else if (p == kBurnout) {
+            // Burnout: simultaneously hold Gas + Handbrake (synced with any in-game remaps!)
+            ApplyRemappedAction(pad, game::GameAction::Gas, 0, kAnalogRT);
+            ApplyRemappedAction(pad, game::GameAction::Handbrake, 0, kAnalogA);
         } else {
             ApplyRemappedAction(pad, kButtons[i].action, 0, p);
         }
@@ -1667,13 +1778,32 @@ void BuildOverlay(std::vector<Quad>& out) {
     const uint32_t skin = std::min<uint32_t>(g_skin, kSkins - 1);
     const bool atlas_ok = g_skin_ready.load(std::memory_order_relaxed);
 
-    // 1. Editor backdrop + alignment guides (zero ImGui!)
+    // 1. Editor backdrop + 5% snap grid + live magnetic symmetry alignment guides (zero ImGui!)
     if (editing) {
         EmitPanel(out, 0, 0, w, h, 0.03f, 0.04f, 0.06f, 0.56f, 0.0f);
-        // Subtle 25% / 50% / 75% screen alignment grid lines
-        for (float f : {0.25f, 0.50f, 0.75f}) {
-            EmitPanel(out, w * f - 0.5f, 0, w * f + 0.5f, h, 1.0f, 1.0f, 1.0f, 0.09f, 0.0f);
-            EmitPanel(out, 0, h * f - 0.5f, w, h * f + 0.5f, 1.0f, 1.0f, 1.0f, 0.09f, 0.0f);
+        if (g_snap_grid) {
+            for (int step = 1; step < 20; ++step) {
+                const float f = float(step) * 0.05f;
+                const bool major = (step == 5 || step == 10 || step == 15);
+                const float a = major ? 0.13f : 0.045f;
+                EmitPanel(out, w * f - 0.5f, 0, w * f + 0.5f, h, 1.0f, 1.0f, 1.0f, a, 0.0f);
+                EmitPanel(out, 0, h * f - 0.5f, w, h * f + 0.5f, 1.0f, 1.0f, 1.0f, a, 0.0f);
+            }
+        } else {
+            for (float f : {0.25f, 0.50f, 0.75f}) {
+                EmitPanel(out, w * f - 0.5f, 0, w * f + 0.5f, h, 1.0f, 1.0f, 1.0f, 0.09f, 0.0f);
+                EmitPanel(out, 0, h * f - 0.5f, w, h * f + 0.5f, 1.0f, 1.0f, 1.0f, 0.09f, 0.0f);
+            }
+        }
+        // Live glowing alignment guides when magnetically snapped during drag
+        if (g_guide_x >= 0.0f) {
+            EmitPanel(out, w * g_guide_x - 1.0f, 0, w * g_guide_x + 1.0f, h, 0.25f, 0.92f, 1.0f, 0.75f, 0.0f);
+        }
+        if (g_guide_mirror_x >= 0.0f) {
+            EmitPanel(out, w * g_guide_mirror_x - 1.0f, 0, w * g_guide_mirror_x + 1.0f, h, 1.0f, 0.80f, 0.28f, 0.55f, 0.0f);
+        }
+        if (g_guide_y >= 0.0f) {
+            EmitPanel(out, 0, h * g_guide_y - 1.0f, w, h * g_guide_y + 1.0f, 0.25f, 0.92f, 1.0f, 0.75f, 0.0f);
         }
     }
 
@@ -1792,6 +1922,7 @@ void BuildOverlay(std::vector<Quad>& out) {
             BarAt(0, 0, r, i);
             const bool done = (i == kBarDone);
             const bool tab = (i == kBarTab);
+            const bool snap_on = (i == kBarSnap && g_snap_grid);
             const bool size_btn = (i == kBarSmaller || i == kBarBigger);
             const bool disabled = (size_btn && g_selected < 0) || (i == kBarHide && !Hideable(g_selected));
             const float a = disabled ? 0.42f : 0.95f;
@@ -1804,6 +1935,9 @@ void BuildOverlay(std::vector<Quad>& out) {
             } else if (tab) {
                 fr = 0.14f; fg = 0.36f; fb = 0.58f; fa = 0.92f;
                 br = 0.45f; bg = 0.78f; bb = 1.0f;  ba = 0.90f;
+            } else if (snap_on) {
+                fr = 0.10f; fg = 0.44f; fb = 0.48f; fa = 0.92f;
+                br = 0.32f; bg = 0.92f; bb = 0.96f; ba = 0.90f;
             }
 
             EmitPanel(out, r[0], r[1], r[2], r[3], fr, fg, fb, fa, h * 0.018f, th * 0.9f, br, bg, bb, ba);
@@ -1864,7 +1998,7 @@ bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& out_w, uint32_t& out_h) {
                 cur_y += row_h + kPad;
                 row_h = 0;
             }
-            if (cur_y + spec.cell_h + kPad > 1900u) {
+            if (cur_y + spec.cell_h + kPad > 1950u) {
                 LOGE("touch: SVG atlas overflow at %s/%s", kSkinDirs[s], spec.file);
                 break;
             }
@@ -1889,8 +2023,8 @@ bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& out_w, uint32_t& out_h) {
         }
     }
 
-    // Bake crisp 5x7 UI font into bottom strip (y = 1920..2000) for zero-ImGui editor & toasts
-    BakeFontIntoAtlas(rgba, kAtlasW, kAtlasH, 1920u);
+    // Bake crisp 5x7 UI font into bottom strip (y = 1960..2000) for zero-ImGui editor & toasts
+    BakeFontIntoAtlas(rgba, kAtlasW, kAtlasH, 1960u);
 
     out_w = kAtlasW;
     out_h = kAtlasH;

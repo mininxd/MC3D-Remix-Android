@@ -690,40 +690,73 @@ uint64_t SteadyNowMs() {
     return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(since).count()) + 1u;
 }
 
+bool IsUnskippableMovieName(const std::string& raw_name) {
+    if (raw_name.empty()) return false;
+    const size_t slash = raw_name.find_last_of("\\/");
+    std::string name = (slash == std::string::npos) ? raw_name : raw_name.substr(slash + 1u);
+    for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return name.find("rockstar") != std::string::npos ||
+           name.find("sdlogo") != std::string::npos ||
+           name.find("sandiego") != std::string::npos ||
+           name.find("legal") != std::string::npos ||
+           name.find("esrb") != std::string::npos;
+}
+
 void UpdateTouchTelemetry() {
     auto& tel = game::Telemetry();
 
     const uint64_t now_ms = SteadyNowMs();
     const uint64_t last_fmv = tel.fmv_frame_ms.load(std::memory_order_relaxed);
-    const bool fmv_active = (last_fmv != 0u) && (now_ms >= last_fmv) && ((now_ms - last_fmv) < 280u);
+    const bool fmv_recent = (last_fmv != 0u) && (now_ms >= last_fmv) && ((now_ms - last_fmv) < 220u);
 
     const uint32_t state_mgr = safe_mem::Read32(0x00557ED0u, 0u);
     const uint32_t app_state = state_mgr ? safe_mem::Read32(state_mgr + 0x04u, 0u) : 0u;
+
+    // Live movie name directly from MC3D's MovieManager ([0x0053F2E4] + 0xE8) used by sub_0015ACB0
+    // ("rockstar", "sdlogo", "mc3intro", story cutscenes, etc.).
+    bool fmv_unskippable = tel.fmv_unskippable.load(std::memory_order_relaxed);
+    if (app_state == 0x04u || fmv_recent) {
+        const uint32_t movie_mgr = safe_mem::Read32(0x0053F2E4u, 0u);
+        if (movie_mgr != 0u && safe_mem::CanAccess(movie_mgr + 0xE8u, 4u)) {
+            const std::string live_movie = safe_mem::ReadSanitizedCString(movie_mgr + 0xE8u, 64u);
+            if (!live_movie.empty()) {
+                fmv_unskippable = IsUnskippableMovieName(live_movie);
+                tel.fmv_unskippable.store(fmv_unskippable, std::memory_order_relaxed);
+            }
+        }
+    }
 
     const uint32_t menu_mgr = safe_mem::Read32(0x0050F148u, 0u);
     const uint32_t menu_obj = menu_mgr ? safe_mem::Read32(menu_mgr + 0x0Cu, 0u) : 0u;
     const uint32_t menu_owner = menu_obj ? safe_mem::Read32(menu_obj + 0x0Cu, 0u) : 0u;
     const bool menu_visible = menu_owner && ((safe_mem::Read8(menu_owner + 0x44u, 0u) & 0x01u) != 0u);
 
+    // Exact MC3D in-game Pause flags verified from sub_00154550 (PauseGame) & sub_001545C0 (ResumeGame):
+    //   [state_mgr + 0x09] = sim paused, [0x0050F159] = global UI pause, [menu_mgr + 0x04] = mcUiManager paused
+    const bool is_paused =
+        (state_mgr != 0u && safe_mem::Read8(state_mgr + 0x09u, 0u) != 0u) ||
+        (safe_mem::Read8(0x0050F159u, 0u) != 0u) ||
+        (menu_mgr != 0u && safe_mem::Read8(menu_mgr + 0x04u, 0u) != 0u) ||
+        menu_visible;
+
     const uint32_t car_mgr = safe_mem::Read32(0x00558814u, 0u);
     const uint32_t player_car = car_mgr ? safe_mem::Read32(car_mgr + 0x08u, 0u) : 0u;
 
+    // Verified from default.xbe jump table @ 0x0001FEDC:
+    //   0x01 = Boot/Idle, 0x02/0x03 = In-Game Driving/Pause, 0x04 = FMV/Movie,
+    //   0x05 = Garage/Showroom (0x0050F12C), 0x06/0x07 = Frontend / Main Menu / Title / Options
     UiContext ctx = UiContext::Loading;
-    if (fmv_active || app_state == 0x04u) {
-        ctx = tel.fmv_unskippable.load(std::memory_order_relaxed)
-                  ? UiContext::FmvUnskippable
-                  : UiContext::FmvSkippable;
-    } else if (app_state == 0x03u) {
+    if (app_state == 0x04u || (fmv_recent && app_state <= 0x01u)) {
+        ctx = fmv_unskippable ? UiContext::FmvUnskippable : UiContext::FmvSkippable;
+    } else if (app_state == 0x05u) {
         ctx = UiContext::Garage;
-    } else if (app_state == 0x05u || app_state == 0x07u) {
-        // Frontend / Title / Profile Select / Main Menu / Submenus
+    } else if (app_state == 0x06u || app_state == 0x07u) {
         ctx = UiContext::MainMenu;
-    } else if (app_state == 0x02u) {
-        if (menu_visible) ctx = UiContext::MainMenu;
+    } else if (app_state == 0x02u || app_state == 0x03u) {
+        if (is_paused) ctx = UiContext::MainMenu;
         else if (player_car != 0u) ctx = UiContext::Gameplay;
         else ctx = UiContext::Loading;
     } else {
-        // Boot / idle / loading transitions (state 0, 1, 6): hide all controls
         ctx = UiContext::Loading;
     }
     tel.ui_context.store(static_cast<uint8_t>(ctx), std::memory_order_relaxed);
@@ -921,24 +954,23 @@ const char* GetCheatMenuLabel(CheatId id) {
 
 namespace game {
 
+void UpdateTouchTelemetry() {
+    cheats::UpdateTouchTelemetry();
+}
+
 void NotifyFmvOpen(const char* raw_name) {
     auto& tel = Telemetry();
-    std::string name = raw_name ? raw_name : "";
-    for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    const bool unskippable =
-        name.find("rockstar") != std::string::npos ||
-        name.find("sdlogo") != std::string::npos ||
-        name.find("sandiego") != std::string::npos ||
-        name.find("legal") != std::string::npos ||
-        name.find("esrb") != std::string::npos ||
-        name.find("rsg") != std::string::npos;
+    const std::string name = raw_name ? raw_name : "";
+    const bool unskippable = cheats::IsUnskippableMovieName(name);
     tel.fmv_unskippable.store(unskippable, std::memory_order_relaxed);
     tel.fmv_frame_ms.store(cheats::SteadyNowMs(), std::memory_order_relaxed);
+    cheats::UpdateTouchTelemetry();
     LOGI("[OK] fmv: opened '%s' (%s)", name.c_str(), unskippable ? "unskippable-hide-all" : "skippable-hold-start");
 }
 
 void NotifyFmvFrame() {
     Telemetry().fmv_frame_ms.store(cheats::SteadyNowMs(), std::memory_order_relaxed);
+    cheats::UpdateTouchTelemetry();
 }
 
 }  // namespace game

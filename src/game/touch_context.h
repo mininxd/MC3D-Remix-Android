@@ -60,5 +60,6 @@ inline TouchTelemetry& Telemetry() {
 
 void NotifyFmvOpen(const char* name);
 void NotifyFmvFrame();
+void UpdateTouchTelemetry();
 
 }  // namespace game

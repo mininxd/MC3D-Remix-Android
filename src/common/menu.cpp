@@ -21,6 +21,7 @@
 #include "common/mouse_keyboard.h"
 #include "common/options.h"
 #include "common/translations.h"
+#include "game/touch_context.h"
 
 // native/gyro.cpp: aiming by turning the phone
 namespace gyro {
@@ -697,6 +698,8 @@ bool MenuOpen() { return false; }
 
 void DrawUi(double fps) {
     game::g_fps = float(fps);
+    // Keep touch UI context (FMV, Main Menu, Garage, Gameplay, remapped bindings) synced every presented frame
+    game::UpdateTouchTelemetry();
 }
 
 }  // namespace app
