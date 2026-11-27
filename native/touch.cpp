@@ -494,7 +494,7 @@ namespace {
 
 using input::NowMs;
 
-enum class Role : uint8_t { None, Button, RadioSwipe, GarageSwipe, FmvHold, Drag, Pinch };
+enum class Role : uint8_t { None, Button, RadioSwipe, GarageSwipe, FmvHold, Drag, Pinch, ToolbarDrag };
 
 // Controller press targets
 enum : int {
@@ -534,6 +534,8 @@ enum class SvgIcon : uint8_t {
     DpadDown,
     DpadLeft,
     DpadRight,
+    DpadUpGarage,
+    DpadDownGarage,
     DpadLeftGarage,
     DpadRightGarage,
     Ok,
@@ -571,10 +573,12 @@ constexpr SvgSpec kSvgSpecs[kSvgIconCount] = {
     {"dpad-down",    192, 192},
     {"dpad-left",    192, 192},
     {"dpad-right",   192, 192},
-    {"dpad-left",    170, 256},
-    {"dpad-right",   170, 256},
-    {"ok",           192, 192},
-    {"back",         192, 192},
+    {"dpad-up",      256, 128},
+    {"dpad-down",    256, 128},
+    {"dpad-left",    128, 256},
+    {"dpad-right",   128, 256},
+    {"ok",           284, 120},
+    {"back",         284, 120},
 };
 
 enum Skin : uint32_t { kOutline = 0, kFilledWhite = 1, kFilledDark = 2, kSkins = 3 };
@@ -619,13 +623,13 @@ constexpr Button kButtons[] = {
     {"flash",       "Flash",       SvgIcon::FlashLights, kAnalogWhite,  game::GameAction::FlashLights, When::Play,           1.0f,        false, false},
     {"look_back",   "Look Back",   SvgIcon::LookBack,    kAnalogY,      game::GameAction::LookBack,    When::Play,           1.0f,        false, false},
 
-    // Menu & Garage minimal navigation controls (1.25x sized, aspect-aware percentage placement)
-    {"dpad_up",     "D-Pad Up",    SvgIcon::DpadUp,      kBit + 0,      game::GameAction::Count,       When::MainMenuOnly,   1.0f,        false, false},
-    {"dpad_down",   "D-Pad Down",  SvgIcon::DpadDown,    kBit + 1,      game::GameAction::Count,       When::MainMenuOnly,   1.0f,        false, false},
+    // Menu & Garage minimal navigation controls (NFSU2 wide pill OK/Back + dynamic Garage D-Pad)
+    {"dpad_up",     "D-Pad Up",    SvgIcon::DpadUp,      kBit + 0,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
+    {"dpad_down",   "D-Pad Down",  SvgIcon::DpadDown,    kBit + 1,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
     {"dpad_left",   "D-Pad Left",  SvgIcon::DpadLeft,    kBit + 2,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
     {"dpad_right",  "D-Pad Right", SvgIcon::DpadRight,   kBit + 3,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
-    {"ok",          "OK",          SvgIcon::Ok,          kAnalogA,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
-    {"back",        "Back",        SvgIcon::Back,        kAnalogB,      game::GameAction::Count,       When::MenusAndGarage, 1.0f,        true,  false},
+    {"ok",          "OK",          SvgIcon::Ok,          kAnalogA,      game::GameAction::Count,       When::MenusAndGarage, 2.375f,      true,  false},
+    {"back",        "Back",        SvgIcon::Back,        kAnalogB,      game::GameAction::Count,       When::MenusAndGarage, 2.375f,      true,  false},
 };
 
 constexpr size_t kButtonCount = std::size(kButtons);
@@ -723,16 +727,14 @@ Layout ComputeDefaultLayout(float screen_w, float screen_h) {
     L[kIdxDpadLeft]  = {dp_cx - dp_step_x, dp_cy, dp_r, false};
     L[kIdxDpadRight] = {dp_cx + dp_step_x, dp_cy, dp_r, false};
 
-    const float ok_r = 0.095f;    // 1.25x of 0.076 (19.0% screen height)
-    const float ok_rx = rx_of(ok_r, 1.0f);
-    const float back_r = 0.0825f; // 1.25x of 0.066 (16.5% screen height)
-    const float back_rx = rx_of(back_r, 1.0f);
-    const float ok_x = 1.0f - edge_x - ok_rx - 0.008f;
-    const float ok_y = 1.0f - edge_y - ok_r - 0.065f;
-    const float back_x = ok_x - (ok_rx + back_rx) * 1.18f;
-    const float back_y = 1.0f - edge_y - back_r;
-    L[kIdxOk]   = {ok_x, ok_y, ok_r, false};
-    L[kIdxBack] = {back_x, back_y, back_r, false};
+    // NFSU2-style wide horizontal pill OK & Back stacked vertically on bottom-right (114x48 dp -> 2.375:1)
+    const float pill_r = 0.064f;   // 12.8% screen height -> 30.4% screen height wide
+    const float pill_rx = rx_of(pill_r, 2.375f);
+    const float pill_x = 1.0f - edge_x - pill_rx;
+    const float ok_y = 1.0f - edge_y - pill_r;
+    const float back_y = ok_y - pill_r * 2.0f - 0.032f;
+    L[kIdxOk]   = {pill_x, ok_y, pill_r, false};
+    L[kIdxBack] = {pill_x, back_y, pill_r, false};
 
     return L;
 }
@@ -752,6 +754,7 @@ struct Finger {
     float x = 0, y = 0;
     uint64_t down_ms = 0;
     bool swipe_fired = false;
+    float notch_x = 0;
     float notch_y = 0;
 };
 
@@ -789,6 +792,9 @@ bool g_snap_grid = true;       // #7 QoL: Snap-to-grid + magnetic partner/symmet
 float g_guide_x = -1.0f;       // Active magnetic vertical alignment guide (0..1, <0 hidden)
 float g_guide_y = -1.0f;       // Active magnetic horizontal alignment guide (0..1, <0 hidden)
 float g_guide_mirror_x = -1.0f;// Active mirror symmetry partner guide (0..1, <0 hidden)
+float g_bar_cx = 0.50f;        // Draggable NFSU2-style editor card center X (0..1)
+float g_bar_top = 0.032f;      // Draggable NFSU2-style editor card top Y (0..1)
+bool g_bar_dragging = false;   // Highlights card border in NFSU2 lime while dragging
 Layout g_before{};
 float g_before_opacity = 0.85f;
 int g_selected = -1;
@@ -852,8 +858,8 @@ void LoadLayout() {
         for (uint32_t i = 0; i < kSkins; i++) {
             if (skin == kSkinDirs[i]) g_skin = i;
         }
-        // layout_version >= 3 includes 1.25x aspect-aware Menu/Garage buttons & Gameplay layout
-        if (t["layout_version"].value_or(0) >= 3) {
+        // layout_version >= 4 includes NFSU2-style stacked horizontal pill OK/Back & dynamic Garage D-Pad
+        if (t["layout_version"].value_or(0) >= 4) {
             for (size_t i = 0; i < kButtonCount; i++) {
                 const toml::table* p = t["controls"][kButtons[i].id].as_table();
                 if (!p) continue;
@@ -876,7 +882,7 @@ void SaveLayout() {
                         toml::table{{"x", double(p.x)}, {"y", double(p.y)}, {"r", double(p.r)}, {"hidden", p.hidden}});
     }
     toml::table t{
-        {"layout_version", 3},
+        {"layout_version", 4},
         {"opacity", double(g_opacity)},
         {"scale", double(g_scale)},
         {"skin", kSkinDirs[g_skin]},
@@ -901,6 +907,21 @@ bool IsGameplayButton(When w) {
     return w == When::Play || w == When::PlayNos || w == When::PlayTurbo || w == When::PlaySpecial;
 }
 
+bool GarageVerticalMode() {
+    return !g_editing && CurrentUiContext() == game::UiContext::Garage &&
+           game::Telemetry().garage_vertical.load(std::memory_order_relaxed);
+}
+
+bool IsGarageHorizontalDpad(size_t i) {
+    return !g_editing && CurrentUiContext() == game::UiContext::Garage && !GarageVerticalMode() &&
+           (i == kIdxDpadLeft || i == kIdxDpadRight);
+}
+
+bool IsGarageVerticalDpad(size_t i) {
+    return !g_editing && CurrentUiContext() == game::UiContext::Garage && GarageVerticalMode() &&
+           (i == kIdxDpadUp || i == kIdxDpadDown);
+}
+
 bool ButtonShown(size_t i) {
     const Button& b = kButtons[i];
     if (g_editing) {
@@ -912,6 +933,12 @@ bool ButtonShown(size_t i) {
     if (ctx == game::UiContext::Loading || ctx == game::UiContext::FmvUnskippable ||
         ctx == game::UiContext::FmvSkippable) {
         return false;
+    }
+    if (ctx == game::UiContext::Garage) {
+        // Garage dynamically swaps Left/Right (1:2) <-> Up/Down (2:1) based on active menu orientation
+        const bool vert = game::Telemetry().garage_vertical.load(std::memory_order_relaxed);
+        if (i == kIdxDpadUp || i == kIdxDpadDown) return vert;
+        if (i == kIdxDpadLeft || i == kIdxDpadRight) return !vert;
     }
     switch (b.when) {
         case When::MainMenuOnly:
@@ -933,23 +960,35 @@ bool ButtonShown(size_t i) {
     return false;
 }
 
-bool IsGarageTallDpad(size_t i) {
-    return !g_editing && CurrentUiContext() == game::UiContext::Garage &&
-           (i == kIdxDpadLeft || i == kIdxDpadRight);
-}
-
 void ButtonRect(size_t i, float& x0, float& y0, float& x1, float& y1) {
     const float w = Width();
     const float h = Height();
-    const float cx = g_layout[i].x * w;
-    const float cy = g_layout[i].y * h;
+    float cx = g_layout[i].x * w;
+    float cy = g_layout[i].y * h;
     float half_h = g_layout[i].r * g_scale * h;
     float aspect_wh = kButtons[i].w_over_h;
-    if (IsGarageTallDpad(i)) {
-        // Garage mode: 2:3 W:H ratio for Left/Right car browsing buttons
-        aspect_wh = 2.0f / 3.0f;
-        half_h = g_layout[i].r * 1.5f * g_scale * h;
+
+    if (IsGarageHorizontalDpad(i)) {
+        // Garage Horizontal mode (Depth 0): 1:2 W:H Left & Right side-by-side at D-Pad center
+        const float mid_x = 0.5f * (g_layout[kIdxDpadLeft].x + g_layout[kIdxDpadRight].x) * w;
+        const float mid_y = 0.5f * (g_layout[kIdxDpadUp].y + g_layout[kIdxDpadDown].y) * h;
+        const float base_r = g_layout[kIdxDpadLeft].r * g_scale * h;
+        aspect_wh = 0.50f;
+        half_h = base_r * 2.0f;  // 1:2 tall (width = 2*base_r, height = 4*base_r)
+        const float half_w = half_h * aspect_wh;  // = base_r
+        cx = mid_x + (i == kIdxDpadLeft ? -half_w * 1.16f : half_w * 1.16f);
+        cy = mid_y;
+    } else if (IsGarageVerticalDpad(i)) {
+        // Garage Vertical mode (Depth >= 1): 2:1 W:H Up & Down stacked top-down (exact transpose of 1:2!)
+        const float mid_x = 0.5f * (g_layout[kIdxDpadLeft].x + g_layout[kIdxDpadRight].x) * w;
+        const float mid_y = 0.5f * (g_layout[kIdxDpadUp].y + g_layout[kIdxDpadDown].y) * h;
+        const float base_r = g_layout[kIdxDpadLeft].r * g_scale * h;
+        aspect_wh = 2.0f;
+        half_h = base_r;         // 2:1 wide (width = 4*base_r, height = 2*base_r -> identical area!)
+        cx = mid_x;
+        cy = mid_y + (i == kIdxDpadUp ? -half_h * 1.18f : half_h * 1.18f);
     }
+
     const float half_w = half_h * aspect_wh;
     x0 = cx - half_w;
     y0 = cy - half_h;
@@ -966,8 +1005,9 @@ size_t HitButton(float x, float y) {
         const float cy = (y0 + y1) * 0.5f;
         const float hw = (x1 - x0) * 0.5f;
         const float hh = (y1 - y0) * 0.5f;
-        if (kButtons[i].w_over_h < 0.95f || IsGarageTallDpad(i)) {
-            if (std::fabs(x - cx) <= hw * 1.12f && std::fabs(y - cy) <= hh * 1.14f) return i;
+        const float aspect = hw / std::max(hh, 1.0f);
+        if (aspect < 0.95f || aspect > 1.05f) {
+            if (std::fabs(x - cx) <= hw * 1.12f && std::fabs(y - cy) <= hh * 1.16f) return i;
         } else {
             const float r = hh * 1.18f;
             if ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r) return i;
@@ -977,126 +1017,101 @@ size_t HitButton(float x, float y) {
 }
 
 // ============================================================================
-// Custom Skin-Matched Native Vulkan Layout Editor (Outline / Filled White / Filled Dark)
+// NFSU2-Style Draggable Floating Layout Editor Card (Zero ImGui, Google Roboto)
 // ============================================================================
-enum { kBarTab, kBarSnap, kBarReset, kBarCancel, kBarDone, kBarCount };
-enum { kDockNone = -1, kDockBody = 0, kDockSmaller = 1, kDockBigger = 2, kDockHide = 3 };
-constexpr float kBarY = 0.042f, kBarH = 0.076f, kBarGap = 0.011f;
+enum EditorBtn : int {
+    kEdReset = 0,
+    kEdMinus,
+    kEdPlus,
+    kEdSave,
+    kEdCancel,
+    kEdTab,
+    kEdSnap,
+    kEdHide,
+    kEdCount,
+};
 constexpr float kMinRadius = 0.035f, kMaxRadius = 0.28f;
 constexpr float kSizeStep = 1.1f;
 
-float BarWidth(int i) {
-    switch (i) {
-        case kBarTab:    return 0.130f;
-        case kBarSnap:   return 0.125f;
-        case kBarReset:  return 0.100f;
-        case kBarCancel: return 0.105f;
-        case kBarDone:   return 0.105f;
-        default:         return 0.105f;
-    }
-}
-
 bool Hideable(int i) { return i >= 0 && size_t(i) < kButtonCount && !kButtons[size_t(i)].keep; }
 
-const char* BarLabel(int i) {
-    switch (i) {
-        case kBarTab:    return g_edit_menu_tab ? "Menu" : "Gameplay";
-        case kBarSnap:   return g_snap_grid ? "Snap On" : "Snap Off";
-        case kBarReset:  return "Reset";
-        case kBarCancel: return "Cancel";
-        case kBarDone:   return "Save";
-        default:         return "";
-    }
-}
-
-void BarDockRect(float rect[4]) {
-    const float w = Width(), h = Height();
-    float total = (kBarCount - 1) * kBarGap;
-    for (int i = 0; i < kBarCount; i++) total += BarWidth(i);
-    const float pad_x = 0.014f * w;
-    const float pad_y = 0.014f * h;
-    rect[0] = (0.5f - total * 0.5f) * w - pad_x;
-    rect[1] = kBarY * h - pad_y;
-    rect[2] = (0.5f + total * 0.5f) * w + pad_x;
-    rect[3] = (kBarY + kBarH) * h + pad_y;
-}
-
-int BarAt(float x, float y, float rect[4] = nullptr, int which = -1) {
-    const float w = Width(), h = Height();
-    float total = (kBarCount - 1) * kBarGap;
-    for (int i = 0; i < kBarCount; i++) total += BarWidth(i);
-    float left = 0.5f - total * 0.5f;
-    for (int i = 0; i < kBarCount; i++) {
-        float x0 = left * w, y0 = kBarY * h;
-        float x1 = x0 + BarWidth(i) * w, y1 = y0 + kBarH * h;
-        left += BarWidth(i) + kBarGap;
-        if (i == which && rect) {
-            rect[0] = x0; rect[1] = y0; rect[2] = x1; rect[3] = y1;
-            return i;
-        }
-        if (which < 0 && x >= x0 && x <= x1 && y >= y0 && y <= y1) return i;
-    }
-    return -1;
-}
-
-struct DockLayout {
-    float dock[4];
-    float label_cx, label_cy;
-    float minus[4];
-    float plus[4];
-    float hide[4];
-    bool has_hide = false;
+struct EditorCard {
+    float card[4];
+    float grip[4];
+    float btns[kEdCount][4];
+    float status_cy;
 };
 
-DockLayout ComputeInspectorDock() {
-    const float w = Width(), h = Height();
-    DockLayout d{};
-    d.has_hide = Hideable(g_selected);
-    const float dock_h = h * 0.098f;
-    const float btn_h = h * 0.068f;
-    const float circ_d = btn_h;
-    const float hide_w = d.has_hide ? (h * 0.155f) : 0.0f;
-    const float gap = h * 0.018f;
-    const float pad_x = h * 0.032f;
-    const float label_w = h * 0.34f;
-    const float dock_w = pad_x + label_w + gap + circ_d + gap + circ_d + (d.has_hide ? (gap + hide_w) : 0.0f) + pad_x;
-    const float cy = h * 0.905f;
-    const float cx = w * 0.5f;
-
-    d.dock[0] = cx - dock_w * 0.5f;
-    d.dock[1] = cy - dock_h * 0.5f;
-    d.dock[2] = cx + dock_w * 0.5f;
-    d.dock[3] = cy + dock_h * 0.5f;
-
-    float cur_x = d.dock[0] + pad_x;
-    d.label_cx = cur_x + label_w * 0.5f;
-    d.label_cy = cy;
-    cur_x += label_w + gap;
-
-    d.minus[0] = cur_x; d.minus[1] = cy - btn_h * 0.5f;
-    d.minus[2] = cur_x + circ_d; d.minus[3] = cy + btn_h * 0.5f;
-    cur_x += circ_d + gap;
-
-    d.plus[0] = cur_x; d.plus[1] = cy - btn_h * 0.5f;
-    d.plus[2] = cur_x + circ_d; d.plus[3] = cy + btn_h * 0.5f;
-    cur_x += circ_d + gap;
-
-    if (d.has_hide) {
-        d.hide[0] = cur_x; d.hide[1] = cy - btn_h * 0.5f;
-        d.hide[2] = cur_x + hide_w; d.hide[3] = cy + btn_h * 0.5f;
-    }
-    return d;
+void ClampEditorCard(float w, float h, float card_w, float card_h) {
+    const float half_w = card_w * 0.5f;
+    const float min_cx = (half_w + w * 0.012f) / w;
+    const float max_cx = std::max(min_cx, 1.0f - min_cx);
+    const float min_top = 0.014f;
+    const float max_top = std::max(min_top, 1.0f - (card_h / h) - 0.014f);
+    g_bar_cx = std::clamp(g_bar_cx, min_cx, max_cx);
+    g_bar_top = std::clamp(g_bar_top, min_top, max_top);
 }
 
-int DockAt(float x, float y) {
-    if (g_selected < 0 || size_t(g_selected) >= kButtonCount) return kDockNone;
-    const DockLayout d = ComputeInspectorDock();
-    auto in_rect = [x, y](const float r[4]) { return x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3]; };
-    if (in_rect(d.minus)) return kDockSmaller;
-    if (in_rect(d.plus)) return kDockBigger;
-    if (d.has_hide && in_rect(d.hide)) return kDockHide;
-    if (in_rect(d.dock)) return kDockBody;
-    return kDockNone;
+EditorCard ComputeEditorCard() {
+    const float w = Width(), h = Height();
+    const float card_h = h * 0.168f;
+    const float card_w = std::min(w * 0.86f, h * 1.04f);
+    ClampEditorCard(w, h, card_w, card_h);
+
+    EditorCard c{};
+    const float x0 = g_bar_cx * w - card_w * 0.5f;
+    const float y0 = g_bar_top * h;
+    c.card[0] = x0;
+    c.card[1] = y0;
+    c.card[2] = x0 + card_w;
+    c.card[3] = y0 + card_h;
+
+    const float pad = card_h * 0.085f;
+    const float gap = card_h * 0.075f;
+    const float grip_w = card_h * 0.34f;
+    c.grip[0] = x0;
+    c.grip[1] = y0;
+    c.grip[2] = x0 + grip_w;
+    c.grip[3] = y0 + card_h;
+
+    const float inner_x0 = x0 + grip_w + gap * 0.4f;
+    const float inner_w = (x0 + card_w - pad) - inner_x0;
+    const float row_h = (card_h - pad * 2.0f - gap) * 0.5f;
+    const float r1_y0 = y0 + pad;
+    const float r1_y1 = r1_y0 + row_h;
+    const float r2_y0 = r1_y1 + gap;
+    const float r2_y1 = r2_y0 + row_h;
+
+    // Row 1: RESET | - | + | SAVE | CANCEL (matches NFSU2 RacingControlsView layout)
+    const float r1_weights[5] = {0.22f, 0.12f, 0.12f, 0.28f, 0.26f};
+    const float r1_avail = inner_w - gap * 4.0f;
+    float cx = inner_x0;
+    for (int i = 0; i < 5; ++i) {
+        const float bw = r1_avail * r1_weights[i];
+        c.btns[i][0] = cx;
+        c.btns[i][1] = r1_y0;
+        c.btns[i][2] = cx + bw;
+        c.btns[i][3] = r1_y1;
+        cx += bw + gap;
+    }
+
+    // Row 2: PLAY/MENU | SNAP ON/OFF | HIDE/SHOW
+    const float r2_weights[3] = {0.34f, 0.33f, 0.33f};
+    const float r2_avail = inner_w - gap * 2.0f;
+    cx = inner_x0;
+    for (int i = 0; i < 3; ++i) {
+        const float bw = r2_avail * r2_weights[i];
+        const int bi = kEdTab + i;
+        c.btns[bi][0] = cx;
+        c.btns[bi][1] = r2_y0;
+        c.btns[bi][2] = cx + bw;
+        c.btns[bi][3] = r2_y1;
+        cx += bw + gap;
+    }
+
+    // Place status badge below card (or above if card was dragged near bottom edge)
+    c.status_cy = (c.card[3] + h * 0.065f < h) ? (c.card[3] + h * 0.036f) : (c.card[1] - h * 0.036f);
+    return c;
 }
 
 void OpenEditor() {
@@ -1104,6 +1119,9 @@ void OpenEditor() {
     g_before_opacity = g_opacity;
     g_selected = -1;
     g_edit_menu_tab = false;
+    g_bar_cx = 0.50f;
+    g_bar_top = 0.030f;
+    g_bar_dragging = false;
     g_editing = true;
 }
 
@@ -1115,6 +1133,7 @@ void CloseEditor(bool keep) {
         g_opacity = g_before_opacity;
     }
     g_selected = -1;
+    g_bar_dragging = false;
     g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
     g_editing = false;
 }
@@ -1157,49 +1176,68 @@ void Recount() {
 }
 
 void EditDown(Finger& f, float x, float y) {
-    int bar = BarAt(x, y);
-    switch (bar) {
-        case kBarTab:
-            g_edit_menu_tab = !g_edit_menu_tab;
-            g_selected = -1;
-            g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
+    const EditorCard c = ComputeEditorCard();
+    auto in_rect = [x, y](const float r[4]) { return x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3]; };
+
+    // Inside floating NFSU2 editor card?
+    if (in_rect(c.card)) {
+        // Left grip handle -> drag toolbar card immediately
+        if (in_rect(c.grip)) {
+            f.role = Role::ToolbarDrag;
+            f.x0 = x - g_bar_cx * Width();
+            f.y0 = y - g_bar_top * Height();
+            g_bar_dragging = true;
             return;
-        case kBarSnap:
-            g_snap_grid = !g_snap_grid;
-            g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
-            return;
-        case kBarReset:
-            g_layout = ComputeDefaultLayout(Width(), Height());
-            g_selected = -1;
-            g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
-            return;
-        case kBarCancel:
-            CloseEditor(false);
-            return;
-        case kBarDone:
-            CloseEditor(true);
-            return;
-        default:
-            break;
-    }
-    // Check bottom floating inspector dock when a control is selected
-    const int dock = DockAt(x, y);
-    if (dock == kDockSmaller || dock == kDockBigger) {
-        float r = g_layout[size_t(g_selected)].r;
-        Resize(size_t(g_selected), dock == kDockBigger ? r * kSizeStep : r / kSizeStep);
+        }
+        // Check action buttons inside card
+        for (int i = 0; i < kEdCount; ++i) {
+            if (!in_rect(c.btns[i])) continue;
+            switch (i) {
+                case kEdReset:
+                    g_layout = ComputeDefaultLayout(Width(), Height());
+                    g_selected = -1;
+                    g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
+                    return;
+                case kEdMinus:
+                    if (g_selected >= 0 && size_t(g_selected) < kButtonCount) {
+                        Resize(size_t(g_selected), g_layout[size_t(g_selected)].r / kSizeStep);
+                    }
+                    return;
+                case kEdPlus:
+                    if (g_selected >= 0 && size_t(g_selected) < kButtonCount) {
+                        Resize(size_t(g_selected), g_layout[size_t(g_selected)].r * kSizeStep);
+                    }
+                    return;
+                case kEdSave:
+                    CloseEditor(true);
+                    return;
+                case kEdCancel:
+                    CloseEditor(false);
+                    return;
+                case kEdTab:
+                    g_edit_menu_tab = !g_edit_menu_tab;
+                    g_selected = -1;
+                    g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
+                    return;
+                case kEdSnap:
+                    g_snap_grid = !g_snap_grid;
+                    g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
+                    return;
+                case kEdHide:
+                    if (Hideable(g_selected)) g_layout[size_t(g_selected)].hidden ^= true;
+                    return;
+                default:
+                    return;
+            }
+        }
+        // Touched card background outside buttons -> drag toolbar card anywhere on screen!
+        f.role = Role::ToolbarDrag;
+        f.x0 = x - g_bar_cx * Width();
+        f.y0 = y - g_bar_top * Height();
+        g_bar_dragging = true;
         return;
     }
-    if (dock == kDockHide) {
-        if (Hideable(g_selected)) g_layout[size_t(g_selected)].hidden ^= true;
-        return;
-    }
-    if (dock == kDockBody) {
-        return;
-    }
-    // Ignore taps inside the top dock container margin
-    float bdock[4];
-    BarDockRect(bdock);
-    if (x >= bdock[0] && x <= bdock[2] && y >= bdock[1] && y <= bdock[3]) return;
+
     for (const Finger& d : g_fingers) {
         if (d.role != Role::Drag) continue;
         f.role = Role::Pinch;
@@ -1261,6 +1299,7 @@ void FingerDown(SDL_FingerID id, float x, float y) {
             f.role = Role::RadioSwipe;
         } else if (ctx == game::UiContext::Garage) {
             f.role = Role::GarageSwipe;
+            f.notch_x = x;
             f.notch_y = y;
         }
     }
@@ -1277,6 +1316,14 @@ void FingerMove(SDL_FingerID id, float x, float y) {
         if (f.id != id) continue;
         f.x = x;
         f.y = y;
+        if (f.role == Role::ToolbarDrag) {
+            const float card_h = h * 0.168f;
+            const float card_w = std::min(w * 0.86f, h * 1.04f);
+            g_bar_cx = (x - f.x0) / w;
+            g_bar_top = (y - f.y0) / h;
+            ClampEditorCard(w, h, card_w, card_h);
+            continue;
+        }
         if (f.role == Role::Drag) {
             Place& p = g_layout[f.button];
             float nx = std::clamp((x - f.x0) / w, 0.02f, 0.98f);
@@ -1355,13 +1402,26 @@ void FingerMove(SDL_FingerID id, float x, float y) {
             }
         }
         if (f.role == Role::GarageSwipe) {
-            const float notch = h * 0.065f;
-            if (y <= f.notch_y - notch) {
-                f.notch_y -= notch;
-                g_pulse_until[0] = now + kPulseMs;
-            } else if (y >= f.notch_y + notch) {
-                f.notch_y += notch;
-                g_pulse_until[1] = now + kPulseMs;
+            if (GarageVerticalMode()) {
+                // Vertical Up/Down buttons are shown -> open-canvas horizontal swipe sends Left/Right!
+                const float notch = w * 0.055f;
+                if (x <= f.notch_x - notch) {
+                    f.notch_x -= notch;
+                    g_pulse_until[2] = now + kPulseMs;
+                } else if (x >= f.notch_x + notch) {
+                    f.notch_x += notch;
+                    g_pulse_until[3] = now + kPulseMs;
+                }
+            } else {
+                // Horizontal Left/Right buttons are shown -> open-canvas vertical swipe sends Up/Down!
+                const float notch = h * 0.065f;
+                if (y <= f.notch_y - notch) {
+                    f.notch_y -= notch;
+                    g_pulse_until[0] = now + kPulseMs;
+                } else if (y >= f.notch_y + notch) {
+                    f.notch_y += notch;
+                    g_pulse_until[1] = now + kPulseMs;
+                }
             }
         }
     }
@@ -1373,6 +1433,10 @@ void FingerUp(SDL_FingerID id) {
     if (std::none_of(g_fingers.begin(), g_fingers.end(),
                      [](const Finger& f) { return f.role == Role::Drag; })) {
         g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
+    }
+    if (std::none_of(g_fingers.begin(), g_fingers.end(),
+                     [](const Finger& f) { return f.role == Role::ToolbarDrag; })) {
+        g_bar_dragging = false;
     }
     Recount();
 }
@@ -1636,11 +1700,18 @@ void AdaptRectangularSvg(SvgIcon icon, std::string& svg) {
         ReplaceAll(svg, "<rect x=\"31\" ", "<rect transform=\"translate(0 32)\" x=\"31\" ");
     } else if (icon == SvgIcon::DpadLeftGarage || icon == SvgIcon::DpadRightGarage) {
         ReplaceAll(svg, "viewBox=\"0 0 512 512\" width=\"512\" height=\"512\"",
-                        "viewBox=\"0 0 512 768\" width=\"512\" height=\"768\"");
-        ReplaceAll(svg, "width=\"512\" height=\"512\"", "width=\"512\" height=\"768\"");
+                        "viewBox=\"0 0 512 1024\" width=\"512\" height=\"1024\"");
+        ReplaceAll(svg, "width=\"512\" height=\"512\"", "width=\"512\" height=\"1024\"");
         ReplaceAll(svg, "x=\"12\" y=\"12\" width=\"104\" height=\"104\"",
-                        "x=\"12\" y=\"12\" width=\"104\" height=\"168\"");
-        ReplaceAll(svg, "<path ", "<path transform=\"translate(0 32)\" ");
+                        "x=\"12\" y=\"12\" width=\"104\" height=\"232\"");
+        ReplaceAll(svg, "<path ", "<path transform=\"translate(0 64)\" ");
+    } else if (icon == SvgIcon::DpadUpGarage || icon == SvgIcon::DpadDownGarage) {
+        ReplaceAll(svg, "viewBox=\"0 0 512 512\" width=\"512\" height=\"512\"",
+                        "viewBox=\"0 0 1024 512\" width=\"1024\" height=\"512\"");
+        ReplaceAll(svg, "width=\"512\" height=\"512\"", "width=\"1024\" height=\"512\"");
+        ReplaceAll(svg, "x=\"12\" y=\"12\" width=\"104\" height=\"104\"",
+                        "x=\"12\" y=\"12\" width=\"232\" height=\"104\"");
+        ReplaceAll(svg, "<path ", "<path transform=\"translate(64 0)\" ");
     }
 }
 
@@ -1667,8 +1738,11 @@ bool ReadSvgFile(const char* skin_dir, const char* icon_name, std::string& out) 
 
 SvgIcon ActiveIconForButton(size_t i) {
     const Button& b = kButtons[i];
-    if (IsGarageTallDpad(i)) {
+    if (IsGarageHorizontalDpad(i)) {
         return (i == kIdxDpadLeft) ? SvgIcon::DpadLeftGarage : SvgIcon::DpadRightGarage;
+    }
+    if (IsGarageVerticalDpad(i)) {
+        return (i == kIdxDpadUp) ? SvgIcon::DpadUpGarage : SvgIcon::DpadDownGarage;
     }
     if (b.when == When::PlaySpecial && !g_editing) {
         const int8_t st = game::Telemetry().special_type.load(std::memory_order_relaxed);
@@ -1848,6 +1922,7 @@ void Apply(int port, input::Pad& pad) {
     UpdateFmvHoldLocked(now);
     Recount();
     bool used = false;
+    bool gas_held = false;
     int steer = 0;
     const auto ctx = CurrentUiContext();
 
@@ -1855,6 +1930,7 @@ void Apply(int port, input::Pad& pad) {
         if (!g_pressed[i]) continue;
         const int p = kButtons[i].press;
         used = true;
+        if (kButtons[i].action == game::GameAction::Gas) gas_held = true;
         if (p == kSteerLeft) {
             steer -= 1;
         } else if (p == kSteerRight) {
@@ -1866,6 +1942,13 @@ void Apply(int port, input::Pad& pad) {
         } else {
             ApplyRemappedAction(pad, kButtons[i].action, 0, p);
         }
+    }
+
+    // QoL: Auto Burnout — when holding Gas during pre-race 3-2-1 countdown, automatically hold Handbrake
+    // for a perfect burnout boost launch, releasing Handbrake the instant GO! fires.
+    if (ctx == game::UiContext::Gameplay && gas_held && game::Opt().auto_burnout &&
+        game::Telemetry().race_countdown.load(std::memory_order_relaxed)) {
+        ApplyRemappedAction(pad, game::GameAction::Handbrake, 0, kAnalogA);
     }
 
     if (steer != 0) {
@@ -2036,9 +2119,10 @@ void BuildOverlay(std::vector<Quad>& out) {
         if (editing) {
             if (int(i) == g_selected) {
                 const float pad = th * 3.0f;
+                // NFSU2-style lime selection outline (#C8F088)
                 EmitPanel(out, x0 - pad, y0 - pad, x1 + pad, y1 + pad,
-                          1.0f, 1.0f, 1.0f, 0.10f, std::min(bw, bh) * 0.26f + pad * 0.5f,
-                          th * 1.35f, 1.0f, 1.0f, 1.0f, 0.98f);
+                          0.784f, 0.941f, 0.533f, 0.14f, std::min(bw, bh) * 0.28f + pad * 0.5f,
+                          th * 1.45f, 0.784f, 0.941f, 0.533f, 0.96f);
             } else if (hidden) {
                 EmitPanel(out, x0, y0, x1, y1,
                           0.95f, 0.28f, 0.24f, 0.14f, std::min(bw, bh) * 0.24f,
@@ -2064,92 +2148,113 @@ void BuildOverlay(std::vector<Quad>& out) {
                          theme.pill_tr, theme.pill_tg, theme.pill_tb, 0.96f * alpha, msg);
     }
 
-    // 5. Custom Skin-Matched Mobile Layout Editor UI (Outline / Filled White / Filled Dark + Roboto)
+    // 5. NFSU2-Style Floating Draggable Two-Row Layout Editor Card (Zero ImGui, Google Roboto)
     if (editing) {
-        // Top floating capsule dock backing
-        float bdock[4];
-        BarDockRect(bdock);
-        const float bdock_h = bdock[3] - bdock[1];
-        EmitPanel(out, bdock[0], bdock[1], bdock[2], bdock[3],
-                  theme.dock_r, theme.dock_g, theme.dock_b, theme.dock_a, bdock_h * 0.48f,
-                  th * 0.75f, theme.dock_br, theme.dock_bg, theme.dock_bb, theme.dock_ba);
+        const EditorCard c = ComputeEditorCard();
+        const float card_r = h * 0.028f;
+        const float btn_r = h * 0.018f;
+        const float border_w = std::max(1.5f, th * 0.85f);
 
-        for (int i = 0; i < kBarCount; i++) {
-            float r[4];
-            BarAt(0, 0, r, i);
-            const float ph = r[3] - r[1];
-            const bool active = (i == kBarDone) || (i == kBarSnap && g_snap_grid);
-            if (active) {
-                EmitPanel(out, r[0], r[1], r[2], r[3],
-                          theme.act_r, theme.act_g, theme.act_b, theme.act_a, ph * 0.48f,
-                          theme.pill_bw, theme.act_br, theme.act_bg, theme.act_bb, theme.act_ba);
-                EmitTextCentered(out, (r[0] + r[2]) * 0.5f, (r[1] + r[3]) * 0.5f,
-                                 h * 0.030f, theme.act_tr, theme.act_tg, theme.act_tb, 0.98f, BarLabel(i));
-            } else {
-                EmitPanel(out, r[0], r[1], r[2], r[3],
-                          theme.pill_r, theme.pill_g, theme.pill_b, theme.pill_a, ph * 0.48f,
-                          theme.pill_bw, theme.pill_br, theme.pill_bg, theme.pill_bb, theme.pill_ba);
-                EmitTextCentered(out, (r[0] + r[2]) * 0.5f, (r[1] + r[3]) * 0.5f,
-                                 h * 0.030f, theme.pill_tr, theme.pill_tg, theme.pill_tb, 0.96f, BarLabel(i));
-            }
+        // Dark translucent slate card (#DD101620), lime border (#C8F088) when dragging
+        EmitPanel(out, c.card[0], c.card[1], c.card[2], c.card[3],
+                  0.063f, 0.086f, 0.125f, 0.87f, card_r,
+                  g_bar_dragging ? th * 1.35f : border_w,
+                  g_bar_dragging ? 0.784f : 1.0f,
+                  g_bar_dragging ? 0.941f : 1.0f,
+                  g_bar_dragging ? 0.533f : 1.0f,
+                  g_bar_dragging ? 0.95f : 0.34f);
+
+        // Left-side draggable hamburger grip handle (3 crisp horizontal bars)
+        const float gx = 0.5f * (c.grip[0] + c.grip[2]);
+        const float gy = 0.5f * (c.grip[1] + c.grip[3]);
+        const float bar_hw = (c.grip[2] - c.grip[0]) * 0.24f;
+        const float bar_hh = std::max(1.5f, h * 0.0028f);
+        const float bar_sp = h * 0.015f;
+        const float gr = g_bar_dragging ? 0.784f : 1.0f;
+        const float gg = g_bar_dragging ? 0.941f : 1.0f;
+        const float gb = g_bar_dragging ? 0.533f : 1.0f;
+        const float ga = g_bar_dragging ? 0.95f : 0.55f;
+        for (int k = -1; k <= 1; ++k) {
+            const float ly = gy + float(k) * bar_sp;
+            EmitPanel(out, gx - bar_hw, ly - bar_hh, gx + bar_hw, ly + bar_hh,
+                      gr, gg, gb, ga, bar_hh);
         }
 
-        // Bottom floating inspector dock when a control is selected; subtle hint line when none selected
-        if (g_selected >= 0 && size_t(g_selected) < kButtonCount) {
-            const DockLayout d = ComputeInspectorDock();
-            const float dh = d.dock[3] - d.dock[1];
-            EmitPanel(out, d.dock[0], d.dock[1], d.dock[2], d.dock[3],
-                      theme.dock_r, theme.dock_g, theme.dock_b, std::max(theme.dock_a, 0.62f), dh * 0.48f,
-                      th * 0.85f, theme.dock_br, theme.dock_bg, theme.dock_bb, std::max(theme.dock_ba, 0.55f));
+        const bool has_sel = (g_selected >= 0 && size_t(g_selected) < kButtonCount);
+        const bool can_hide = Hideable(g_selected);
+        const bool sel_hidden = has_sel && g_layout[size_t(g_selected)].hidden;
 
-            char title[64];
-            const int pct = int(std::lround(g_layout[size_t(g_selected)].r * 200.0f));
-            std::snprintf(title, sizeof(title), "%s  %d%%", kButtons[size_t(g_selected)].label, pct);
-            EmitTextCentered(out, d.label_cx, d.label_cy, h * 0.031f,
-                             theme.dock_tr, theme.dock_tg, theme.dock_tb, 0.96f, title);
+        auto draw_nfsu2_btn = [&](int idx, const char* label, float txt_h,
+                                  float fr, float fg, float fb, float fa,
+                                  float sr, float sg, float sb, float sa,
+                                  float tr, float tg, float tb, float ta) {
+            const float* r = c.btns[idx];
+            EmitPanel(out, r[0], r[1], r[2], r[3], fr, fg, fb, fa, btn_r,
+                      border_w, sr, sg, sb, sa);
+            EmitTextCentered(out, 0.5f * (r[0] + r[2]), 0.5f * (r[1] + r[3]),
+                             txt_h, tr, tg, tb, ta, label);
+        };
 
-            // Circular ( - ) and ( + ) resize pills
-            const float mr = (d.minus[3] - d.minus[1]) * 0.5f;
-            EmitPanel(out, d.minus[0], d.minus[1], d.minus[2], d.minus[3],
-                      theme.pill_r, theme.pill_g, theme.pill_b, theme.pill_a, mr,
-                      theme.pill_bw, theme.pill_br, theme.pill_bg, theme.pill_bb, theme.pill_ba);
-            EmitTextCentered(out, (d.minus[0] + d.minus[2]) * 0.5f, (d.minus[1] + d.minus[3]) * 0.5f,
-                             h * 0.042f, theme.pill_tr, theme.pill_tg, theme.pill_tb, 0.98f, "-");
+        const float lbl_h = h * 0.025f;
+        const float sym_h = h * 0.036f;
 
-            EmitPanel(out, d.plus[0], d.plus[1], d.plus[2], d.plus[3],
-                      theme.pill_r, theme.pill_g, theme.pill_b, theme.pill_a, mr,
-                      theme.pill_bw, theme.pill_br, theme.pill_bg, theme.pill_bb, theme.pill_ba);
-            EmitTextCentered(out, (d.plus[0] + d.plus[2]) * 0.5f, (d.plus[1] + d.plus[3]) * 0.5f,
-                             h * 0.042f, theme.pill_tr, theme.pill_tg, theme.pill_tb, 0.98f, "+");
+        // Row 1: RESET | - | + | SAVE (Lime) | CANCEL
+        draw_nfsu2_btn(kEdReset, "RESET", lbl_h,
+                       0.094f, 0.125f, 0.157f, 0.88f,  1.0f, 1.0f, 1.0f, 0.34f,  0.88f, 0.88f, 0.88f, 0.95f);
+        draw_nfsu2_btn(kEdMinus, "-", sym_h,
+                       0.118f, 0.157f, 0.212f, has_sel ? 0.90f : 0.52f,
+                       1.0f, 1.0f, 1.0f, has_sel ? 0.42f : 0.18f,
+                       1.0f, 1.0f, 1.0f, has_sel ? 0.98f : 0.40f);
+        draw_nfsu2_btn(kEdPlus, "+", sym_h,
+                       0.118f, 0.157f, 0.212f, has_sel ? 0.90f : 0.52f,
+                       1.0f, 1.0f, 1.0f, has_sel ? 0.42f : 0.18f,
+                       1.0f, 1.0f, 1.0f, has_sel ? 0.98f : 0.40f);
+        draw_nfsu2_btn(kEdSave, "SAVE", lbl_h,
+                       0.094f, 0.188f, 0.110f, 0.92f,  0.533f, 0.878f, 0.376f, 0.72f,  0.784f, 0.941f, 0.533f, 0.98f);
+        draw_nfsu2_btn(kEdCancel, "CANCEL", lbl_h,
+                       0.094f, 0.125f, 0.157f, 0.88f,  1.0f, 1.0f, 1.0f, 0.34f,  0.88f, 0.88f, 0.88f, 0.95f);
 
-            if (d.has_hide) {
-                const bool is_hidden = g_layout[size_t(g_selected)].hidden;
-                const float hr = (d.hide[3] - d.hide[1]) * 0.48f;
-                if (is_hidden) {
-                    EmitPanel(out, d.hide[0], d.hide[1], d.hide[2], d.hide[3],
-                              theme.act_r, theme.act_g, theme.act_b, theme.act_a, hr,
-                              theme.pill_bw, theme.act_br, theme.act_bg, theme.act_bb, theme.act_ba);
-                    EmitTextCentered(out, (d.hide[0] + d.hide[2]) * 0.5f, (d.hide[1] + d.hide[3]) * 0.5f,
-                                     h * 0.029f, theme.act_tr, theme.act_tg, theme.act_tb, 0.98f, "Show");
-                } else {
-                    EmitPanel(out, d.hide[0], d.hide[1], d.hide[2], d.hide[3],
-                              theme.pill_r, theme.pill_g, theme.pill_b, theme.pill_a, hr,
-                              theme.pill_bw, theme.pill_br, theme.pill_bg, theme.pill_bb, theme.pill_ba);
-                    EmitTextCentered(out, (d.hide[0] + d.hide[2]) * 0.5f, (d.hide[1] + d.hide[3]) * 0.5f,
-                                     h * 0.029f, theme.pill_tr, theme.pill_tg, theme.pill_tb, 0.96f, "Hide");
-                }
+        // Row 2: PLAY/MENU (Sky Blue) | SNAP ON/OFF (Teal) | HIDE/SHOW (Amber/Lime)
+        draw_nfsu2_btn(kEdTab, g_edit_menu_tab ? "MENU" : "PLAY", lbl_h,
+                       0.086f, 0.145f, 0.204f, 0.90f,  0.353f, 0.784f, 0.980f, 0.68f,  0.478f, 0.847f, 1.000f, 0.98f);
+        if (g_snap_grid) {
+            draw_nfsu2_btn(kEdSnap, "SNAP ON", lbl_h,
+                           0.086f, 0.176f, 0.157f, 0.90f,  0.361f, 0.910f, 0.753f, 0.68f,  0.486f, 0.973f, 0.816f, 0.98f);
+        } else {
+            draw_nfsu2_btn(kEdSnap, "SNAP OFF", lbl_h,
+                           0.094f, 0.125f, 0.157f, 0.82f,  1.0f, 1.0f, 1.0f, 0.28f,  0.75f, 0.78f, 0.82f, 0.88f);
+        }
+        if (can_hide) {
+            if (sel_hidden) {
+                draw_nfsu2_btn(kEdHide, "SHOW", lbl_h,
+                               0.094f, 0.188f, 0.110f, 0.90f,  0.533f, 0.878f, 0.376f, 0.70f,  0.784f, 0.941f, 0.533f, 0.98f);
+            } else {
+                draw_nfsu2_btn(kEdHide, "HIDE", lbl_h,
+                               0.157f, 0.125f, 0.094f, 0.90f,  1.000f, 0.718f, 0.302f, 0.70f,  1.000f, 0.718f, 0.302f, 0.98f);
             }
         } else {
-            const float iy = bdock[3] + h * 0.032f;
-            EmitTextCentered(out, w * 0.5f, iy, h * 0.026f, 0.96f, 0.97f, 1.00f, 0.84f,
-                             "Drag to move  |  Tap a control to resize or hide");
+            draw_nfsu2_btn(kEdHide, "HIDE", lbl_h,
+                           0.094f, 0.125f, 0.157f, 0.50f,  1.0f, 1.0f, 1.0f, 0.18f,  0.70f, 0.72f, 0.76f, 0.42f);
         }
+
+        // Compact floating status badge beneath (or above) card
+        char status[80];
+        if (has_sel) {
+            const int pct = int(std::lround(g_layout[size_t(g_selected)].r * 200.0f));
+            std::snprintf(status, sizeof(status), "%s  -  %d%%  (Pinch or +/- to resize)",
+                          kButtons[size_t(g_selected)].label, pct);
+        } else {
+            std::snprintf(status, sizeof(status), "Drag controls to move  |  Drag handle to move bar");
+        }
+        EmitTextCentered(out, 0.5f * (c.card[0] + c.card[2]), c.status_cy, h * 0.023f,
+                         has_sel ? 0.784f : 0.94f, has_sel ? 0.941f : 0.96f, has_sel ? 0.533f : 1.00f,
+                         0.90f, status);
     }
 }
 
 bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& out_w, uint32_t& out_h) {
     constexpr uint32_t kAtlasW = 2048;
-    constexpr uint32_t kAtlasH = 2560;
+    constexpr uint32_t kAtlasH = 2816;
     constexpr uint32_t kPad = 4;
 
     rgba.assign(size_t(kAtlasW) * kAtlasH * 4u, 0u);
@@ -2185,7 +2290,7 @@ bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& out_w, uint32_t& out_h) {
                 cur_y += row_h + kPad;
                 row_h = 0;
             }
-            if (cur_y + spec.cell_h + kPad > 1910u) {
+            if (cur_y + spec.cell_h + kPad > 2166u) {
                 LOGE("touch: SVG atlas overflow at %s/%s", kSkinDirs[s], spec.file);
                 break;
             }
@@ -2210,8 +2315,8 @@ bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& out_w, uint32_t& out_h) {
         }
     }
 
-    // Bake anti-aliased proportional Google Roboto font into bottom region (y = 1920..2496)
-    BakeRobotoIntoAtlas(rgba, kAtlasW, kAtlasH, 1920u);
+    // Bake anti-aliased proportional Google Roboto font into bottom region (y = 2176..2752)
+    BakeRobotoIntoAtlas(rgba, kAtlasW, kAtlasH, 2176u);
 
     out_w = kAtlasW;
     out_h = kAtlasH;

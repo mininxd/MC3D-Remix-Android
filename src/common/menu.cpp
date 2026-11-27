@@ -155,7 +155,7 @@ enum RowId { kRenderResolution, kMaxFps, kVsync, kFpsCounter, kAniso, kReloadBlu
              kCheckUpdates, kTouchSensitivity, kLeftDeadzone, kRightDeadzone, kLeftSensitivity, kRightSensitivity,
              kScreenFilter, kGyroInvertX, kGyroInvertY, kTouchSkin, kCredit, kBloom,
              kFog, kAntiAliasing, kMotionBlur, kReflections, kTouchStick, kDynamicRes, kDynamicTarget, kDynamicMin,
-             kDynamicMax, kDynamicHold, kAutoUpdate, kTouchReset };
+             kDynamicMax, kDynamicHold, kAutoUpdate, kTouchReset, kAutoBurnout };
 
 using rows::Kind;
 using rows::Row;
@@ -182,7 +182,7 @@ constexpr Row kQualityRows[] = {
 constexpr Row kTouchRows[] = {
     {Kind::Value, kTouchSkin, "Button Style"},
     {Kind::Value, kTouchOpacity, "Controls Opacity"},
-    {Kind::Value, kTouchSize, "Controls Size"},
+    {Kind::Value, kAutoBurnout, "Auto Burnout"},
     {Kind::Action, kTouchEdit, "Edit Control Layout"},
     {Kind::Action, kTouchReset, "Reset Controls Layout"},
 };
@@ -269,6 +269,7 @@ bool* ToggleFlag(Settings& s, int id) {
         case kInvertMouse: return &o.invert_mouse;
         case kHoldAim: return &o.hold_aim;
         case kDynamicRes: return &o.dynamic_resolution;
+        case kAutoBurnout: return &o.auto_burnout;
         default: return nullptr;
     }
 }

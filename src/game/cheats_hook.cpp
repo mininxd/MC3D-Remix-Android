@@ -766,6 +766,18 @@ void UpdateTouchTelemetry() {
     bool special_ready = false;
     int8_t special_type = -1;
     float speed_kmh = 0.0f;
+    bool race_countdown = false;
+    bool garage_vertical = false;
+
+    if (ctx == UiContext::Garage) {
+        // mcGarage ([0x0050F12C]): depth [mcGarage + 0x448] == 0 is top-level horizontal bar (Left/Right);
+        // depth >= 1 (submenus: parts, categories, showroom/garage lists) or popup box scrolls Up/Down!
+        const uint32_t garage = safe_mem::Read32(0x0050F12Cu, 0u);
+        if (garage != 0u) {
+            const int32_t depth = static_cast<int32_t>(safe_mem::Read32(garage + 0x448u, 0u));
+            garage_vertical = (depth >= 1) || menu_visible;
+        }
+    }
 
     if (ctx == UiContext::Gameplay && player_car != 0u) {
         const uint32_t veh_p14 = safe_mem::Read32(player_car + 0x14u, 0u);
@@ -777,6 +789,22 @@ void UpdateTouchTelemetry() {
             if (std::isfinite(speed_mps)) {
                 speed_kmh = std::fabs(speed_mps) * 3.6f;
             }
+        }
+
+        // Pre-race countdown detection verified from loc_001CC5D0 / sub_001DD1C0:
+        // race = [[0x00533E24] + 0x04]; [race + 0x6F4] = countdown active, [race + 0x9C] = player started,
+        // [race + 0xA4] = float remaining countdown seconds (> 0 during 3-2-1 staging, <= 0 at GO!).
+        const uint32_t race_sys = safe_mem::Read32(0x00533E24u, 0u);
+        const uint32_t race = race_sys ? safe_mem::Read32(race_sys + 0x04u, 0u) : 0u;
+        if (race != 0u && safe_mem::Read8(race + 0x6F4u, 0u) != 0u) {
+            const uint8_t player_started = safe_mem::Read8(race + 0x9Cu, 1u);
+            float countdown_rem = 0.0f;
+            if (safe_mem::CanAccess(race + 0xA4u, 4u)) {
+                const uint32_t cbits = kernel::R32(race + 0xA4u);
+                std::memcpy(&countdown_rem, &cbits, sizeof(countdown_rem));
+            }
+            race_countdown = (player_started == 0u) && std::isfinite(countdown_rem) &&
+                             (countdown_rem > 0.0f) && (speed_kmh < 8.0f);
         }
 
         // NOS: only show when player has purchased nitrous on this vehicle (max_nos > 0).
@@ -816,6 +844,8 @@ void UpdateTouchTelemetry() {
     tel.special_ready.store(special_ready, std::memory_order_relaxed);
     tel.special_type.store(special_type, std::memory_order_relaxed);
     tel.speed_kmh.store(speed_kmh, std::memory_order_relaxed);
+    tel.race_countdown.store(race_countdown, std::memory_order_relaxed);
+    tel.garage_vertical.store(garage_vertical, std::memory_order_relaxed);
 
     // Sync active in-game Controller Configuration / Custom Remap table so remapped controls
     // automatically mirror onto touch buttons (sub_002693D0 -> [profile_mgr + 0x114 + 0x18], table @ 0x00558848).

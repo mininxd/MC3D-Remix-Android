@@ -30,6 +30,7 @@ void Load(const void* table) {
     const toml::table& t = *static_cast<const toml::table*>(table);
     Options& o = Opt();
     o.touch_controls = t["touch_controls"].value_or(o.touch_controls);
+    o.auto_burnout = t["auto_burnout"].value_or(o.auto_burnout);
     o.mouse_sensitivity = float(t["mouse_sensitivity"].value_or(double(o.mouse_sensitivity)));
     o.touch_sensitivity = float(t["touch_sensitivity"].value_or(double(o.touch_sensitivity)));
     o.left_sensitivity = float(t["left_stick_sensitivity"].value_or(double(o.left_sensitivity)));
@@ -52,6 +53,7 @@ void Save(void* table) {
     toml::table& t = *static_cast<toml::table*>(table);
     const Options& o = Opt();
     t.insert("touch_controls", o.touch_controls);
+    t.insert("auto_burnout", o.auto_burnout);
     t.insert("mouse_sensitivity", double(o.mouse_sensitivity));
     t.insert("touch_sensitivity", double(o.touch_sensitivity));
     t.insert("left_stick_sensitivity", double(o.left_sensitivity));

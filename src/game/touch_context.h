@@ -48,6 +48,8 @@ struct TouchTelemetry {
     std::atomic<bool> special_ready{false};  // special ability meter ready/active
     std::atomic<int8_t> special_type{-1};    // 0 = Zone, 1 = Agro, 2 = Roar, -1 = None
     std::atomic<float> speed_kmh{0.0f};      // current car speed in km/h
+    std::atomic<bool> race_countdown{false}; // true during pre-race 3-2-1 staging countdown before GO!
+    std::atomic<bool> garage_vertical{false};// true in Garage when submenu list scrolls Up/Down (depth >= 1)
     std::atomic<uint64_t> fmv_frame_ms{0};   // steady clock ms of last active Bink FMV frame
     std::atomic<bool> fmv_unskippable{true}; // true during unskippable boot Rockstar/Legal movie
     std::array<RemapSlot, static_cast<size_t>(GameAction::Count)> bindings{};
