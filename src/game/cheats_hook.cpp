@@ -28,6 +28,10 @@ X86_EXTERN_FUNC(__imp__sub_00029337);
 X86_EXTERN_FUNC(__imp__sub_00029690);
 X86_EXTERN_FUNC(__imp__sub_00327830);
 X86_EXTERN_FUNC(__imp__sub_001D4F20);
+X86_EXTERN_FUNC(__imp__sub_001015E0);
+X86_EXTERN_FUNC(__imp__sub_00329060);
+X86_EXTERN_FUNC(__imp__sub_0010B320);
+X86_EXTERN_FUNC(__imp__sub_0010B370);
 X86_EXTERN_FUNC(__imp__sub_002BD990);
 X86_EXTERN_FUNC(__imp__sub_001422D0);
 X86_EXTERN_FUNC(__imp__sub_00144C90);
@@ -117,6 +121,26 @@ void ApplyArcadeSettings() {
     }
 }
 
+bool IsValidPowerupType(uint32_t type) {
+    if (type >= 15u) return false;
+    const uint32_t mgr = safe_mem::Read32(0x00533E38u, 0u);
+    if (!mgr) return false;
+    const uint32_t arr = safe_mem::Read32(mgr + 0x0Cu, 0u);
+    if (!arr) return false;
+    return safe_mem::Read32(arr + type * 4u, 0u) != 0u;
+}
+
+uint32_t PickValidPowerupType(uint32_t seed) {
+    const uint32_t mgr = safe_mem::Read32(0x00533E38u, 0u);
+    const uint32_t arr = mgr ? safe_mem::Read32(mgr + 0x0Cu, 0u) : 0u;
+    if (!arr) return 0u;
+    for (uint32_t off = 0; off < 13u; ++off) {
+        const uint32_t cand = (seed + off) % 13u;
+        if (safe_mem::Read32(arr + cand * 4u, 0u) != 0u) return cand;
+    }
+    return 0u;
+}
+
 void SpawnRandomArcadePowerupsForRaceMgr(X86Context& ctx, uint8_t* base, uint32_t race_mgr) {
     if (!g_state.arcade_powerups.load(std::memory_order_relaxed)) return;
     if (!race_mgr || !safe_mem::CanAccess(race_mgr + 0x24u, 8u) ||
@@ -131,15 +155,46 @@ void SpawnRandomArcadePowerupsForRaceMgr(X86Context& ctx, uint8_t* base, uint32_
     if (num_checkpoints <= 0 || num_checkpoints > 128 || !checkpoints_ptr) return;
     if (!safe_mem::CanAccess(checkpoints_ptr, static_cast<uint32_t>(num_checkpoints) * 0x120u)) return;
 
+    // Select 1 checkpoint every 4-5 checkpoints (up to 16 selected checkpoints) and clamp width
+    // to 15.0f so sub_00329850 spawns 3 pickups per selected checkpoint: ((15 - 3 - 3) / 3 = 3).
+    int32_t selected[16];
+    int32_t sel_count = 0;
+    if (num_checkpoints <= 3) {
+        selected[sel_count++] = num_checkpoints / 2;
+    } else {
+        int32_t idx = 2;
+        bool step_five = false;
+        while (idx < num_checkpoints && sel_count < 16) {
+            selected[sel_count++] = idx;
+            idx += step_five ? 5 : 4;
+            step_five = !step_five;
+        }
+    }
+    if (sel_count <= 0) return;
+
     const uint32_t orig_esp = ctx.esp;
     const uint32_t orig_eax = ctx.eax;
     const uint32_t orig_ecx = ctx.ecx;
     const uint32_t orig_edx = ctx.edx;
 
+    const uint32_t tmp_bytes = static_cast<uint32_t>(sel_count) * 0x120u;
+    ctx.esp = (ctx.esp - tmp_bytes) & ~0xFu;
+    const uint32_t tmp_cp_va = ctx.esp;
+    const float target_width = 15.0f;
+    uint32_t target_width_bits = 0u;
+    std::memcpy(&target_width_bits, &target_width, sizeof(target_width_bits));
+
+    for (int32_t i = 0; i < sel_count; ++i) {
+        const uint32_t src_va = checkpoints_ptr + static_cast<uint32_t>(selected[i]) * 0x120u;
+        const uint32_t dst_va = tmp_cp_va + static_cast<uint32_t>(i) * 0x120u;
+        std::memcpy(kernel::HostPtr(dst_va), kernel::HostPtr(src_va), 0x120u);
+        kernel::W32(dst_va + 0x110u, target_width_bits);
+    }
+
     ctx.ecx = race_mgr + 0x80u;
     X86_PUSH32(0u);
-    X86_PUSH32(checkpoints_ptr);
-    X86_PUSH32(static_cast<uint32_t>(num_checkpoints));
+    X86_PUSH32(tmp_cp_va);
+    X86_PUSH32(static_cast<uint32_t>(sel_count));
     X86_PUSH32(0x001D5999u);
     sub_00326FE0(ctx, base);
 
@@ -147,8 +202,22 @@ void SpawnRandomArcadePowerupsForRaceMgr(X86Context& ctx, uint8_t* base, uint32_
     ctx.eax = orig_eax;
     ctx.ecx = orig_ecx;
     ctx.edx = orig_edx;
-    LOGI("[OK] cheats: ARCADE spawned randomized powerups across %d checkpoints (count=%u)",
-         num_checkpoints, unsigned(safe_mem::Read16(race_mgr + 0x80u + 0x08u, 0u)));
+
+    // Sanitize all spawned pickup types so none reference NULL slots (13/14) in mcPowerUpMgr.
+    const uint32_t pickups_ptr = safe_mem::Read32(race_mgr + 0x80u + 0x04u, 0u);
+    const uint16_t spawned = safe_mem::Read16(race_mgr + 0x80u + 0x08u, 0u);
+    if (pickups_ptr && spawned > 0u) {
+        for (uint16_t i = 0; i < spawned; ++i) {
+            const uint32_t p = pickups_ptr + static_cast<uint32_t>(i) * 0x4Cu;
+            if (!safe_mem::CanAccess(p + 0x10u, 4u)) break;
+            const uint32_t ptype = kernel::R32(p + 0x10u);
+            if (!IsValidPowerupType(ptype)) {
+                kernel::W32(p + 0x10u, PickValidPowerupType(i + ptype));
+            }
+        }
+    }
+    LOGI("[OK] cheats: ARCADE spawned %u randomized powerups across %d/%d checkpoints (~3 per 4-5 cp)",
+         unsigned(spawned), sel_count, num_checkpoints);
 }
 
 void ApplyUnlockFlags() {
@@ -519,6 +588,57 @@ X86_FUNC(sub_001D4F20) {
     if ((ctx.eax & 0xFFu) != 0u) {
         game::cheats::SpawnRandomArcadePowerupsForRaceMgr(ctx, base, race_mgr);
     }
+}
+
+// Guard powerup pickup handler against NULL component, NULL vehicle, or NULL powerup slot (13/14).
+// Signature: __thiscall bool sub_001015E0(uint32_t type, uint32_t flag, uint32_t pos_ptr) [ret 0x0C].
+X86_FUNC(sub_001015E0) {
+    const uint32_t comp = ctx.ecx;
+    const uint32_t ptype = X86_MEM32(ctx.esp + 4u);
+    if (!comp || !game::safe_mem::CanAccess(comp + 0x04u, 0x80u) ||
+        game::safe_mem::Read32(comp + 0x04u, 0u) == 0u) {
+        ctx.eax &= 0xFFFFFF00u;
+        ctx.esp += 16u;
+        return;
+    }
+    if (ptype != 0u && !game::cheats::IsValidPowerupType(ptype)) {
+        ctx.eax &= 0xFFFFFF00u;
+        ctx.esp += 16u;
+        return;
+    }
+    __imp__sub_001015E0(ctx, base);
+}
+
+// Sanitize respawned random powerup types so pickups never roll NULL slots (13/14).
+// Signature: __thiscall void sub_00329060(uint32_t rand_seed) [ret 0x04].
+X86_FUNC(sub_00329060) {
+    const uint32_t pickup = ctx.ecx;
+    const uint32_t seed = X86_MEM32(ctx.esp + 4u);
+    __imp__sub_00329060(ctx, base);
+    if (pickup && game::safe_mem::CanAccess(pickup + 0x10u, 4u)) {
+        const uint32_t chosen = kernel::R32(pickup + 0x10u);
+        if (chosen < 16u && !game::cheats::IsValidPowerupType(chosen)) {
+            kernel::W32(pickup + 0x10u, game::cheats::PickValidPowerupType(seed + chosen));
+        }
+    }
+}
+
+// Guard powerup HUD display notifications against NULL HUD pointers in Career races.
+// Both sub_0010B320 and sub_0010B370 are __thiscall [ret 0x04].
+X86_FUNC(sub_0010B320) {
+    if (!ctx.ecx || !game::safe_mem::CanAccess(ctx.ecx + 0x48u, 8u)) {
+        ctx.esp += 8u;
+        return;
+    }
+    __imp__sub_0010B320(ctx, base);
+}
+
+X86_FUNC(sub_0010B370) {
+    if (!ctx.ecx || !game::safe_mem::CanAccess(ctx.ecx + 0x48u, 8u)) {
+        ctx.esp += 8u;
+        return;
+    }
+    __imp__sub_0010B370(ctx, base);
 }
 
 // Race vehicle spawn/init.
