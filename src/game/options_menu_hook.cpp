@@ -543,7 +543,27 @@ extern "C" void sub_0018DB10(X86Context& ctx, uint8_t* base) {
         if (sel_idx < g_entry_count) {
             const NativeEntry& entry = g_entries[sel_idx];
             (void)app::rows::Value(entry.row, step);
-            RefreshVisibleRows(ctx, base);
+
+            // Rebuild native rows immediately if an action added/removed a dynamic row (e.g. "Reset hint").
+            int app_page = app::rows::kDisplayPage;
+            if (page == NativePage::Quality) app_page = app::rows::kQualityPage;
+            else if (page == NativePage::Touch) app_page = app::rows::kTouchPage;
+            size_t new_total = 0;
+            const app::rows::Row* new_rows = app::rows::Page(app_page, &new_total);
+            uint32_t new_visible = 0;
+            for (size_t i = 0; i < new_total; ++i) {
+                if (new_rows[i].kind == app::rows::Kind::Value || new_rows[i].kind == app::rows::Kind::Action) {
+                    ++new_visible;
+                }
+            }
+            if (new_visible != g_entry_count) {
+                PopulateNativeOptionsList(ctx, base, ctx.ecx, page);
+                if (game::safe_mem::CanAccess(list_va + 0x331u, 1u)) {
+                    X86_MEM8(list_va + 0x331u) = 1u;
+                }
+            } else {
+                RefreshVisibleRows(ctx, base);
+            }
         }
     }
 

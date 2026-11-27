@@ -44,8 +44,12 @@ X86_EXTERN_FUNC(__imp__sub_00144C90);
 X86_EXTERN_FUNC(__imp__sub_001474A0);
 X86_EXTERN_FUNC(__imp__sub_0014E300);
 X86_EXTERN_FUNC(__imp__sub_000B2F80);
+X86_EXTERN_FUNC(__imp__sub_000659D0);
 X86_EXTERN_FUNC(__imp__sub_00139520);
 X86_EXTERN_FUNC(__imp__sub_001395E0);
+X86_EXTERN_FUNC(__imp__sub_00209000);
+X86_EXTERN_FUNC(__imp__sub_002090A0);
+X86_EXTERN_FUNC(__imp__sub_002C4A10);
 
 namespace game::cheats {
 namespace {
@@ -123,6 +127,32 @@ void RecordTxtPrompt(uint32_t clip, uint32_t name_va, uint32_t name_len, uint32_
 
 std::atomic<uint32_t> g_full_map_obj{0};
 std::atomic<bool> g_full_map_open{false};
+std::atomic<uint32_t> g_button_prompts_table_va{0};
+
+bool IsControllerPromptClip(uint32_t name_va) {
+    if (!name_va || !safe_mem::CanAccess(name_va, 2u)) return false;
+    const auto* src = static_cast<const char*>(kernel::HostPtr(name_va));
+    char low[36];
+    size_t len = 0;
+    for (; len < 35u; ++len) {
+        if (!safe_mem::CanAccess(name_va + static_cast<uint32_t>(len), 1u)) break;
+        const unsigned char c = static_cast<unsigned char>(src[len]);
+        if (c == 0u) break;
+        if (c < 0x20u || c >= 0x7Fu) return false;
+        low[len] = static_cast<char>((c >= 'A' && c <= 'Z') ? (c + ('a' - 'A')) : c);
+    }
+    low[len] = '\0';
+    if (len < 4u) return false;
+    if (std::strstr(low, "prompt") != nullptr) return true;
+    return std::strcmp(low, "triggers") == 0 ||
+           std::strcmp(low, "btn_tri") == 0 ||
+           std::strcmp(low, "rstick") == 0 ||
+           std::strcmp(low, "slotok") == 0 ||
+           std::strcmp(low, "slotback") == 0 ||
+           std::strcmp(low, "slotchangerace") == 0 ||
+           std::strcmp(low, "slotnavsys") == 0 ||
+           std::strcmp(low, "slottutorials") == 0;
+}
 
 void RecordPromptInt(uint32_t clip, bool is_prompt, uint32_t val) {
     g_prompt_clip_va = clip;
@@ -637,6 +667,7 @@ void UpdateTouchTelemetry() {
     int8_t special_type = -1;
     float speed_kmh = 0.0f;
     bool is_bike = false;
+    bool race_intro = false;
     bool race_countdown = false;
 
     if (ctx == UiContext::Gameplay && player_car != 0u) {
@@ -657,13 +688,14 @@ void UpdateTouchTelemetry() {
         const uint32_t veh_p08 = veh_p4c ? safe_mem::Read32(veh_p4c + 0x08u, 0u) : 0u;
         is_bike = (veh_p08 != 0u) && (safe_mem::Read32(veh_p08 + 0x3808u, 0u) == 2u);
 
-        // Exact MC3D 3-2-1 race start countdown detection verified from mcRaceTimer::UpdateCountdown (sub_001C20E0):
-        // race_timer = [0x00557EEC]; during a real pre-race 3-2-1 staging countdown:
-        //   - [race_timer + 0x04] == 4 (countdown state; flips to 5 on the exact GO! frame)
-        //   - [race_timer + 0x24] != 0 (show_countdown flag from !DontShowCountdown)
-        //   - float [race_timer + 0x0C] is strictly negative (-3.0s .. 0.0s), NEVER 0.0f (idle/Cruise)!
+        // Exact MC3D race start intro & 3-2-1 countdown detection verified from sub_002C4A10 & sub_001C20E0:
+        // race_timer = [0x00557EEC]; [race_timer + 0x04]:
+        //   - 2 = pre-race cinematic camera preview (skippable via B)
+        //   - 4 = 3-2-1 staging countdown (flips to 5 on the exact GO! frame)
         const uint32_t race_timer = safe_mem::Read32(0x00557EECu, 0u);
-        if (race_timer != 0u && safe_mem::Read32(race_timer + 0x04u, 0u) == 0x04u &&
+        const uint32_t race_state = race_timer ? safe_mem::Read32(race_timer + 0x04u, 0u) : 0u;
+        race_intro = (race_timer != 0u && race_state == 0x02u);
+        if (race_timer != 0u && race_state == 0x04u &&
             safe_mem::Read8(race_timer + 0x24u, 0u) != 0u) {
             float t_sec = 0.0f;
             if (safe_mem::CanAccess(race_timer + 0x0Cu, 4u)) {
@@ -713,6 +745,7 @@ void UpdateTouchTelemetry() {
     tel.special_type.store(special_type, std::memory_order_relaxed);
     tel.speed_kmh.store(speed_kmh, std::memory_order_relaxed);
     tel.is_bike.store(is_bike, std::memory_order_relaxed);
+    tel.race_intro.store(race_intro, std::memory_order_relaxed);
     tel.race_countdown.store(race_countdown, std::memory_order_relaxed);
 
     // Sync active in-game Controller Configuration / Custom Remap table so remapped controls
@@ -1122,7 +1155,7 @@ X86_FUNC(sub_00139520) {
 }
 
 // FlashSetStringVar: __thiscall void sub_001395E0(const char* name, const char* str) [ret 0x08]
-// Hides Full Map & Save Screen Xbox button prompt text labels (txtPrompt*) while using touchscreen.
+// Hides Full Map & Save Screen Xbox button prompt text labels (txtPrompt* / txtR2Prompt) while using touchscreen.
 X86_FUNC(sub_001395E0) {
     if (ctx.ecx != 0u && game::safe_mem::CanAccess(ctx.esp + 4u, 8u)) {
         const uint32_t name_va = X86_MEM32(ctx.esp + 4u);
@@ -1130,7 +1163,7 @@ X86_FUNC(sub_001395E0) {
         if (name_va != 0u && game::safe_mem::CanAccess(name_va, 10u) &&
             game::safe_mem::Read8(name_va, 0u) == 't') {
             const std::string name = game::safe_mem::ReadSanitizedCString(name_va, 40u);
-            if (name.rfind("txtPrompt", 0) == 0) {
+            if (name.rfind("txtPrompt", 0) == 0 || name == "txtR2Prompt") {
                 const uint32_t nlen = uint32_t(name.size());
                 game::cheats::RecordPromptString(ctx.ecx, name_va, nlen, str_va);
                 if (input::TouchActive() && game::safe_mem::CanAccess(name_va + nlen, 1u)) {
@@ -1140,4 +1173,51 @@ X86_FUNC(sub_001395E0) {
         }
     }
     __imp__sub_001395E0(ctx, base);
+}
+
+// Flash swfINSTANCE::Draw: __thiscall void sub_000659D0(swfDRAWSTATE* state) [ret 0x04].
+// Skips drawing ALL Xbox controller button icons & prompt clips (A/B/X/Y/L/R/triggers/RStick/prompt*)
+// across Main Menu, Save/Load, Options, Pause, Garage, Vinyl, and Full City Map while touchscreen is active.
+// Restores immediately on the next frame whenever an external controller button is pressed.
+X86_FUNC(sub_000659D0) {
+    if (input::TouchActive() && ctx.ecx != 0u && game::safe_mem::CanAccess(ctx.ecx + 0x7Cu, 4u)) {
+        const uint32_t name_va = kernel::R32(ctx.ecx + 0x7Cu);
+        if (name_va != 0u && game::cheats::IsControllerPromptClip(name_va)) {
+            ctx.esp += 8u;  // __thiscall ret 0x04
+            return;
+        }
+    }
+    __imp__sub_000659D0(ctx, base);
+}
+
+// Track Lobby/UI CMenuTable instance named "ButtonPromptsTable" (0x0045CCF8).
+X86_FUNC(sub_00209000) {
+    if (ctx.ecx != 0u && game::safe_mem::CanAccess(ctx.esp + 4u, 4u)) {
+        const uint32_t name_va = X86_MEM32(ctx.esp + 4u);
+        if (name_va == 0x0045CCF8u) {
+            game::cheats::g_button_prompts_table_va.store(ctx.ecx, std::memory_order_relaxed);
+        }
+    }
+    __imp__sub_00209000(ctx, base);
+}
+
+// Hide non-Flash ButtonPromptsTable widget on touchscreen; restore on external controller press.
+// Signature: __thiscall void sub_002090A0() [ret 0].
+X86_FUNC(sub_002090A0) {
+    if (input::TouchActive() && ctx.ecx != 0u &&
+        ctx.ecx == game::cheats::g_button_prompts_table_va.load(std::memory_order_relaxed)) {
+        ctx.esp += 4u;  // __thiscall ret 0
+        return;
+    }
+    __imp__sub_002090A0(ctx, base);
+}
+
+// Hide pre-race cinematic camera preview "Press B to skip" / "Pause camera" HUD prompt on touchscreen.
+// Signature: __thiscall void sub_002C4A10() [ret 0].
+X86_FUNC(sub_002C4A10) {
+    if (input::TouchActive()) {
+        ctx.esp += 4u;  // __thiscall ret 0
+        return;
+    }
+    __imp__sub_002C4A10(ctx, base);
 }

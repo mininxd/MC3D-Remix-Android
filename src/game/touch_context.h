@@ -53,6 +53,7 @@ struct TouchTelemetry {
     std::atomic<float> tutorial_time_scale{1.0f}; // smooth 0.10x..1.0x slow-mo during first-time touch spotlight
     std::atomic<float> speed_kmh{0.0f};      // current car speed in km/h
     std::atomic<bool> is_bike{false};        // true when riding a Chopper (5) or Sport Bike (6)
+    std::atomic<bool> race_intro{false};     // true during pre-race cinematic preview before 3-2-1 countdown
     std::atomic<bool> race_countdown{false}; // true during pre-race 3-2-1 staging countdown before GO!
     std::atomic<bool> in_save_screen{false}; // true on Load/Save Profile screen (show Delete trash icon)
     std::atomic<bool> in_city_map{false};    // true on Full City Map screen (show top-left < > city switch arrows)

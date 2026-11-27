@@ -183,11 +183,18 @@ constexpr Row kQualityRows[] = {
 };
 
 // native Touchscreen Options rows (visibility is dynamic: 200ms auto fade-out on controller / fade-in on touch)
-constexpr Row kTouchRows[] = {
+constexpr Row kTouchRowsNoHints[] = {
     {Kind::Value, kTouchStick, "Steering Mode"},
     {Kind::Value, kTouchOpacity, "Controls Opacity"},
     {Kind::Value, kAutoBurnout, "Auto Burnout"},
-    {Kind::Value, kResetHints, "Reset Hints"},
+    {Kind::Action, kTouchEdit, "Edit Control Layout"},
+};
+
+constexpr Row kTouchRowsWithHints[] = {
+    {Kind::Value, kTouchStick, "Steering Mode"},
+    {Kind::Value, kTouchOpacity, "Controls Opacity"},
+    {Kind::Value, kAutoBurnout, "Auto Burnout"},
+    {Kind::Action, kResetHints, "Reset hint"},
     {Kind::Action, kTouchEdit, "Edit Control Layout"},
 };
 
@@ -465,16 +472,13 @@ void StepInputRow(int id, int step, char (&text)[64]) {
             std::snprintf(text, sizeof(text), "%s", s_reset_done ? "Done!" : "Default");
             break;
         }
-        case kResetHints: {
-            static bool s_hints_reset = false;
+        case kResetHints:
             if (step) {
                 o.tutorial_seen = 0u;
                 touch::ResetHints();
-                s_hints_reset = true;
             }
-            std::snprintf(text, sizeof(text), "%s", s_hints_reset ? "Done!" : "Reset");
+            text[0] = '\0';
             break;
-        }
         case kCheckUpdates:
             // any step asks; the answer comes in a dialog over the game
             if (step) host::CheckForUpdates();
@@ -627,8 +631,12 @@ const rows::Row* rows::Page(int page, size_t* count) {
         return CreditRows().data();
     }
     if (page == rows::kTouchPage) {
-        *count = std::size(kTouchRows);
-        return kTouchRows;
+        if (game::Opt().tutorial_seen != 0u) {
+            *count = std::size(kTouchRowsWithHints);
+            return kTouchRowsWithHints;
+        }
+        *count = std::size(kTouchRowsNoHints);
+        return kTouchRowsNoHints;
     }
     if (page == kGeneralPage) {
         *count = std::size(kGeneralRows);

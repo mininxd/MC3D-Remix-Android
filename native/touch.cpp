@@ -657,7 +657,7 @@ constexpr Button kButtons[] = {
     {"dpad_right",  "D-Pad Right",     SvgIcon::DpadRight,      kBit + 3,      game::GameAction::Count,          When::MenusAndGarage, 1.0f,           true,  false},
     {"ok",          "OK",              SvgIcon::Ok,             kAnalogA,      game::GameAction::Count,          When::MenusAndGarage, 2.375f,         true,  false},
     {"back",        "Back",            SvgIcon::Back,           kAnalogB,      game::GameAction::Count,          When::MenusAndGarage, 2.375f,         true,  false},
-    {"delete_save", "Delete Save",     SvgIcon::Trash,          kAnalogX,      game::GameAction::Count,          When::SaveDelete,     1.0f,           false, false},
+    {"delete_save", "Delete Save",     SvgIcon::Trash,          kAnalogY,      game::GameAction::Count,          When::SaveDelete,     1.0f,           false, false},
     {"city_left",   "Prev City",       SvgIcon::CityLeft,       kAnalogLT,     game::GameAction::Count,          When::CityMap,        1.0f,           false, false},
     {"city_right",  "Next City",       SvgIcon::CityRight,      kAnalogRT,     game::GameAction::Count,          When::CityMap,        1.0f,           false, false},
 };
@@ -2572,6 +2572,22 @@ void Apply(int port, input::Pad& pad) {
             pad.buttons |= uint16_t(1u << 5);  // Xbox Back / Select -> Full City Map
             used = true;
         }
+    }
+
+    // QoL: Pressing/holding Gas during pre-race cinematic camera preview also presses B to skip
+    // straight into the 3-2-1 countdown (where Auto Burnout seamlessly takes over).
+    static uint64_t g_intro_gas_start_ms = 0;
+    const bool in_race_intro = (ctx == game::UiContext::Gameplay) &&
+                               game::Telemetry().race_intro.load(std::memory_order_relaxed);
+    if (in_race_intro && gas_held) {
+        if (g_intro_gas_start_ms == 0) g_intro_gas_start_ms = now;
+        // Pulse B every 120ms starting immediately (ON on frame 0) so both edge- and level-triggered
+        // skip checks fire cleanly even if Gas was held before the preview became skippable.
+        if ((((now - g_intro_gas_start_ms) / 120u) & 1u) == 0u) {
+            pad.analog[kAnalogB] = 0xFF;
+        }
+    } else {
+        g_intro_gas_start_ms = 0;
     }
 
     // QoL: Auto Burnout — when holding Gas during pre-race 3-2-1 countdown, automatically hold Handbrake
