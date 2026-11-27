@@ -1,5 +1,6 @@
 #include "game/cheats_hook.h"
 
+#include "app/app.h"
 #include "core/log.h"
 #include "cpu/x86_ops.h"
 #include "game/guest_mem_safe.h"
@@ -11,11 +12,16 @@
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
 #include <string>
+#include <vector>
 
 X86_EXTERN_FUNC(sub_00326FE0);
 X86_EXTERN_FUNC(sub_00327A20);
 
+X86_EXTERN_FUNC(__imp__sub_000197C0);
 X86_EXTERN_FUNC(__imp__sub_001923B0);
 X86_EXTERN_FUNC(__imp__sub_00292CD0);
 X86_EXTERN_FUNC(__imp__sub_00153510);
@@ -36,6 +42,8 @@ X86_EXTERN_FUNC(__imp__sub_0014E300);
 namespace game::cheats {
 namespace {
 
+constexpr uint32_t kSaveMgrGlobalPtrAddr = 0x004CB690u;
+constexpr uint32_t kSaveMgrNameOffset = 0x334B4u;
 constexpr uint32_t kProfileMgrPtrAddr = 0x00557F0Cu;
 constexpr uint32_t kProfileCashOffset = 0xACCu;
 constexpr uint32_t kRaceSettingsPtrAddr = 0x0053F2E0u;
@@ -48,6 +56,10 @@ constexpr uint32_t kVehicleListPtrAddr = 0x00557EB0u;
 constexpr uint32_t kVehicleListCountAddr = 0x00557EB4u;
 constexpr uint32_t kGameStateAddr = 0x0053F2D4u;
 
+constexpr uint32_t CheatBit(CheatId id) {
+    return 1u << static_cast<uint32_t>(id);
+}
+
 struct CheatState {
     std::atomic<bool> full_throttle{false};
     std::atomic<bool> secret_dealer{false};
@@ -55,11 +67,367 @@ struct CheatState {
     std::atomic<bool> zero_cost{false};
     std::atomic<bool> arcade_powerups{false};
     std::atomic<bool> delivery{false};
+    std::atomic<uint32_t> unlocked_mask{0u};
 
     bool powerup_hud_loaded_by_cheat = false;
 };
 
 CheatState g_state;
+thread_local int g_zero_cost_depth = 0;
+
+struct SaveCheatRecord {
+    std::string savefile;
+    uint32_t activated_mask = 0u;
+    uint32_t typed_mask = 0u;
+};
+
+std::mutex g_db_mutex;
+bool g_db_loaded = false;
+std::vector<SaveCheatRecord> g_db_records;
+std::string g_synced_save_name;
+
+std::string UpperTrim(const std::string& raw) {
+    std::string out;
+    out.reserve(raw.size());
+    for (unsigned char c : raw) {
+        if (!std::isspace(c)) out.push_back(static_cast<char>(std::toupper(c)));
+    }
+    return out;
+}
+
+std::string TrimString(const std::string& s) {
+    size_t a = 0;
+    while (a < s.size() && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+    size_t b = s.size();
+    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+    return s.substr(a, b - a);
+}
+
+bool ParseCheatName(const std::string& raw, CheatId* out_id) {
+    const std::string code = UpperTrim(raw);
+    if (code == "AMSSRBLHGSHARK") { *out_id = CheatId::Cash5000; return true; }
+    if (code == "FULLTHROTTLE") { *out_id = CheatId::FullThrottle; return true; }
+    if (code == "SECRETDEALER") { *out_id = CheatId::SecretDealer; return true; }
+    if (code == "GHOSTTOWN" || code == "GENOSIDA") { *out_id = CheatId::NoTraffic; return true; }
+    if (code == "ZEROCOST") { *out_id = CheatId::ZeroCost; return true; }
+    if (code == "ARCADE") { *out_id = CheatId::Arcade; return true; }
+    if (code == "DELIVERY") { *out_id = CheatId::Delivery; return true; }
+    return false;
+}
+
+std::filesystem::path CheatDbPath() {
+    return app::ExeDir() / "saves_cheat.db";
+}
+
+// Minimal JSON string escaper/parser for saves_cheat.db:
+// [{"savefile": "player1", "activated_cheat": ["ZEROCOST"], "typed_cheat": ["ZEROCOST", "AMSSRBLHGSHARK"]}]
+std::string JsonEscape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 4);
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c >= 0x20u && c < 0x7Fu) out.push_back(static_cast<char>(c));
+                break;
+        }
+    }
+    return out;
+}
+
+struct JsonReader {
+    const std::string& s;
+    size_t pos = 0;
+
+    void SkipWs() {
+        while (pos < s.size() && std::isspace(static_cast<unsigned char>(s[pos]))) ++pos;
+    }
+
+    bool Consume(char ch) {
+        SkipWs();
+        if (pos < s.size() && s[pos] == ch) {
+            ++pos;
+            return true;
+        }
+        return false;
+    }
+
+    bool ParseString(std::string& out) {
+        SkipWs();
+        if (pos >= s.size() || s[pos] != '"') return false;
+        ++pos;
+        out.clear();
+        while (pos < s.size()) {
+            char c = s[pos++];
+            if (c == '"') return true;
+            if (c == '\\' && pos < s.size()) {
+                char esc = s[pos++];
+                switch (esc) {
+                    case '"': out.push_back('"'); break;
+                    case '\\': out.push_back('\\'); break;
+                    case '/': out.push_back('/'); break;
+                    case 'n': out.push_back('\n'); break;
+                    case 'r': out.push_back('\r'); break;
+                    case 't': out.push_back('\t'); break;
+                    default: out.push_back(esc); break;
+                }
+            } else {
+                out.push_back(c);
+            }
+        }
+        return false;
+    }
+
+    bool ParseStringArray(std::vector<std::string>& out) {
+        out.clear();
+        if (!Consume('[')) return false;
+        if (Consume(']')) return true;
+        for (;;) {
+            std::string item;
+            if (!ParseString(item)) return false;
+            out.push_back(std::move(item));
+            if (Consume(',')) continue;
+            return Consume(']');
+        }
+    }
+
+    void SkipValue() {
+        SkipWs();
+        if (pos >= s.size()) return;
+        char c = s[pos];
+        if (c == '"') {
+            std::string tmp;
+            ParseString(tmp);
+            return;
+        }
+        if (c == '[' || c == '{') {
+            char open = c;
+            char close = (c == '[') ? ']' : '}';
+            int depth = 0;
+            bool in_str = false;
+            while (pos < s.size()) {
+                char ch = s[pos++];
+                if (in_str) {
+                    if (ch == '\\' && pos < s.size()) ++pos;
+                    else if (ch == '"') in_str = false;
+                } else {
+                    if (ch == '"') in_str = true;
+                    else if (ch == open) ++depth;
+                    else if (ch == close && --depth <= 0) return;
+                }
+            }
+            return;
+        }
+        while (pos < s.size() && s[pos] != ',' && s[pos] != '}' && s[pos] != ']') ++pos;
+    }
+};
+
+void LoadCheatDbLocked() {
+    if (g_db_loaded) return;
+    g_db_loaded = true;
+    g_db_records.clear();
+
+    const auto path = CheatDbPath();
+    std::ifstream f(path);
+    if (!f) return;
+    std::string data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    JsonReader r{data};
+    if (!r.Consume('[')) return;
+    if (r.Consume(']')) return;
+
+    while (r.pos < data.size()) {
+        if (!r.Consume('{')) break;
+        SaveCheatRecord rec;
+        if (!r.Consume('}')) {
+            for (;;) {
+                std::string key;
+                if (!r.ParseString(key)) break;
+                if (!r.Consume(':')) break;
+                if (key == "savefile") {
+                    r.ParseString(rec.savefile);
+                } else if (key == "activated_cheat") {
+                    std::vector<std::string> arr;
+                    if (r.ParseStringArray(arr)) {
+                        for (const auto& name : arr) {
+                            CheatId id;
+                            if (ParseCheatName(name, &id)) {
+                                rec.typed_mask |= CheatBit(id);
+                                if (id != CheatId::Cash5000) {
+                                    rec.activated_mask |= CheatBit(id);
+                                }
+                            }
+                        }
+                    }
+                } else if (key == "typed_cheat") {
+                    std::vector<std::string> arr;
+                    if (r.ParseStringArray(arr)) {
+                        for (const auto& name : arr) {
+                            CheatId id;
+                            if (ParseCheatName(name, &id)) {
+                                rec.typed_mask |= CheatBit(id);
+                            }
+                        }
+                    }
+                } else {
+                    r.SkipValue();
+                }
+                if (r.Consume(',')) continue;
+                r.Consume('}');
+                break;
+            }
+        }
+        rec.savefile = TrimString(rec.savefile);
+        rec.typed_mask |= rec.activated_mask;
+        if (!rec.savefile.empty()) {
+            g_db_records.push_back(std::move(rec));
+        }
+        if (r.Consume(',')) continue;
+        r.Consume(']');
+        break;
+    }
+    LOGI("[OK] cheats: loaded saves_cheat.db (%zu save entries)", g_db_records.size());
+}
+
+void AppendCheatArrayJson(std::string& out, uint32_t mask, bool include_cash) {
+    out += "[";
+    bool first = true;
+    for (int i = 0; i < static_cast<int>(CheatId::Count); ++i) {
+        const auto id = static_cast<CheatId>(i);
+        if (!include_cash && id == CheatId::Cash5000) continue;
+        if ((mask & CheatBit(id)) == 0u) continue;
+        if (!first) out += ", ";
+        first = false;
+        out += "\"";
+        out += GetCheatCodeName(id);
+        out += "\"";
+    }
+    out += "]";
+}
+
+void WriteCheatDbLocked() {
+    const auto path = CheatDbPath();
+    auto tmp = path;
+    tmp += ".tmp";
+
+    std::string out = "[\n";
+    for (size_t i = 0; i < g_db_records.size(); ++i) {
+        const auto& rec = g_db_records[i];
+        out += "  {\n";
+        out += "    \"savefile\": \"" + JsonEscape(rec.savefile) + "\",\n";
+        out += "    \"activated_cheat\": ";
+        AppendCheatArrayJson(out, rec.activated_mask, false);
+        out += ",\n";
+        out += "    \"typed_cheat\": ";
+        AppendCheatArrayJson(out, rec.typed_mask | rec.activated_mask, true);
+        out += "\n  }";
+        if (i + 1 < g_db_records.size()) out += ",";
+        out += "\n";
+    }
+    out += "]\n";
+
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) {
+            LOGE("[ERR] cheats: failed to write %s", tmp.c_str());
+            return;
+        }
+        f.write(out.data(), static_cast<std::streamsize>(out.size()));
+        f.flush();
+        if (!f) return;
+    }
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) {
+        std::filesystem::remove(path, ec);
+        ec.clear();
+        std::filesystem::rename(tmp, path, ec);
+    }
+}
+
+uint32_t CurrentActivatedMask() {
+    uint32_t m = 0u;
+    if (g_state.full_throttle.load(std::memory_order_relaxed)) m |= CheatBit(CheatId::FullThrottle);
+    if (g_state.secret_dealer.load(std::memory_order_relaxed)) m |= CheatBit(CheatId::SecretDealer);
+    if (g_state.no_traffic.load(std::memory_order_relaxed)) m |= CheatBit(CheatId::NoTraffic);
+    if (g_state.zero_cost.load(std::memory_order_relaxed)) m |= CheatBit(CheatId::ZeroCost);
+    if (g_state.arcade_powerups.load(std::memory_order_relaxed)) m |= CheatBit(CheatId::Arcade);
+    if (g_state.delivery.load(std::memory_order_relaxed)) m |= CheatBit(CheatId::Delivery);
+    return m;
+}
+
+void ApplyMasksToLiveState(uint32_t activated_mask, uint32_t typed_mask) {
+    g_state.full_throttle.store((activated_mask & CheatBit(CheatId::FullThrottle)) != 0u, std::memory_order_relaxed);
+    g_state.secret_dealer.store((activated_mask & CheatBit(CheatId::SecretDealer)) != 0u, std::memory_order_relaxed);
+    g_state.no_traffic.store((activated_mask & CheatBit(CheatId::NoTraffic)) != 0u, std::memory_order_relaxed);
+    g_state.zero_cost.store((activated_mask & CheatBit(CheatId::ZeroCost)) != 0u, std::memory_order_relaxed);
+    g_state.arcade_powerups.store((activated_mask & CheatBit(CheatId::Arcade)) != 0u, std::memory_order_relaxed);
+    g_state.delivery.store((activated_mask & CheatBit(CheatId::Delivery)) != 0u, std::memory_order_relaxed);
+    g_state.unlocked_mask.store(typed_mask | activated_mask, std::memory_order_relaxed);
+}
+
+std::string ReadGuestActiveSaveName() {
+    const uint32_t mgr = safe_mem::Read32(kSaveMgrGlobalPtrAddr, 0u);
+    if (!mgr) return {};
+    if (!safe_mem::CanAccess(mgr + kSaveMgrNameOffset, 4u)) return {};
+    return TrimString(safe_mem::ReadSanitizedCString(mgr + kSaveMgrNameOffset, 64));
+}
+
+void PersistCurrentSaveStateLocked(const std::string& save_name) {
+    if (save_name.empty()) return;
+    LoadCheatDbLocked();
+    const uint32_t active_mask = CurrentActivatedMask();
+    const uint32_t typed_mask = g_state.unlocked_mask.load(std::memory_order_relaxed) | active_mask;
+
+    auto it = std::find_if(g_db_records.begin(), g_db_records.end(),
+                           [&](const SaveCheatRecord& r) { return r.savefile == save_name; });
+    if (it != g_db_records.end()) {
+        it->activated_mask = active_mask;
+        it->typed_mask = typed_mask;
+    } else if (typed_mask != 0u || active_mask != 0u) {
+        g_db_records.push_back(SaveCheatRecord{save_name, active_mask, typed_mask});
+    } else {
+        return;
+    }
+    WriteCheatDbLocked();
+}
+
+void SyncWithActiveSaveIfChanged() {
+    const std::string active_save = ReadGuestActiveSaveName();
+    std::lock_guard<std::mutex> lock(g_db_mutex);
+    LoadCheatDbLocked();
+    if (active_save == g_synced_save_name) return;
+
+    const std::string prev_save = g_synced_save_name;
+    g_synced_save_name = active_save;
+
+    if (active_save.empty()) {
+        // Save unloaded / back to fresh state: clear active & unlocked cheats so next save starts clean.
+        ApplyMasksToLiveState(0u, 0u);
+        LOGI("[OK] cheats: active save cleared (was '%s'), reset cheat state", prev_save.c_str());
+        return;
+    }
+
+    auto it = std::find_if(g_db_records.begin(), g_db_records.end(),
+                           [&](const SaveCheatRecord& r) { return r.savefile == active_save; });
+    if (it != g_db_records.end()) {
+        ApplyMasksToLiveState(it->activated_mask, it->typed_mask);
+        LOGI("[OK] cheats: synced save '%s' from saves_cheat.db (active=0x%X typed=0x%X)",
+             active_save.c_str(), it->activated_mask, it->typed_mask);
+    } else if (prev_save.empty() && g_state.unlocked_mask.load(std::memory_order_relaxed) != 0u) {
+        // Brand-new career saved for the first time after typing cheats in this unsaved session.
+        PersistCurrentSaveStateLocked(active_save);
+        LOGI("[OK] cheats: bound unsaved session cheats to new save '%s'", active_save.c_str());
+    } else {
+        // Switched to a different save (e.g. player2) with no saved cheats: start completely clean!
+        ApplyMasksToLiveState(0u, 0u);
+        LOGI("[OK] cheats: switched to clean save '%s' (no saved cheats)", active_save.c_str());
+    }
+}
 
 uint32_t GetProfilePtr() {
     const uint32_t mgr = safe_mem::Read32(kProfileMgrPtrAddr, 0u);
@@ -240,61 +608,53 @@ void ApplyFullThrottleNos() {
     }
 }
 
-bool Toggle(std::atomic<bool>& flag) {
-    const bool next = !flag.load(std::memory_order_relaxed);
-    flag.store(next, std::memory_order_relaxed);
-    return next;
+std::atomic<bool>* FlagForCheat(CheatId id) {
+    switch (id) {
+        case CheatId::FullThrottle: return &g_state.full_throttle;
+        case CheatId::SecretDealer: return &g_state.secret_dealer;
+        case CheatId::NoTraffic:    return &g_state.no_traffic;
+        case CheatId::ZeroCost:     return &g_state.zero_cost;
+        case CheatId::Arcade:       return &g_state.arcade_powerups;
+        case CheatId::Delivery:     return &g_state.delivery;
+        default:                    return nullptr;
+    }
+}
+
+void MarkUnlockedAndPersist(CheatId id) {
+    g_state.unlocked_mask.fetch_or(CheatBit(id), std::memory_order_relaxed);
+    const std::string active_save = ReadGuestActiveSaveName();
+    std::lock_guard<std::mutex> lock(g_db_mutex);
+    if (!active_save.empty()) {
+        g_synced_save_name = active_save;
+        PersistCurrentSaveStateLocked(active_save);
+    }
 }
 
 bool TryHandleCheatCode(const std::string& raw) {
-    std::string code;
-    code.reserve(raw.size());
-    for (unsigned char c : raw) {
-        if (!std::isspace(c)) {
-            code.push_back(static_cast<char>(std::toupper(c)));
-        }
-    }
-    if (code.empty()) return false;
+    SyncWithActiveSaveIfChanged();
+    CheatId id;
+    if (!ParseCheatName(raw, &id)) return false;
 
-    if (code == "AMSSRBLHGSHARK") {
+    if (id == CheatId::Cash5000) {
         const bool ok = AddCash(5000);
+        MarkUnlockedAndPersist(id);
         LOGI("[OK] cheats: AMSSRBLHGSHARK -> +5000 cash (%s)", ok ? "applied" : "no-profile");
         return true;
     }
-    if (code == "FULLTHROTTLE") {
-        const bool on = Toggle(g_state.full_throttle);
-        LOGI("[OK] cheats: FULLTHROTTLE -> %s", on ? "ON" : "OFF");
-        return true;
+
+    auto* flag = FlagForCheat(id);
+    if (!flag) return false;
+    const bool on = !flag->load(std::memory_order_relaxed);
+    flag->store(on, std::memory_order_relaxed);
+    if (on) {
+        if (id == CheatId::NoTraffic) ApplyTrafficSettings();
+        else if (id == CheatId::Arcade) ApplyArcadeSettings();
+        else if (id == CheatId::Delivery) ApplyUnlockFlags();
     }
-    if (code == "SECRETDEALER") {
-        const bool on = Toggle(g_state.secret_dealer);
-        LOGI("[OK] cheats: SECRETDEALER -> REMIX/SpecialEdition cars %s", on ? "ON" : "OFF");
-        return true;
-    }
-    if (code == "GHOSTTOWN" || code == "GENOSIDA") {
-        const bool on = Toggle(g_state.no_traffic);
-        if (on) ApplyTrafficSettings();
-        LOGI("[OK] cheats: %s -> No Traffic %s", code.c_str(), on ? "ON" : "OFF");
-        return true;
-    }
-    if (code == "ZEROCOST") {
-        const bool on = Toggle(g_state.zero_cost);
-        LOGI("[OK] cheats: ZEROCOST -> Shop Always Free %s", on ? "ON" : "OFF");
-        return true;
-    }
-    if (code == "ARCADE") {
-        const bool on = Toggle(g_state.arcade_powerups);
-        if (on) ApplyArcadeSettings();
-        LOGI("[OK] cheats: ARCADE -> Power Pickups %s", on ? "ON" : "OFF");
-        return true;
-    }
-    if (code == "DELIVERY") {
-        const bool on = Toggle(g_state.delivery);
-        if (on) ApplyUnlockFlags();
-        LOGI("[OK] cheats: DELIVERY -> Unlock All Cities %s", on ? "ON" : "OFF");
-        return true;
-    }
-    return false;
+    MarkUnlockedAndPersist(id);
+    LOGI("[OK] cheats: %s -> %s (save='%s')", GetCheatCodeName(id), on ? "ON" : "OFF",
+         ReadGuestActiveSaveName().c_str());
+    return true;
 }
 
 template <typename Fn>
@@ -303,10 +663,12 @@ void RunWithZeroCost(X86Context& ctx, uint8_t* base, Fn orig_fn) {
         orig_fn(ctx, base);
         return;
     }
-    const uint32_t prof = GetProfilePtr();
+    const bool outer = (g_zero_cost_depth == 0);
+    ++g_zero_cost_depth;
+    const uint32_t prof = outer ? GetProfilePtr() : 0u;
     uint32_t saved_cash = 0u;
     bool patched = false;
-    if (prof && safe_mem::CanAccess(prof + kProfileCashOffset, 4u)) {
+    if (outer && prof && safe_mem::CanAccess(prof + kProfileCashOffset, 4u)) {
         saved_cash = kernel::R32(prof + kProfileCashOffset);
         kernel::W32(prof + kProfileCashOffset, 99999999u);
         patched = true;
@@ -315,18 +677,110 @@ void RunWithZeroCost(X86Context& ctx, uint8_t* base, Fn orig_fn) {
     if (patched && safe_mem::CanAccess(prof + kProfileCashOffset, 4u)) {
         kernel::W32(prof + kProfileCashOffset, saved_cash);
     }
+    --g_zero_cost_depth;
 }
 
 }  // namespace
 
 void OnFrameTick() {
+    SyncWithActiveSaveIfChanged();
     ApplyUnlockFlags();
     ApplyTrafficSettings();
     ApplyArcadeSettings();
     ApplyFullThrottleNos();
 }
 
+void ReloadCheatDb() {
+    {
+        std::lock_guard<std::mutex> lock(g_db_mutex);
+        g_db_loaded = false;
+        g_synced_save_name.clear();
+    }
+    SyncWithActiveSaveIfChanged();
+}
+
+bool HasAnyUnlockedCheat() {
+    SyncWithActiveSaveIfChanged();
+    return g_state.unlocked_mask.load(std::memory_order_relaxed) != 0u;
+}
+
+bool IsCheatUnlocked(CheatId id) {
+    SyncWithActiveSaveIfChanged();
+    return (g_state.unlocked_mask.load(std::memory_order_relaxed) & CheatBit(id)) != 0u;
+}
+
+bool IsCheatActive(CheatId id) {
+    auto* flag = FlagForCheat(id);
+    return flag ? flag->load(std::memory_order_relaxed) : false;
+}
+
+bool ToggleCheat(CheatId id) {
+    SyncWithActiveSaveIfChanged();
+    auto* flag = FlagForCheat(id);
+    if (!flag) return false;
+    const bool on = !flag->load(std::memory_order_relaxed);
+    flag->store(on, std::memory_order_relaxed);
+    if (on) {
+        if (id == CheatId::NoTraffic) ApplyTrafficSettings();
+        else if (id == CheatId::Arcade) ApplyArcadeSettings();
+        else if (id == CheatId::Delivery) ApplyUnlockFlags();
+    }
+    MarkUnlockedAndPersist(id);
+    LOGI("[OK] cheats: menu toggled %s -> %s", GetCheatCodeName(id), on ? "ON" : "OFF");
+    return on;
+}
+
+bool TriggerCashCheat() {
+    SyncWithActiveSaveIfChanged();
+    const bool ok = AddCash(5000);
+    LOGI("[OK] cheats: menu clicked AMSSRBLHGSHARK -> +5000 cash (%s)", ok ? "applied" : "no-profile");
+    return ok;
+}
+
+int32_t GetCurrentCash() {
+    const uint32_t prof = GetProfilePtr();
+    if (!prof || !safe_mem::CanAccess(prof + kProfileCashOffset, 4u)) return -1;
+    return static_cast<int32_t>(kernel::R32(prof + kProfileCashOffset));
+}
+
+std::string GetActiveSaveName() {
+    return ReadGuestActiveSaveName();
+}
+
+const char* GetCheatCodeName(CheatId id) {
+    switch (id) {
+        case CheatId::Cash5000:     return "AMSSRBLHGSHARK";
+        case CheatId::FullThrottle: return "FULLTHROTTLE";
+        case CheatId::SecretDealer: return "SECRETDEALER";
+        case CheatId::NoTraffic:    return "GHOSTTOWN";
+        case CheatId::ZeroCost:     return "ZEROCOST";
+        case CheatId::Arcade:       return "ARCADE";
+        case CheatId::Delivery:     return "DELIVERY";
+        default:                    return "UNKNOWN";
+    }
+}
+
+const char* GetCheatMenuLabel(CheatId id) {
+    switch (id) {
+        case CheatId::Cash5000:     return "Add $5,000 Cash";
+        case CheatId::FullThrottle: return "Full Throttle (NOS)";
+        case CheatId::SecretDealer: return "Secret Dealer (REMIX)";
+        case CheatId::NoTraffic:    return "Ghost Town (No Traffic)";
+        case CheatId::ZeroCost:     return "Zero Cost (Free Shop)";
+        case CheatId::Arcade:       return "Arcade Powerups";
+        case CheatId::Delivery:     return "Delivery (All Cities)";
+        default:                    return "Cheat";
+    }
+}
+
 }  // namespace game::cheats
+
+// Active savegame name setter: __thiscall void sub_000197C0(const char* name) [ret 0x04].
+// Immediately sync saves_cheat.db whenever a savefile is loaded or saved.
+X86_FUNC(sub_000197C0) {
+    __imp__sub_000197C0(ctx, base);
+    game::cheats::SyncWithActiveSaveIfChanged();
+}
 
 // Cheat code input dispatcher: __stdcall int sub_001923B0(const char* input) [ret 0x04].
 X86_FUNC(sub_001923B0) {
@@ -486,6 +940,17 @@ X86_FUNC(sub_0010B370) {
 
 // Shop / Garage purchase hooks for ZEROCOST.
 X86_FUNC(sub_001422D0) { game::cheats::RunWithZeroCost(ctx, base, __imp__sub_001422D0); }
-X86_FUNC(sub_00144C90) { game::cheats::RunWithZeroCost(ctx, base, __imp__sub_00144C90); }
+
+// sub_00144C90(__thiscall void AddUpgradeSpentToCarResaleValue(int32_t old_cash)) [ret 0x04].
+// Under ZEROCOST, items cost $0 so skip adding (cur_cash - old_cash) to the car's resale price
+// (previously wrapping this with 99,999,999 inflated car resale prices to ~100 million!).
+X86_FUNC(sub_00144C90) {
+    if (game::cheats::g_state.zero_cost.load(std::memory_order_relaxed)) {
+        ctx.esp += 8u;
+        return;
+    }
+    __imp__sub_00144C90(ctx, base);
+}
+
 X86_FUNC(sub_001474A0) { game::cheats::RunWithZeroCost(ctx, base, __imp__sub_001474A0); }
 X86_FUNC(sub_0014E300) { game::cheats::RunWithZeroCost(ctx, base, __imp__sub_0014E300); }

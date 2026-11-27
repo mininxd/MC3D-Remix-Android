@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <iterator>
 #include <string>
 #include <thread>
@@ -21,6 +22,7 @@
 #include "common/mouse_keyboard.h"
 #include "common/options.h"
 #include "common/translations.h"
+#include "game/cheats_hook.h"
 
 // native/gyro.cpp: aiming by turning the phone
 namespace gyro {
@@ -75,8 +77,8 @@ constexpr uint32_t kAntiAliasings[] = {0, 1, 2};
 const char* const kAntiAliasingNames[] = {"Off", "FXAA", "SSAA 2x"};
 constexpr uint32_t kMotionBlurs[] = {0, 1, 2};
 const char* const kMotionBlurNames[] = {"Off", "Low", "Strong"};
-constexpr uint32_t kReflectionValues[] = {0, 1};
-const char* const kReflectionNames[] = {"Off", "On"};
+constexpr uint32_t kReflectionValues[] = {0, 1, 2};
+const char* const kReflectionNames[] = {"Off", "Half Rate", "Full"};
 constexpr uint32_t kFmvScales[] = {0, 1};
 const char* const kFmvScaleNames[] = {"Fill", "4:3"};
 constexpr uint32_t kScreenFilters[] = {0, 1, 2, 3, 4, 5, 6, 7, 8};
@@ -153,7 +155,7 @@ enum RowId { kRenderResolution, kMaxFps, kVsync, kFpsCounter, kAniso, kReloadBlu
              kCheckUpdates, kTouchSensitivity, kLeftDeadzone, kRightDeadzone, kLeftSensitivity, kRightSensitivity,
              kScreenFilter, kGyroInvertX, kGyroInvertY, kTouchSkin, kCredit, kBloom,
              kFog, kAntiAliasing, kMotionBlur, kReflections, kTouchStick, kDynamicRes, kDynamicTarget, kDynamicMin,
-             kDynamicMax, kDynamicHold, kAutoUpdate };
+             kDynamicMax, kDynamicHold, kAutoUpdate, kDebugLogging, kBackupSaves, kRestoreSaves };
 
 using rows::Kind;
 using rows::Row;
@@ -165,7 +167,9 @@ constexpr Row kDisplayRows[] = {
     {Kind::Value, kMaxFps, "Max FPS"},
     {Kind::Value, kScreenFilter, "Screen Filter"},
     {Kind::Value, kVsync, "VSync"},
-    {Kind::Value, kFmvScale, "FMV Scale"},
+    {Kind::Value, kSkipIntros, "Skip Intros"},
+    {Kind::Action, kBackupSaves, "Backup Saves"},
+    {Kind::Action, kRestoreSaves, "Restore Saves"},
 };
 
 // native Quality Options rows
@@ -175,6 +179,7 @@ constexpr Row kQualityRows[] = {
     {Kind::Value, kMotionBlur, "Motion Blur"},
     {Kind::Value, kReflections, "Reflections"},
     {Kind::Value, kAniso, "Anisotropic Filtering"},
+    {Kind::Value, kDebugLogging, "Debug Logging"},
 };
 
 constexpr Row kTouchRows[] = {
@@ -274,6 +279,7 @@ bool* ToggleFlag(Settings& s, int id) {
         case kBloom: return &o.bloom;
         case kFog: return &o.fog;
         case kSkipIntros: return &o.skip_intros;
+        case kDebugLogging: return &o.debug_logging;
         case kInvertMouse: return &o.invert_mouse;
         case kHoldAim: return &o.hold_aim;
         case kDynamicRes: return &o.dynamic_resolution;
@@ -506,6 +512,81 @@ void StepInputRow(int id, int step, char (&text)[64]) {
             if (step) host::SetStartupCheck(!host::StartupCheck());
             std::snprintf(text, sizeof(text), "%s", OnOff(host::StartupCheck()));
             break;
+        case kBackupSaves: {
+            static std::string s_backup_status;
+            const auto src_dir = ExeDir() / "hdd" / "UDATA" / "54540079";
+            const auto bak_dir = ExeDir() / "hdd" / "UDATA" / "54540079_backup";
+            const auto cheat_db = ExeDir() / "saves_cheat.db";
+            const auto cheat_bak = ExeDir() / "saves_cheat.db.bak";
+            if (step) {
+                std::error_code ec;
+                if (!std::filesystem::exists(src_dir, ec)) {
+                    s_backup_status = "No Saves";
+                } else {
+                    std::filesystem::remove_all(bak_dir, ec);
+                    ec.clear();
+                    std::filesystem::copy(src_dir, bak_dir,
+                                          std::filesystem::copy_options::recursive |
+                                              std::filesystem::copy_options::overwrite_existing,
+                                          ec);
+                    if (!ec) {
+                        if (std::filesystem::exists(cheat_db, ec)) {
+                            std::filesystem::copy_file(cheat_db, cheat_bak,
+                                                       std::filesystem::copy_options::overwrite_existing, ec);
+                        }
+                        s_backup_status = "Saved!";
+                    } else {
+                        s_backup_status = "Failed";
+                    }
+                }
+            }
+            if (s_backup_status.empty()) {
+                std::error_code ec;
+                std::snprintf(text, sizeof(text), "%s",
+                              std::filesystem::exists(bak_dir, ec) ? "Overwrite" : "Create");
+            } else {
+                std::snprintf(text, sizeof(text), "%s", s_backup_status.c_str());
+            }
+            break;
+        }
+        case kRestoreSaves: {
+            static std::string s_restore_status;
+            const auto src_dir = ExeDir() / "hdd" / "UDATA" / "54540079";
+            const auto bak_dir = ExeDir() / "hdd" / "UDATA" / "54540079_backup";
+            const auto cheat_db = ExeDir() / "saves_cheat.db";
+            const auto cheat_bak = ExeDir() / "saves_cheat.db.bak";
+            if (step) {
+                std::error_code ec;
+                if (!std::filesystem::exists(bak_dir, ec)) {
+                    s_restore_status = "No Backup";
+                } else {
+                    std::filesystem::remove_all(src_dir, ec);
+                    ec.clear();
+                    std::filesystem::copy(bak_dir, src_dir,
+                                          std::filesystem::copy_options::recursive |
+                                              std::filesystem::copy_options::overwrite_existing,
+                                          ec);
+                    if (!ec) {
+                        if (std::filesystem::exists(cheat_bak, ec)) {
+                            std::filesystem::copy_file(cheat_bak, cheat_db,
+                                                       std::filesystem::copy_options::overwrite_existing, ec);
+                            game::cheats::ReloadCheatDb();
+                        }
+                        s_restore_status = "Restored!";
+                    } else {
+                        s_restore_status = "Failed";
+                    }
+                }
+            }
+            if (s_restore_status.empty()) {
+                std::error_code ec;
+                std::snprintf(text, sizeof(text), "%s",
+                              std::filesystem::exists(bak_dir, ec) ? "Ready" : "None");
+            } else {
+                std::snprintf(text, sizeof(text), "%s", s_restore_status.c_str());
+            }
+            break;
+        }
     }
 }
 

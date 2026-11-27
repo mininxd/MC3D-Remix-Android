@@ -498,10 +498,11 @@ void Start() {
     g_started = true;
     audio::StartOutput(Render);
     // Fallback callback pump: fast (8ms) ONLY if the title has never called DirectSoundDoWork;
-    // once DirectSoundDoWork is active (g_pumped != 0), wait 250ms before intervening so gameplay
-    // frames (16-33ms) never race guest XACT/radio stream callbacks across two threads.
+    // once DirectSoundDoWork is active (g_pumped != 0), wait 90ms before intervening so normal
+    // gameplay frames (16-33ms) never race guest XACT/radio callbacks while loading-screen stalls
+    // recover quickly without stream underruns.
     StartHostThread("dsound", [](X86Context& ctx) {
-        constexpr int64_t kStalePumpMs = 250;
+        constexpr int64_t kStalePumpMs = 90;
         for (;;) {
             std::vector<Done> done;
             {

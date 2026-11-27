@@ -19,7 +19,8 @@ struct Options {
     bool bloom = true;
     bool fog = true;
     uint32_t motion_blur = 1;   // 0 Off, 1 Low (reduced native), 2 Strong (stock native)
-    uint32_t reflections = 1;   // 0 Off, 1 On (full dynamic cubemap)
+    uint32_t reflections = 2;   // 0 Off, 1 Half Rate (every 2nd frame), 2 Full (every frame)
+    bool debug_logging = false; // object_logs.txt telemetry (off by default for best CPU performance)
     uint32_t anti_aliasing = 0;  // 0 off, 1 FXAA, 2 SSAA
     bool hdr = false;
     uint32_t draw_distance = 1;

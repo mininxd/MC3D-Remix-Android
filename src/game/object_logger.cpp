@@ -9,6 +9,7 @@
 #include <string>
 #include <unordered_set>
 
+#include "common/options.h"
 #include "core/log.h"
 #include "game/effect_probe.h"
 #include "game/guest_mem_safe.h"
@@ -220,6 +221,7 @@ void ClearDrawHint() {
 }
 
 void LogModelLoad(const char* kind, const char* name, uint32_t obj_va, uint32_t aux) {
+    if (!game::Opt().debug_logging) return;
     Init();
     const char* safe_name = (name && name[0]) ? name : "<unnamed>";
     uint64_t sig = Mix64(obj_va, aux);
@@ -256,6 +258,7 @@ void LogModelLoad(const char* kind, const char* name, uint32_t obj_va, uint32_t 
 }
 
 void LogResourcePageIn(const char* kind, uint32_t rsc_va, uint32_t arr_va, uint32_t count) {
+    if (!game::Opt().debug_logging) return;
     Init();
     std::lock_guard<std::mutex> lk(detail::IoMutex());
     const uint64_t sig = Mix64(Mix64(rsc_va, arr_va), count);
@@ -280,6 +283,7 @@ void LogResourcePageIn(const char* kind, uint32_t rsc_va, uint32_t arr_va, uint3
 }
 
 void LogDrawState(const gpu::State& s) {
+    if (!game::Opt().debug_logging) return;
     Init();
     ++g_total_draws;
 
@@ -406,6 +410,7 @@ void LogDrawState(const gpu::State& s) {
 void LogAudioVoice(const char* event, uint32_t obj_va, bool is_stream, uint16_t tag, uint16_t channels,
                    uint32_t rate, uint16_t bits, bool is_3d, uint8_t nbins, const uint8_t* bins,
                    const int32_t* bin_mb, uint32_t max_packets, uint32_t callback_va) {
+    if (!game::Opt().debug_logging) return;
     Init();
     if (event && std::strcmp(event, "CREATE") == 0) {
         if (is_stream) ++g_audio_streams_created;
@@ -451,6 +456,7 @@ void LogAudioVoice(const char* event, uint32_t obj_va, bool is_stream, uint16_t 
 }
 
 void LogAudioPitch(uint32_t obj_va, bool is_stream, uint32_t base_rate, int32_t raw_pitch, uint32_t freq_hz) {
+    if (!game::Opt().debug_logging) return;
     Init();
     const uint32_t n = g_audio_pitch_logs.fetch_add(1u, std::memory_order_relaxed);
     if (n >= 24u) return;
@@ -462,6 +468,7 @@ void LogAudioPitch(uint32_t obj_va, bool is_stream, uint32_t base_rate, int32_t 
 }
 
 void LogAudioIssue(bool is_error, const char* tag, uint32_t obj_va, const char* detail_msg) {
+    if (!game::Opt().debug_logging) return;
     Init();
     const uint32_t n = g_audio_issue_logs.fetch_add(1u, std::memory_order_relaxed);
     if (n >= 64u) return;
@@ -474,6 +481,7 @@ void LogAudioIssue(bool is_error, const char* tag, uint32_t obj_va, const char* 
 }
 
 void RecordAudioPacketEvent(int kind) {
+    if (!game::Opt().debug_logging) return;
     switch (kind) {
         case 0: ++g_audio_pkts_submitted; break;
         case 1: ++g_audio_pkts_completed; break;
@@ -485,17 +493,20 @@ void RecordAudioPacketEvent(int kind) {
 }
 
 void RecordAudioPumpEvent(bool from_bg_thread) {
+    if (!game::Opt().debug_logging) return;
     if (from_bg_thread) ++g_audio_bg_pumps;
     else ++g_audio_dowork_pumps;
 }
 
 void RecordAudioRenderStats(uint32_t active_streams, uint32_t active_buffers, float reverb_peak) {
+    if (!game::Opt().debug_logging) return;
     g_audio_active_streams.store(active_streams, std::memory_order_relaxed);
     g_audio_active_buffers.store(active_buffers, std::memory_order_relaxed);
     UpdateAtomicMaxU32(g_audio_reverb_peak_milli, static_cast<uint32_t>(std::min(reverb_peak, 99.0f) * 1000.0f));
 }
 
 void RecordAudioOutputStats(float peak_l, float peak_r, uint32_t clipped_samples, uint32_t nan_samples) {
+    if (!game::Opt().debug_logging) return;
     ++g_audio_mix_blocks;
     if (clipped_samples) g_audio_clipped_samples.fetch_add(clipped_samples, std::memory_order_relaxed);
     if (nan_samples) g_audio_nan_samples.fetch_add(nan_samples, std::memory_order_relaxed);
@@ -504,6 +515,7 @@ void RecordAudioOutputStats(float peak_l, float peak_r, uint32_t clipped_samples
 }
 
 void OnSwapSummary() {
+    if (!game::Opt().debug_logging) return;
     Init();
     const uint64_t f = ++g_swap_frames;
     if (f != 1u && (f % 180u) != 0u) return;

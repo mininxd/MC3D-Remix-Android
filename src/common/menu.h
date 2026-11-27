@@ -14,7 +14,7 @@ void PaceFrame();  // app::Pace, with kFpsCapRefresh; game thread, after the pre
 // graphics and option rows exposed to the native in-game options menu
 namespace rows {
 
-enum class Kind { Heading, Value, Bind };
+enum class Kind { Heading, Value, Bind, Action };
 struct Row {
     Kind kind;
     int id;  // a bind row's input action

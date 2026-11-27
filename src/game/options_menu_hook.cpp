@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
 
@@ -8,6 +9,7 @@
 #include "core/log.h"
 #include "cpu/x86_context.h"
 #include "cpu/x86_ops.h"
+#include "game/cheats_hook.h"
 #include "game/guest_mem_safe.h"
 #include "kernel/memory.h"
 
@@ -31,9 +33,11 @@ constexpr uint32_t kMenuMgrGlobalPtr = 0x0050F148u;
 constexpr uint32_t kFlashRootGlobalPtr = 0x0050F15Cu;
 constexpr uint32_t kFlashVarTitle = 0x0045B9F8u;        // "title"
 constexpr uint32_t kFlashVarSectionName = 0x0045772Cu;  // "sectionName"
+constexpr uint32_t kActionCheatCodes = 0x32u;
 constexpr uint32_t kActionGameOptions = 0x41u;
 constexpr uint32_t kActionDisplayOptions = 0x7F4Bu;
 constexpr uint32_t kActionQualityOptions = 0x7F4Cu;
+constexpr uint32_t kActionCheatOptions = 0x7F4Du;
 constexpr uint32_t kFnMenuAction = 0x00163830u;
 constexpr uint32_t kFnMainMenuNetworking = 0x0018C5A0u;
 constexpr uint32_t kFnSettingCallback = 0x0018DB10u;
@@ -46,12 +50,19 @@ enum class NativePage : int {
     None = 0,
     Display = 1,
     Quality = 2,
+    Cheats = 3,
 };
 
 std::atomic<int> g_native_page{static_cast<int>(NativePage::None)};
 
 thread_local bool g_in_main_menu_populate = false;
 thread_local bool g_skipped_networking = false;
+
+thread_local bool g_in_options_populate = false;
+thread_local bool g_inserted_cheat_options = false;
+thread_local uint32_t g_cheat_codes_handle = 0u;
+thread_local uint32_t g_cheat_codes_list_va = 0u;
+thread_local uint32_t g_cheat_codes_owner_va = 0u;
 
 struct ScopedMainMenuPopulate {
     ScopedMainMenuPopulate() {
@@ -64,8 +75,26 @@ struct ScopedMainMenuPopulate {
     }
 };
 
+struct ScopedOptionsMenuPopulate {
+    ScopedOptionsMenuPopulate() {
+        g_in_options_populate = true;
+        g_inserted_cheat_options = false;
+        g_cheat_codes_handle = 0u;
+        g_cheat_codes_list_va = 0u;
+        g_cheat_codes_owner_va = 0u;
+    }
+    ~ScopedOptionsMenuPopulate() {
+        g_in_options_populate = false;
+        g_cheat_codes_handle = 0u;
+        g_cheat_codes_list_va = 0u;
+        g_cheat_codes_owner_va = 0u;
+    }
+};
+
 struct NativeEntry {
     app::rows::Row row{};
+    bool is_cheat = false;
+    game::cheats::CheatId cheat_id = game::cheats::CheatId::Cash5000;
     uint32_t handle = 0u;
 };
 
@@ -125,6 +154,20 @@ uint32_t GetOptionScreenList(uint32_t* out_owner = nullptr) {
 }
 
 std::string FormatEntryLabel(const NativeEntry& e) {
+    if (e.is_cheat) {
+        if (e.cheat_id == game::cheats::CheatId::Cash5000) {
+            const int32_t cash = game::cheats::GetCurrentCash();
+            char buf[64];
+            if (cash >= 0) {
+                std::snprintf(buf, sizeof(buf), "%s: $%d", game::cheats::GetCheatMenuLabel(e.cheat_id), cash);
+            } else {
+                std::snprintf(buf, sizeof(buf), "%s: +$5000", game::cheats::GetCheatMenuLabel(e.cheat_id));
+            }
+            return buf;
+        }
+        return std::string(game::cheats::GetCheatMenuLabel(e.cheat_id)) + ": " +
+               (game::cheats::IsCheatActive(e.cheat_id) ? "On" : "Off");
+    }
     return std::string(e.row.label) + ": " + app::rows::Value(e.row, 0);
 }
 
@@ -210,6 +253,9 @@ void AppendCustomOptionsItems(X86Context& ctx, uint8_t* base) {
 
     AppendRootOptionItem(ctx, base, list_va, owner_va, kActionDisplayOptions, "Display Options");
     AppendRootOptionItem(ctx, base, list_va, owner_va, kActionQualityOptions, "Quality Options");
+    if (!g_inserted_cheat_options && game::cheats::HasAnyUnlockedCheat()) {
+        AppendRootOptionItem(ctx, base, list_va, owner_va, kActionCheatOptions, "Cheat Options");
+    }
 }
 
 void PopulateNativeOptionsList(X86Context& ctx, uint8_t* base, uint32_t screen_va, NativePage page) {
@@ -235,14 +281,28 @@ void PopulateNativeOptionsList(X86Context& ctx, uint8_t* base, uint32_t screen_v
     const uint32_t list_cap = std::min<uint32_t>(
         kMaxListItems, std::max<uint32_t>(1u, game::safe_mem::Read32(list_va + 0x230u, kMaxListItems)));
 
-    const int app_page = (page == NativePage::Quality) ? app::rows::kQualityPage : app::rows::kDisplayPage;
-    size_t total = 0;
-    const app::rows::Row* rows = app::rows::Page(app_page, &total);
-
     g_entry_count = 0u;
-    for (size_t i = 0; i < total && g_entry_count < list_cap; ++i) {
-        if (rows[i].kind == app::rows::Kind::Value) {
-            g_entries[g_entry_count++] = NativeEntry{rows[i], 0u};
+    if (page == NativePage::Cheats) {
+        for (int i = 0; i < static_cast<int>(game::cheats::CheatId::Count) && g_entry_count < list_cap; ++i) {
+            const auto cid = static_cast<game::cheats::CheatId>(i);
+            if (!game::cheats::IsCheatUnlocked(cid)) continue;
+            NativeEntry entry{};
+            entry.is_cheat = true;
+            entry.cheat_id = cid;
+            entry.row.kind = (cid == game::cheats::CheatId::Cash5000) ? app::rows::Kind::Action : app::rows::Kind::Value;
+            entry.row.label = game::cheats::GetCheatMenuLabel(cid);
+            g_entries[g_entry_count++] = entry;
+        }
+    } else {
+        const int app_page = (page == NativePage::Quality) ? app::rows::kQualityPage : app::rows::kDisplayPage;
+        size_t total = 0;
+        const app::rows::Row* rows = app::rows::Page(app_page, &total);
+        for (size_t i = 0; i < total && g_entry_count < list_cap; ++i) {
+            if (rows[i].kind == app::rows::Kind::Value || rows[i].kind == app::rows::Kind::Action) {
+                NativeEntry entry{};
+                entry.row = rows[i];
+                g_entries[g_entry_count++] = entry;
+            }
         }
     }
 
@@ -250,14 +310,14 @@ void PopulateNativeOptionsList(X86Context& ctx, uint8_t* base, uint32_t screen_v
     if (game::safe_mem::CanAccess(scratch_va, kScratchBytes)) {
         for (uint32_t r = 0; r < g_entry_count; ++r) {
             NativeEntry& e = g_entries[r];
-            // Matches AudioOptions (sub_0018F160) & GameOptions (sub_0018DD50):
-            // row_type=2 enables Left/Right, cb_type=2 tail-jumps with [cb+8] (-1 left / +1 right) and ret 4.
+            // row_type=0 triggers callback on A-button click; row_type=2 enables Left (-1) / Right (+1).
+            const uint32_t row_type = (e.row.kind == app::rows::Kind::Action) ? 0u : 2u;
             ctx.esp = scratch_va;
             X86_PUSH32(2u);
             X86_PUSH32(1u);
             X86_PUSH32(kFnSettingCallback);
             X86_PUSH32(screen_va);
-            X86_PUSH32(2u);
+            X86_PUSH32(row_type);
             X86_PUSH32(0u);
             X86_PUSH32(r);
             ctx.ecx = list_va;
@@ -307,14 +367,17 @@ void ApplyNativeScreenTitle(X86Context& ctx, uint8_t* base, NativePage page) {
     if (!game::safe_mem::CanAccess(title_buf_va, 0x78u)) return;
 
     const uint32_t flash_root_va = game::safe_mem::Read32(kFlashRootGlobalPtr, 0u);
-    // In Main Menu (bg_options.xbck), the narrow uppercase title slot wraps two-word titles like
-    // "Display Options" / "Quality Options", causing "OPTIONS" to drop onto line 2 over the menu
-    // controls. Use single-word "Display" / "Quality" in Main Menu and full titles in Pause Menu.
+    // In Main Menu (bg_options.xbck), the narrow uppercase title slot wraps two-word titles.
+    // Use single-word "Display" / "Quality" / "Cheats" in Main Menu and full titles in Pause Menu.
     const char* title = nullptr;
     if (flash_root_va) {
-        title = (page == NativePage::Display) ? "Display" : "Quality";
+        if (page == NativePage::Display) title = "Display";
+        else if (page == NativePage::Quality) title = "Quality";
+        else title = "Cheats";
     } else {
-        title = (page == NativePage::Display) ? "Display Options" : "Quality Options";
+        if (page == NativePage::Display) title = "Display Options";
+        else if (page == NativePage::Quality) title = "Quality Options";
+        else title = "Cheat Options";
     }
 
     auto* dst = static_cast<char*>(kernel::HostPtr(title_buf_va));
@@ -344,7 +407,7 @@ void ApplyNativeScreenTitle(X86Context& ctx, uint8_t* base, NativePage page) {
 
 }  // namespace
 
-// Override screen header title setter so Display / Quality Options never flash "GAME OPTIONS" or wrap "OPTIONS".
+// Override screen header title setter so custom Options screens never flash "GAME OPTIONS".
 extern "C" void sub_00154E40(X86Context& ctx, uint8_t* base) {
     const auto page = static_cast<NativePage>(g_native_page.load());
     if (page != NativePage::None) {
@@ -361,7 +424,9 @@ extern "C" void sub_0018C770(X86Context& ctx, uint8_t* base) {
     __imp__sub_0018C770(ctx, base);
 }
 
-// Filter Networking row during Main Menu CMenuList population (sub_00348BE0: __thiscall ret 0x1C).
+// Intercept CMenuList::AddItem (sub_00348BE0: __thiscall ret 0x1C):
+//  - Main Menu: filter Networking row and keep indices contiguous.
+//  - Options Menu: detect CM_Cheat_Codes (0x32) so Cheat Options is inserted directly underneath it.
 extern "C" void sub_00348BE0(X86Context& ctx, uint8_t* base) {
     if (g_in_main_menu_populate) {
         const uint32_t cb_fn = game::safe_mem::Read32(ctx.esp + 20u, 0u);
@@ -377,17 +442,46 @@ extern "C" void sub_00348BE0(X86Context& ctx, uint8_t* base) {
                 X86_MEM32(ctx.esp + 4u) = idx - 1u;
             }
         }
+    } else if (g_in_options_populate) {
+        if (g_inserted_cheat_options && game::safe_mem::CanAccess(ctx.esp + 4u, 4u)) {
+            X86_MEM32(ctx.esp + 4u) = X86_MEM32(ctx.esp + 4u) + 1u;
+        }
+        const uint32_t cb_obj = game::safe_mem::Read32(ctx.esp + 16u, 0u);
+        const uint32_t cb_fn = game::safe_mem::Read32(ctx.esp + 20u, 0u);
+        const uint32_t stored_param = game::safe_mem::Read32(ctx.esp + 24u, 0u);
+        const uint32_t list_va = ctx.ecx;
+        __imp__sub_00348BE0(ctx, base);
+        if (cb_fn == kFnMenuAction && stored_param == kActionCheatCodes && ctx.eax != 0u) {
+            g_cheat_codes_handle = ctx.eax;
+            g_cheat_codes_list_va = list_va;
+            g_cheat_codes_owner_va = cb_obj;
+        }
+        return;
     }
     __imp__sub_00348BE0(ctx, base);
 }
 
-// Skip label assignment for filtered Main Menu item handles (sub_00348D70: __thiscall ret 0x0C).
+// Intercept CMenuList::SetItemText (sub_00348D70: __thiscall ret 0x0C):
+//  - Main Menu: skip label assignment for filtered Networking handle.
+//  - Options Menu: immediately insert "Cheat Options" directly after "Cheat Codes" when unlocked.
 extern "C" void sub_00348D70(X86Context& ctx, uint8_t* base) {
-    if (g_in_main_menu_populate && game::safe_mem::Read32(ctx.esp + 4u, 0u) == 0u) {
+    const uint32_t handle = game::safe_mem::Read32(ctx.esp + 4u, 0u);
+    if (g_in_main_menu_populate && handle == 0u) {
         ctx.esp += 16u;  // return address + 0x0C args
         return;
     }
     __imp__sub_00348D70(ctx, base);
+
+    if (g_in_options_populate && !g_inserted_cheat_options &&
+        g_cheat_codes_handle != 0u && handle == g_cheat_codes_handle &&
+        game::cheats::HasAnyUnlockedCheat()) {
+        g_cheat_codes_handle = 0u;
+        if (g_cheat_codes_list_va && g_cheat_codes_owner_va) {
+            AppendRootOptionItem(ctx, base, g_cheat_codes_list_va, g_cheat_codes_owner_va,
+                                 kActionCheatOptions, "Cheat Options");
+            g_inserted_cheat_options = true;
+        }
+    }
 }
 
 // Hide Main Menu Xbox Live sign-in status widget ([this + 0x1C0], "Not Signed In" / "Signed in...").
@@ -397,14 +491,22 @@ extern "C" void sub_0018CAD0(X86Context& ctx, uint8_t* base) {
     ctx.esp += 4u;  // __thiscall ret 0
 }
 
-// Override Options menu populate: append Display Options and Quality Options items.
+// Override Options menu populate: insert Cheat Options right after Cheat Codes (when unlocked)
+// and append Display Options and Quality Options items.
 extern "C" void sub_0018D610(X86Context& ctx, uint8_t* base) {
     g_native_page.store(static_cast<int>(NativePage::None));
-    __imp__sub_0018D610(ctx, base);
+    bool inserted_inline = false;
+    {
+        ScopedOptionsMenuPopulate guard;
+        __imp__sub_0018D610(ctx, base);
+        inserted_inline = g_inserted_cheat_options;
+    }
+    g_inserted_cheat_options = inserted_inline;
     AppendCustomOptionsItems(ctx, base);
+    g_inserted_cheat_options = false;
 }
 
-// Route Display Options and Quality Options through mcMenuGameOptions host screen (0x41).
+// Route Display Options, Quality Options, and Cheat Options through mcMenuGameOptions host screen (0x41).
 extern "C" void sub_00163830(X86Context& ctx, uint8_t* base) {
     const uint32_t action = game::safe_mem::Read32(ctx.esp + 4u, 0u);
     if (action == kActionDisplayOptions) {
@@ -419,6 +521,12 @@ extern "C" void sub_00163830(X86Context& ctx, uint8_t* base) {
             X86_MEM32(ctx.esp + 4u) = kActionGameOptions;
         }
         LOGI("[OK] options_menu: entering native Quality Options screen");
+    } else if (action == kActionCheatOptions) {
+        g_native_page.store(static_cast<int>(NativePage::Cheats));
+        if (game::safe_mem::CanAccess(ctx.esp + 4u, 4u)) {
+            X86_MEM32(ctx.esp + 4u) = kActionGameOptions;
+        }
+        LOGI("[OK] options_menu: entering native Cheat Options screen");
     } else if (action == kActionGameOptions) {
         g_native_page.store(static_cast<int>(NativePage::None));
     }
@@ -431,7 +539,7 @@ extern "C" void sub_00163C40(X86Context& ctx, uint8_t* base) {
     __imp__sub_00163C40(ctx, base);
 }
 
-// Populate mcMenuGameOptions with Display or Quality Options rows when active.
+// Populate mcMenuGameOptions with Display, Quality, or Cheat Options rows when active.
 extern "C" void sub_0018DD50(X86Context& ctx, uint8_t* base) {
     const auto page = static_cast<NativePage>(g_native_page.load());
     if (page == NativePage::None) {
@@ -443,7 +551,7 @@ extern "C" void sub_0018DD50(X86Context& ctx, uint8_t* base) {
     ctx.esp += 4u;  // __thiscall ret 0
 }
 
-// Handle Left (-1) / Right (+1) adjustment on Display or Quality Options rows.
+// Handle Left (-1) / Right (+1) adjustment or A-button click (+1) on custom Options rows.
 extern "C" void sub_0018DB10(X86Context& ctx, uint8_t* base) {
     const auto page = static_cast<NativePage>(g_native_page.load());
     if (page == NativePage::None) {
@@ -459,7 +567,16 @@ extern "C" void sub_0018DB10(X86Context& ctx, uint8_t* base) {
         const uint32_t col = game::safe_mem::Read32(list_va + 0x25Cu, 0u);
         const uint32_t sel_idx = (col < 4u) ? game::safe_mem::Read32(list_va + (col << 4) + 0x268u, 0u) : 0u;
         if (sel_idx < g_entry_count) {
-            (void)app::rows::Value(g_entries[sel_idx].row, step);
+            const NativeEntry& entry = g_entries[sel_idx];
+            if (entry.is_cheat) {
+                if (entry.cheat_id == game::cheats::CheatId::Cash5000) {
+                    game::cheats::TriggerCashCheat();
+                } else {
+                    game::cheats::ToggleCheat(entry.cheat_id);
+                }
+            } else {
+                (void)app::rows::Value(entry.row, step);
+            }
             RefreshVisibleRows(ctx, base);
         }
     }

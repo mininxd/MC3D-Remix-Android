@@ -1,7 +1,11 @@
+#include <cctype>
 #include <mutex>
+#include <string>
 #include <unordered_set>
 
+#include "common/options.h"
 #include "core/log.h"
+#include "game/guest_mem_safe.h"
 #include "xdk/hle.h"
 
 using namespace kernel;
@@ -75,3 +79,28 @@ X86_FUNC(GUEST(BinkNextFrame)) {
     GUEST_ORIG(BinkNextFrame)(ctx, base);
 }
 #endif
+
+// Skip boot/logo intro movies when Skip Intros is enabled, while keeping career/story cutscenes intact.
+// Signature: __thiscall bool BinkPlayer::Open(const char* name, int arg2) [ret 0x08].
+X86_EXTERN_FUNC(__imp__sub_003639C0);
+X86_FUNC(sub_003639C0) {
+    if (game::Opt().skip_intros) {
+        const uint32_t name_va = R32(ctx.esp + 4u);
+        if (name_va) {
+            std::string name = game::safe_mem::ReadSanitizedCString(name_va, 128);
+            for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (name.find("rockstar") != std::string::npos ||
+                name.find("sandiego") != std::string::npos ||
+                name.find("mc3intro") != std::string::npos ||
+                name.find("legal") != std::string::npos ||
+                name.find("esrb") != std::string::npos ||
+                name.find("rsg") != std::string::npos) {
+                LOGI("[OK] bink: skipped intro video '%s'", name.c_str());
+                ctx.eax &= 0xFFFFFF00u;  // return false
+                ctx.esp += 12u;          // return addr + 0x08 args
+                return;
+            }
+        }
+    }
+    __imp__sub_003639C0(ctx, base);
+}
