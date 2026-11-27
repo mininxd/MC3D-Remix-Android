@@ -14,7 +14,7 @@ struct Options {
     bool auto_burnout = true;     // auto-hold Handbrake with Gas during pre-race countdown for burnout launch
     bool skip_intros = false;
     bool fps_counter = false;
-    uint32_t display_logs = 0;  // 0 Off, 1 Minimal (FPS/GPU/CPU), 2 Full (FPS/GPU/CPU/Version/Vertex/Device)
+    uint32_t display_logs = 0;  // 0 Off, 1 Minimal, 2 Full, 3 Debug
     uint32_t fmv_scale = 0;
     uint32_t screen_filter = 0;
     bool reload_blur = true;

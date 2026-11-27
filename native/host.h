@@ -22,20 +22,47 @@ void WaitForeground();
 // the window's size in pixels
 void WindowPixels(int& w, int& h);
 
-// Live telemetry snapshot for Display Logs overlay (Off / Minimal / Full)
+// Live telemetry snapshot for Display Logs overlay (Off / Minimal / Full / Debug)
+struct DisplayLogsFrame {
+    float fps = 0.0f;
+    float frame_ms = 0.0f;
+    float raw_frame_ms = 0.0f;
+    float gpu_wait_ms = 0.0f;
+    uint32_t draws = 0;
+    uint64_t vertices = 0;
+    uint32_t culled = 0;
+    uint32_t tex_count = 0;
+    uint32_t obj_hit_pct = 0;
+    uint32_t render_w = 0;
+    uint32_t render_h = 0;
+};
 struct DisplayLogsSnapshot {
     float fps = 0.0f;
+    float p1_low_fps = 0.0f;
     float frame_ms = 0.0f;
     float cpu_percent = 0.0f;
     float gpu_percent = 0.0f;
+    float temp_c = -1.0f;
+    uint32_t draws = 0;
     uint64_t vertices = 0;
+    uint32_t culled = 0;
+    uint32_t ram_used_mb = 0;
+    uint32_t ram_total_mb = 0;
+    uint32_t tex_count = 0;
+    uint32_t obj_hit_pct = 0;
+    uint32_t render_pct = 100;
+    uint32_t render_w = 0;
+    uint32_t render_h = 0;
     const char* app_version = "1.0";
+    const char* build_commit = "";
+    const char* vulkan_api = "Vulkan";
+    const char* android_ver = "";
     const char* device_name = "";
     const char* cpu_name = "";
     const char* gpu_name = "";
 };
-void SetGpuName(const char* name);
-void UpdateDisplayLogs(float fps, float frame_ms, uint64_t vertices, float gpu_busy_ms);
+void SetGpuInfo(const char* name, uint32_t vk_major, uint32_t vk_minor);
+void UpdateDisplayLogs(const DisplayLogsFrame& frame);
 DisplayLogsSnapshot GetDisplayLogs();
 
 }  // namespace host

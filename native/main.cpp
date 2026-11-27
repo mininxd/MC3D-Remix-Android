@@ -131,13 +131,31 @@ std::mutex g_diag_lock;
 std::string g_diag_device;
 std::string g_diag_cpu;
 std::string g_diag_gpu = "Vulkan GPU";
+std::string g_diag_vk_api = "Vulkan 1.1";
+std::string g_diag_android = "Android";
+uint32_t g_diag_ram_total_mb = 0;
 bool g_diag_hw_init = false;
 
 std::atomic<float> g_diag_fps{0.0f};
+std::atomic<float> g_diag_p1_low{0.0f};
 std::atomic<float> g_diag_frame_ms{16.67f};
 std::atomic<float> g_diag_cpu_pct{0.0f};
 std::atomic<float> g_diag_gpu_pct{0.0f};
+std::atomic<float> g_diag_temp_c{-1.0f};
+std::atomic<uint32_t> g_diag_draws{0};
 std::atomic<uint64_t> g_diag_verts{0};
+std::atomic<uint32_t> g_diag_culled{0};
+std::atomic<uint32_t> g_diag_ram_used_mb{0};
+std::atomic<uint32_t> g_diag_tex_count{0};
+std::atomic<uint32_t> g_diag_obj_hit_pct{0};
+std::atomic<uint32_t> g_diag_render_w{0};
+std::atomic<uint32_t> g_diag_render_h{0};
+
+// 1% Low FPS ring buffer (last 120 frame times, sorted every 500ms in Debug mode)
+constexpr size_t kFrameTimeHist = 120;
+float g_ft_ring[kFrameTimeHist]{};
+size_t g_ft_pos = 0;
+size_t g_ft_count = 0;
 
 // CPU & GPU sysfs sampling state (NFSU2 DiagnosticOverlay style, sampled every 500ms)
 uint64_t g_prev_cpu_total = 0;
@@ -149,6 +167,8 @@ float g_smoothed_gpu_pct = -1.0f;
 bool g_gpu_sysfs_checked = false;
 std::string g_gpu_sysfs_path;
 bool g_gpu_sysfs_pair = false;
+bool g_temp_sysfs_checked = false;
+std::string g_temp_sysfs_path;
 std::chrono::steady_clock::time_point g_last_diag_sample{};
 
 std::string TrimStr(std::string s) {
@@ -219,6 +239,64 @@ void EnsureHardwareInfoLocked() {
         }
         g_diag_cpu = hw.empty() ? "ARM64 CPU" : hw;
     }
+
+    std::string rel = TrimStr(Property("ro.build.version.release"));
+    g_diag_android = rel.empty() ? "Android" : ("Android " + rel);
+    g_diag_ram_total_mb = uint32_t(std::max(0, SDL_GetSystemRAM()));
+}
+
+uint32_t SampleProcessRamMb() {
+    std::ifstream f("/proc/self/status");
+    for (std::string line; std::getline(f, line);) {
+        if (line.rfind("VmRSS:", 0) == 0) {
+            unsigned long long kb = 0;
+            if (std::sscanf(line.c_str() + 6, "%llu", &kb) == 1) {
+                return uint32_t(kb / 1024ull);
+            }
+            break;
+        }
+    }
+    return 0u;
+}
+
+bool ReadTempFileC(const std::string& path, float& out_c) {
+    std::ifstream f(path);
+    std::string line;
+    if (!std::getline(f, line)) return false;
+    float raw = 0.0f;
+    if (std::sscanf(line.c_str(), "%f", &raw) != 1 || raw <= 0.0f) return false;
+    float c = raw;
+    if (raw > 1000.0f) c = raw / 1000.0f;
+    else if (raw > 120.0f) c = raw / 10.0f;
+    if (c >= 10.0f && c <= 110.0f) {
+        out_c = c;
+        return true;
+    }
+    return false;
+}
+
+float SampleTempC() {
+    float c = -1.0f;
+    if (g_temp_sysfs_checked) {
+        if (g_temp_sysfs_path.empty()) return -1.0f;
+        if (ReadTempFileC(g_temp_sysfs_path, c)) return c;
+        g_temp_sysfs_path.clear();
+        return -1.0f;
+    }
+    g_temp_sysfs_checked = true;
+    static constexpr const char* kTempPaths[] = {
+        "/sys/class/power_supply/battery/temp",
+        "/sys/class/power_supply/bms/temp",
+        "/sys/class/thermal/thermal_zone0/temp",
+        "/sys/class/thermal/thermal_zone1/temp",
+    };
+    for (const char* p : kTempPaths) {
+        if (ReadTempFileC(p, c)) {
+            g_temp_sysfs_path = p;
+            return c;
+        }
+    }
+    return -1.0f;
 }
 
 float SampleCpuPercent() {
@@ -333,17 +411,33 @@ bool SampleGpuSysfs(float& out) {
 
 }  // namespace
 
-void SetGpuName(const char* name) {
-    if (!name || !name[0]) return;
+void SetGpuInfo(const char* name, uint32_t vk_major, uint32_t vk_minor) {
     std::lock_guard lock(g_diag_lock);
-    g_diag_gpu = name;
+    if (name && name[0]) g_diag_gpu = name;
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "Vulkan %u.%u", vk_major, vk_minor);
+    g_diag_vk_api = buf;
 }
 
-void UpdateDisplayLogs(float fps, float frame_ms, uint64_t vertices, float gpu_wait_ms) {
-    g_diag_fps.store(fps, std::memory_order_relaxed);
-    g_diag_frame_ms.store(frame_ms, std::memory_order_relaxed);
-    g_diag_verts.store(vertices, std::memory_order_relaxed);
-    if (game::Opt().display_logs == 0u) return;
+void UpdateDisplayLogs(const DisplayLogsFrame& frame) {
+    g_diag_fps.store(frame.fps, std::memory_order_relaxed);
+    g_diag_frame_ms.store(frame.frame_ms, std::memory_order_relaxed);
+    g_diag_draws.store(frame.draws, std::memory_order_relaxed);
+    g_diag_verts.store(frame.vertices, std::memory_order_relaxed);
+    g_diag_culled.store(frame.culled, std::memory_order_relaxed);
+    g_diag_tex_count.store(frame.tex_count, std::memory_order_relaxed);
+    g_diag_obj_hit_pct.store(frame.obj_hit_pct, std::memory_order_relaxed);
+    g_diag_render_w.store(frame.render_w, std::memory_order_relaxed);
+    g_diag_render_h.store(frame.render_h, std::memory_order_relaxed);
+
+    const uint32_t mode = game::Opt().display_logs;
+    if (mode == 0u) return;
+
+    if (mode >= 3u && frame.raw_frame_ms > 0.2f && frame.raw_frame_ms < 250.0f) {
+        g_ft_ring[g_ft_pos] = frame.raw_frame_ms;
+        g_ft_pos = (g_ft_pos + 1u) % kFrameTimeHist;
+        if (g_ft_count < kFrameTimeHist) ++g_ft_count;
+    }
 
     const auto now = std::chrono::steady_clock::now();
     if (g_last_diag_sample.time_since_epoch().count() != 0 &&
@@ -363,21 +457,37 @@ void UpdateDisplayLogs(float fps, float frame_ms, uint64_t vertices, float gpu_w
         const float target_fps = float(app::Get().fps_cap >= 30u ? app::Get().fps_cap : 60u);
         const float target_ms = 1000.0f / target_fps;
         float est = 0.0f;
-        if (gpu_wait_ms > 0.5f && frame_ms > 1.0f) {
-            est = std::clamp((gpu_wait_ms / target_ms) * 100.0f, 15.0f, 99.0f);
-        } else if (fps >= target_fps * 0.90f) {
+        if (frame.gpu_wait_ms > 0.5f && frame.frame_ms > 1.0f) {
+            est = std::clamp((frame.gpu_wait_ms / target_ms) * 100.0f, 15.0f, 99.0f);
+        } else if (frame.fps >= target_fps * 0.90f) {
             est = std::clamp(25.0f + cpu * 0.20f, 20.0f, 45.0f);
         } else if (cpu > 70.0f) {
-            const float ratio = std::max(0.2f, fps / target_fps);
+            const float ratio = std::max(0.2f, frame.fps / target_fps);
             est = std::clamp(ratio * 45.0f, 18.0f, 50.0f);
         } else {
-            const float eff = std::min(1.0f, target_ms / std::max(1.0f, frame_ms));
+            const float eff = std::min(1.0f, target_ms / std::max(1.0f, frame.frame_ms));
             est = std::clamp(eff * 60.0f, 25.0f, 65.0f);
         }
         g_smoothed_gpu_pct = (g_smoothed_gpu_pct < 0.0f) ? est : (g_smoothed_gpu_pct * 0.75f + est * 0.25f);
         gpu = std::clamp(g_smoothed_gpu_pct, 0.0f, 100.0f);
     }
     g_diag_gpu_pct.store(gpu, std::memory_order_relaxed);
+
+    if (mode >= 3u) {
+        if (g_ft_count >= 10u) {
+            float sorted[kFrameTimeHist];
+            std::memcpy(sorted, g_ft_ring, g_ft_count * sizeof(float));
+            std::sort(sorted, sorted + g_ft_count);
+            const size_t p99_idx = std::min(g_ft_count - 1u, (g_ft_count * 99u) / 100u);
+            const float p99_ms = std::max(sorted[p99_idx], 1.0f);
+            g_diag_p1_low.store(std::min(frame.fps > 0.1f ? frame.fps : 999.0f, 1000.0f / p99_ms),
+                                std::memory_order_relaxed);
+        } else {
+            g_diag_p1_low.store(frame.fps, std::memory_order_relaxed);
+        }
+        g_diag_ram_used_mb.store(SampleProcessRamMb(), std::memory_order_relaxed);
+        g_diag_temp_c.store(SampleTempC(), std::memory_order_relaxed);
+    }
 }
 
 DisplayLogsSnapshot GetDisplayLogs() {
@@ -388,13 +498,27 @@ DisplayLogsSnapshot GetDisplayLogs() {
         snap.device_name = g_diag_device.c_str();
         snap.cpu_name = g_diag_cpu.c_str();
         snap.gpu_name = g_diag_gpu.c_str();
+        snap.vulkan_api = g_diag_vk_api.c_str();
+        snap.android_ver = g_diag_android.c_str();
+        snap.ram_total_mb = g_diag_ram_total_mb;
     }
     snap.app_version = APP_VERSION_NAME;
+    snap.build_commit = MC3D_COMMIT;
     snap.fps = g_diag_fps.load(std::memory_order_relaxed);
+    snap.p1_low_fps = g_diag_p1_low.load(std::memory_order_relaxed);
     snap.frame_ms = g_diag_frame_ms.load(std::memory_order_relaxed);
     snap.cpu_percent = g_diag_cpu_pct.load(std::memory_order_relaxed);
     snap.gpu_percent = g_diag_gpu_pct.load(std::memory_order_relaxed);
+    snap.temp_c = g_diag_temp_c.load(std::memory_order_relaxed);
+    snap.draws = g_diag_draws.load(std::memory_order_relaxed);
     snap.vertices = g_diag_verts.load(std::memory_order_relaxed);
+    snap.culled = g_diag_culled.load(std::memory_order_relaxed);
+    snap.ram_used_mb = g_diag_ram_used_mb.load(std::memory_order_relaxed);
+    snap.tex_count = g_diag_tex_count.load(std::memory_order_relaxed);
+    snap.obj_hit_pct = g_diag_obj_hit_pct.load(std::memory_order_relaxed);
+    snap.render_pct = dynres::Percent();
+    snap.render_w = g_diag_render_w.load(std::memory_order_relaxed);
+    snap.render_h = g_diag_render_h.load(std::memory_order_relaxed);
     return snap;
 }
 
@@ -482,9 +606,9 @@ void Load() {
         else *o.value = t[o.key].value_or(*o.value);
     }
     if (migrate_defaults) PhoneFrameDefaults(s);
-    // Normalize simplified Motion Blur (Off / On), Display Logs (Off / Minimal / Full), and sync Dynamic Res FPS target
+    // Normalize simplified Motion Blur (Off / On), Display Logs (Off / Minimal / Full / Debug), and sync Dynamic Res FPS target
     game::Opt().motion_blur = game::Opt().motion_blur ? 1u : 0u;
-    game::Opt().display_logs = std::min(game::Opt().display_logs, 2u);
+    game::Opt().display_logs = std::min(game::Opt().display_logs, 3u);
     if (s.fps_cap >= 30u) game::Opt().dynamic_target_fps = s.fps_cap;
     if (kGame.load) kGame.load(&t);
 }

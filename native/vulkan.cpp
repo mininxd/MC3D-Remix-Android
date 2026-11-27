@@ -1997,7 +1997,11 @@ private:
     std::atomic<uint64_t> presents_seen_{0};
     std::atomic<uint64_t> present_value_[kFrames + 1] = {};
     uint64_t presents_ = 0;
+    uint32_t frame_draws_ = 0;
     uint64_t frame_verts_ = 0;
+    uint32_t frame_culled_ = 0;
+    uint32_t frame_buf_lookups_ = 0;
+    uint32_t frame_buf_hits_ = 0;
     double fps_ = 0;
     float ema_frame_ms_ = 16.67f;
     std::chrono::steady_clock::time_point last_present_t_ = std::chrono::steady_clock::now();
@@ -2111,8 +2115,8 @@ bool VulkanBackend::PickDevice() {
             if (!(qs[q].queueFlags & VK_QUEUE_GRAPHICS_BIT) || !present) continue;
             pd_ = pd;
             props_ = p;
-            host::SetGpuName(p.deviceName);
             api_ = api;
+            host::SetGpuInfo(p.deviceName, VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api));
             qfam_ = q;
             dev_exts_ = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
             auto want = [&](const char* name) {
@@ -2561,12 +2565,14 @@ VulkanBackend::Alloc VulkanBackend::UploadCached(const uint8_t* src, uint32_t by
             const uint64_t sig = FastBufSig(src, bytes);
 
             // 1. Persistent DEVICE_LOCAL Static Object / Geometry Cache (zero per-frame memcpy, fast VRAM reads!)
+            ++frame_buf_lookups_;
             constexpr VkDeviceSize kStaticBufBudget = 64ull << 20;
             StaticBuf& sb = static_bufs_[key];
             if (sb.promoted && sb.gpu.buf && sb.bytes == bytes && sb.epoch == ep &&
                 (sb.last_frame == presents_ + 1 || sb.fast_sig == sig)) {
                 sb.last_frame = presents_ + 1;
                 ++perf_static_buf_hits_;
+                ++frame_buf_hits_;
                 return {sb.gpu.buf, 0, nullptr};
             }
             if (sb.promoted && (sb.bytes != bytes || sb.epoch != ep || sb.fast_sig != sig)) {
@@ -2626,6 +2632,7 @@ VulkanBackend::Alloc VulkanBackend::UploadCached(const uint8_t* src, uint32_t by
             auto it = f.buf_cache.find(key);
             if (it != f.buf_cache.end() && it->second.epoch == ep && it->second.sig == sig) {
                 ++perf_vb_hits_;
+                ++frame_buf_hits_;
                 return it->second.alloc;
             }
             Alloc a = Upload(alloc_bytes, align);
@@ -4257,6 +4264,7 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
         y1 = std::clamp(y1, 0, int32_t(H));
         if (x1 <= x0 || y1 <= y0) {
             ++perf_scissor_culled_;
+            ++frame_culled_;
             return;
         }
     }
@@ -4268,6 +4276,7 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
         if (!a.pretransformed && s.rs[kRsVertexBlend] == 0 && a.topology != Topology::Points && !s.scissor_count &&
             IsFixedDrawOutsideFrustum(a, fixed_full, static_bufs_)) {
             ++perf_frustum_culled_;
+            ++frame_culled_;
             return;
         }
     }
@@ -4285,6 +4294,7 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
             a.topology != Topology::Points && !s.scissor_count &&
             IsProgDrawOutsideFrustum(s, a, size, vs_meta.mvp_cbase, static_bufs_)) {
             ++perf_frustum_culled_;
+            ++frame_culled_;
             return;
         }
     }
@@ -4426,9 +4436,11 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
             vkCmdBindIndexBuffer(Cb(), ib.buf, ib.off, itype);
         }
         vkCmdDrawIndexed(Cb(), a.index_count, 1, 0, a.base_vertex, 0);
+        ++frame_draws_;
         frame_verts_ += a.index_count;
     } else {
         vkCmdDraw(Cb(), a.draw_count, 1, 0, 0);
+        ++frame_draws_;
         frame_verts_ += a.draw_count;
     }
 }
@@ -5102,8 +5114,24 @@ void VulkanBackend::Present(const Surface& front) {
         fps_n_ = 0;
         fps_t_ = now;
     }
-    host::UpdateDisplayLogs(float(fps_), ema_frame_ms_, frame_verts_, gpu_wait_ms);
+    host::DisplayLogsFrame dlf{};
+    dlf.fps = float(fps_);
+    dlf.frame_ms = ema_frame_ms_;
+    dlf.raw_frame_ms = raw_frame_ms;
+    dlf.gpu_wait_ms = gpu_wait_ms;
+    dlf.draws = frame_draws_;
+    dlf.vertices = frame_verts_;
+    dlf.culled = frame_culled_;
+    dlf.tex_count = uint32_t(textures_.size());
+    dlf.obj_hit_pct = frame_buf_lookups_ ? std::min<uint32_t>(100u, (frame_buf_hits_ * 100u) / frame_buf_lookups_) : 0u;
+    dlf.render_w = t ? t->w : uint32_t(std::lround(float(guest_w_) * scale_));
+    dlf.render_h = t ? t->h : uint32_t(std::lround(float(guest_h_) * scale_));
+    host::UpdateDisplayLogs(dlf);
+    frame_draws_ = 0;
     frame_verts_ = 0;
+    frame_culled_ = 0;
+    frame_buf_lookups_ = 0;
+    frame_buf_hits_ = 0;
     if (presents_ == 180 || presents_ % 600 == 0) {
         SavePipelineCache();
         LOGR("[INFO] vkPerf: frame=%llu fps=%.1f msaa=%ux tex=%zu objBufs=%zu objHits=%llu vbHits=%llu vscHits=%llu dcHits=%llu psoHits=%llu fastTex=%llu clearCoalesce=%llu frustumCull=%llu scissorCull=%llu dxtPar=%llu",

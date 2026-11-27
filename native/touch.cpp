@@ -1996,42 +1996,82 @@ void EmitDisplayLogsOverlay(std::vector<Quad>& out, float w, float h, bool touch
 
     const host::DisplayLogsSnapshot snap = host::GetDisplayLogs();
     const float s = UiScale(w, h);
-    const float line_h = std::clamp(11.0f * s, 14.0f, h * 0.026f);
-    const float line_gap = line_h * 0.34f;
+    const float line_h = std::clamp((mode >= 3u ? 10.0f : 11.0f) * s, 13.0f, h * 0.025f);
+    const float line_gap = line_h * 0.32f;
     const float pad_h = 8.0f * s;
     const float pad_v = 5.0f * s;
 
-    char line1[128] = {};
-    char line2[128] = {};
-    char line3[256] = {};
+    char lines[6][256] = {};
+    int line_count = 0;
     const int fps_i = std::max(0, int(std::lround(snap.fps)));
-    const int gpu_i = std::clamp(int(std::lround(snap.gpu_percent)), 0, 100);
+    const int p1_i = std::max(0, int(std::lround(snap.p1_low_fps)));
     const int cpu_i = std::clamp(int(std::lround(snap.cpu_percent)), 0, 100);
-    std::snprintf(line1, sizeof(line1), "FPS: %d (%.1f ms)  |  GPU: %d%%  |  CPU: %d%%",
-                  fps_i, double(snap.frame_ms), gpu_i, cpu_i);
+    const int gpu_i = std::clamp(int(std::lround(snap.gpu_percent)), 0, 100);
 
-    int line_count = 1;
-    if (mode >= 2u) {
-        char vert_buf[32] = {};
-        if (snap.vertices >= 1000000ull) {
-            std::snprintf(vert_buf, sizeof(vert_buf), "%.2fM", double(snap.vertices) / 1000000.0);
-        } else if (snap.vertices >= 1000ull) {
-            std::snprintf(vert_buf, sizeof(vert_buf), "%.1fK", double(snap.vertices) / 1000.0);
+    char vert_buf[32] = {};
+    if (snap.vertices >= 1000000ull) {
+        std::snprintf(vert_buf, sizeof(vert_buf), "%.2fM", double(snap.vertices) / 1000000.0);
+    } else if (snap.vertices >= 1000ull) {
+        std::snprintf(vert_buf, sizeof(vert_buf), "%.1fK", double(snap.vertices) / 1000.0);
+    } else {
+        std::snprintf(vert_buf, sizeof(vert_buf), "%llu", (unsigned long long)snap.vertices);
+    }
+    const char* app_ver = (snap.app_version && snap.app_version[0]) ? snap.app_version : "1.0";
+    const char* dev_name = (snap.device_name && snap.device_name[0]) ? snap.device_name : "Android";
+    const char* cpu_name = (snap.cpu_name && snap.cpu_name[0]) ? snap.cpu_name : "ARM64";
+    const char* gpu_name = (snap.gpu_name && snap.gpu_name[0]) ? snap.gpu_name : "Vulkan";
+
+    if (mode == 1u) {
+        // Minimal: FPS, CPU, GPU
+        std::snprintf(lines[line_count++], sizeof(lines[0]),
+                      "FPS: %d (%.1f ms)  |  CPU: %d%%  |  GPU: %d%%",
+                      fps_i, double(snap.frame_ms), cpu_i, gpu_i);
+    } else if (mode == 2u) {
+        // Full: FPS/CPU/GPU, App Version + Vertex, Device/CPU/GPU
+        std::snprintf(lines[line_count++], sizeof(lines[0]),
+                      "FPS: %d (%.1f ms)  |  CPU: %d%%  |  GPU: %d%%",
+                      fps_i, double(snap.frame_ms), cpu_i, gpu_i);
+        std::snprintf(lines[line_count++], sizeof(lines[0]),
+                      "v%s  |  Vertex: %s", app_ver, vert_buf);
+        std::snprintf(lines[line_count++], sizeof(lines[0]),
+                      "%s, %s, %s", dev_name, cpu_name, gpu_name);
+    } else {
+        // Debug: Full + 1% Low, Res/AA, Draws/Verts/Cull, RAM/Tex/Obj, Temp, Build/Vulkan/Android
+        static constexpr const char* kAaNames[] = {"Off", "FXAA", "MSAA 2x", "MSAA 4x", "SSAA 2x"};
+        const char* aa_name = kAaNames[std::min<uint32_t>(game::Opt().anti_aliasing, 4u)];
+        const char* commit = (snap.build_commit && snap.build_commit[0]) ? snap.build_commit : "dev";
+        const char* vk_api = (snap.vulkan_api && snap.vulkan_api[0]) ? snap.vulkan_api : "Vulkan";
+        const char* and_ver = (snap.android_ver && snap.android_ver[0]) ? snap.android_ver : "Android";
+
+        std::snprintf(lines[line_count++], sizeof(lines[0]),
+                      "FPS: %d (%.1f ms)  |  1%% Low: %d  |  CPU: %d%%  |  GPU: %d%%",
+                      fps_i, double(snap.frame_ms), p1_i, cpu_i, gpu_i);
+        if (snap.temp_c > 0.0f) {
+            std::snprintf(lines[line_count++], sizeof(lines[0]),
+                          "Res: %u%% (%ux%u)  |  AA: %s  |  Temp: %.1fC",
+                          snap.render_pct, snap.render_w, snap.render_h, aa_name, double(snap.temp_c));
         } else {
-            std::snprintf(vert_buf, sizeof(vert_buf), "%llu", (unsigned long long)snap.vertices);
+            std::snprintf(lines[line_count++], sizeof(lines[0]),
+                          "Res: %u%% (%ux%u)  |  AA: %s",
+                          snap.render_pct, snap.render_w, snap.render_h, aa_name);
         }
-        std::snprintf(line2, sizeof(line2), "v%s  |  Vertex: %s",
-                      (snap.app_version && snap.app_version[0]) ? snap.app_version : "1.0", vert_buf);
-        std::snprintf(line3, sizeof(line3), "%s, %s, %s",
-                      (snap.device_name && snap.device_name[0]) ? snap.device_name : "Android",
-                      (snap.cpu_name && snap.cpu_name[0]) ? snap.cpu_name : "ARM64",
-                      (snap.gpu_name && snap.gpu_name[0]) ? snap.gpu_name : "Vulkan");
-        line_count = 3;
+        std::snprintf(lines[line_count++], sizeof(lines[0]),
+                      "Draws: %u  |  Verts: %s  |  Cull: %u",
+                      snap.draws, vert_buf, snap.culled);
+        std::snprintf(lines[line_count++], sizeof(lines[0]),
+                      "RAM: %u / %u MB  |  Tex: %u  |  Obj: %u%%",
+                      snap.ram_used_mb, snap.ram_total_mb, snap.tex_count, snap.obj_hit_pct);
+        std::snprintf(lines[line_count++], sizeof(lines[0]),
+                      "MC3D Remix v%s (%s)  |  %s  |  %s",
+                      app_ver, commit, vk_api, and_ver);
+        std::snprintf(lines[line_count++], sizeof(lines[0]),
+                      "%s, %s, %s", dev_name, cpu_name, gpu_name);
     }
 
-    float max_tw = MeasureTextWidth(line_h, line1);
-    if (line_count >= 2) max_tw = std::max(max_tw, MeasureTextWidth(line_h, line2));
-    if (line_count >= 3) max_tw = std::max(max_tw, MeasureTextWidth(line_h, line3));
+    float max_tw = 0.0f;
+    for (int i = 0; i < line_count; ++i) {
+        max_tw = std::max(max_tw, MeasureTextWidth(line_h, lines[i]));
+    }
 
     const float box_w = max_tw + pad_h * 2.0f;
     const float box_h = float(line_count) * line_h + float(line_count - 1) * line_gap + pad_v * 2.0f;
@@ -2062,14 +2102,13 @@ void EmitDisplayLogsOverlay(std::vector<Quad>& out, float w, float h, bool touch
 
     const float text_rx = x1 - pad_h;
     float cy = y0 + pad_v + line_h * 0.5f;
-    EmitTextRight(out, text_rx, cy, line_h, 1.0f, 1.0f, 1.0f, 0.82f, line1);
-    if (line_count >= 2) {
+    for (int i = 0; i < line_count; ++i) {
+        const float a = (i == 0) ? 0.86f : (i == line_count - 1 ? 0.74f : 0.80f);
+        const float r = (i == 0) ? 1.00f : (i == line_count - 1 ? 0.84f : 0.92f);
+        const float g = (i == 0) ? 1.00f : (i == line_count - 1 ? 0.88f : 0.95f);
+        const float b = (i == 0) ? 1.00f : (i == line_count - 1 ? 0.94f : 1.00f);
+        EmitTextRight(out, text_rx, cy, line_h, r, g, b, a, lines[i]);
         cy += line_h + line_gap;
-        EmitTextRight(out, text_rx, cy, line_h, 0.90f, 0.95f, 1.0f, 0.78f, line2);
-    }
-    if (line_count >= 3) {
-        cy += line_h + line_gap;
-        EmitTextRight(out, text_rx, cy, line_h, 0.84f, 0.88f, 0.94f, 0.74f, line3);
     }
 }
 // ============================================================================
