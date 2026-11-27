@@ -22,6 +22,7 @@ X86_EXTERN_FUNC(__imp__sub_001923B0);
 X86_EXTERN_FUNC(__imp__sub_00292CD0);
 X86_EXTERN_FUNC(__imp__sub_001CF9D0);
 X86_EXTERN_FUNC(__imp__sub_00269220);
+X86_EXTERN_FUNC(__imp__sub_00029337);
 X86_EXTERN_FUNC(__imp__sub_002BD990);
 X86_EXTERN_FUNC(__imp__sub_001422D0);
 X86_EXTERN_FUNC(__imp__sub_00144C90);
@@ -362,35 +363,18 @@ void OnFrameTick() {
 
 }  // namespace game::cheats
 
-// Cheat code input dispatcher: __stdcall int sub_001923B0(const char* encoded) [ret 0x04].
+// Cheat code input dispatcher: __stdcall int sub_001923B0(const char* input) [ret 0x04].
+// Note: sub_00192350 scrambles the plain-text input to compare against the obfuscated
+// built-in table; input itself is already plain ASCII from the keyboard UI.
 X86_FUNC(sub_001923B0) {
-    const uint32_t encoded_va = X86_MEM32(ctx.esp + 4u);
-    std::string decoded;
-    if (encoded_va) {
-        const uint32_t orig_esp = ctx.esp;
-        const uint32_t orig_eax = ctx.eax;
-        const uint32_t orig_ecx = ctx.ecx;
-        const uint32_t orig_edx = ctx.edx;
-
-        ctx.esp -= 128u;
-        const uint32_t buf_va = ctx.esp;
-        X86_MEM8(buf_va) = 0u;
-        X86_PUSH32(encoded_va);
-        X86_PUSH32(buf_va);
-        X86_PUSH32(0x001923C7u);
-        sub_00192350(ctx, base);
-        decoded = game::safe_mem::ReadSanitizedCString(buf_va, 64);
-
-        ctx.esp = orig_esp;
-        ctx.eax = orig_eax;
-        ctx.ecx = orig_ecx;
-        ctx.edx = orig_edx;
-    }
-
-    if (!decoded.empty() && game::cheats::TryHandleCheatCode(decoded)) {
-        ctx.eax = 0xFFFFFFFFu;
-        ctx.esp += 8u;
-        return;
+    const uint32_t input_va = X86_MEM32(ctx.esp + 4u);
+    if (input_va) {
+        const std::string input = game::safe_mem::ReadSanitizedCString(input_va, 64);
+        if (!input.empty() && game::cheats::TryHandleCheatCode(input)) {
+            ctx.eax = 0xFFFFFFFFu;
+            ctx.esp += 8u;
+            return;
+        }
     }
     __imp__sub_001923B0(ctx, base);
 }
@@ -427,6 +411,15 @@ X86_FUNC(sub_00269220) {
     game::cheats::ApplyTrafficSettings();
     game::cheats::ApplyArcadeSettings();
     game::cheats::ApplySuperCopy();
+}
+
+// Race initialization (spawns HUD, powerup pickups, traffic, police, racers for both Career and Arcade).
+X86_FUNC(sub_00029337) {
+    game::cheats::ApplyTrafficSettings();
+    game::cheats::ApplyArcadeSettings();
+    game::cheats::ApplySuperCopy();
+    game::cheats::ApplyPoliceCheats();
+    __imp__sub_00029337(ctx, base);
 }
 
 // Race vehicle spawn/init.
