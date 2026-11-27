@@ -608,7 +608,6 @@ enum class When : uint8_t {
     PlaySteerBtn,
     PlayStick,
     PlayNos,
-    PlayTurbo,
     PlaySpecial,
     AlwaysActive,
     MainMenuOnly,
@@ -639,8 +638,7 @@ constexpr Button kButtons[] = {
     {"handbrake",   "Handbrake",       SvgIcon::Handbrake,      kAnalogA,      game::GameAction::Handbrake,      When::Play,           1.0f,           false, false},
     {"weight_xfer", "Weight Transfer", SvgIcon::WeightTransfer, kAnalogB,      game::GameAction::WeightTransfer, When::Play,           1.0f,           false, false},
     {"burnout",     "Burnout",         SvgIcon::Burnout,        kBurnout,      game::GameAction::Count,          When::Play,           1.0f,           false, false},
-    {"nitro",       "Nitro",           SvgIcon::Nitro,          kAnalogX,      game::GameAction::Nitro,          When::PlayNos,        1.0f,           false, false},
-    {"turbo",       "Turbo",           SvgIcon::Turbo,          kAnalogX,      game::GameAction::Nitro,          When::PlayTurbo,      1.0f,           false, false},
+    {"nitro",       "Nitro / Turbo",   SvgIcon::Nitro,          kAnalogX,      game::GameAction::Nitro,          When::PlayNos,        1.0f,           false, false},
     {"special",     "Special",         SvgIcon::Special,        kBit + 6,      game::GameAction::Special,        When::PlaySpecial,    1.0f,           false, false},
     {"pause",       "Pause",           SvgIcon::Pause,          kBit + 4,      game::GameAction::Pause,          When::Play,           1.0f,           true,  false},
     {"camera",      "Camera",          SvgIcon::Camera,         kAnalogBlack,  game::GameAction::Camera,         When::Play,           1.0f,           false, false},
@@ -674,24 +672,23 @@ constexpr size_t kIdxHandbrake = 5;
 constexpr size_t kIdxWeightTransfer = 6;
 constexpr size_t kIdxBurnout = 7;
 constexpr size_t kIdxNitro = 8;
-constexpr size_t kIdxTurbo = 9;
-constexpr size_t kIdxSpecial = 10;
-constexpr size_t kIdxPause = 11;
-constexpr size_t kIdxCamera = 12;
-constexpr size_t kIdxMap = 13;
-constexpr size_t kIdxFlash = 14;
-constexpr size_t kIdxLookBack = 15;
-constexpr size_t kIdxModeSwap = 16;
-constexpr size_t kIdxEditBtn = 17;
-constexpr size_t kIdxDpadUp = 18;
-constexpr size_t kIdxDpadDown = 19;
-constexpr size_t kIdxDpadLeft = 20;
-constexpr size_t kIdxDpadRight = 21;
-constexpr size_t kIdxOk = 22;
-constexpr size_t kIdxBack = 23;
-constexpr size_t kIdxDeleteSave = 24;
-constexpr size_t kIdxCityLeft = 25;
-constexpr size_t kIdxCityRight = 26;
+constexpr size_t kIdxSpecial = 9;
+constexpr size_t kIdxPause = 10;
+constexpr size_t kIdxCamera = 11;
+constexpr size_t kIdxMap = 12;
+constexpr size_t kIdxFlash = 13;
+constexpr size_t kIdxLookBack = 14;
+constexpr size_t kIdxModeSwap = 15;
+constexpr size_t kIdxEditBtn = 16;
+constexpr size_t kIdxDpadUp = 17;
+constexpr size_t kIdxDpadDown = 18;
+constexpr size_t kIdxDpadLeft = 19;
+constexpr size_t kIdxDpadRight = 20;
+constexpr size_t kIdxOk = 21;
+constexpr size_t kIdxBack = 22;
+constexpr size_t kIdxDeleteSave = 23;
+constexpr size_t kIdxCityLeft = 24;
+constexpr size_t kIdxCityRight = 25;
 
 // Screen-percentage placement:
 //   x, y in [0..1] screen shares
@@ -721,7 +718,6 @@ Layout ComputeDefaultLayout(float, float) {
     L[kIdxWeightTransfer] = {0.2500f, 0.2500f, 0.0851f, false};
     L[kIdxBurnout]        = {0.9250f, 0.3500f, 0.0994f, false};
     L[kIdxNitro]          = {0.7389f, 0.8500f, 0.0938f, false};
-    L[kIdxTurbo]          = {0.8250f, 0.3500f, 0.0936f, false};
     L[kIdxSpecial]        = {0.7389f, 0.5750f, 0.0850f, false};
     L[kIdxPause]          = {0.0445f, 0.1013f, 0.0645f, false};
     L[kIdxCamera]         = {0.5250f, 0.1013f, 0.0646f, false};
@@ -1055,7 +1051,7 @@ bool IsMenuLike(game::UiContext ctx) {
 
 bool IsGameplayButton(When w) {
     return w == When::Play || w == When::PlaySteerBtn || w == When::PlayStick ||
-           w == When::PlayNos || w == When::PlayTurbo || w == When::PlaySpecial ||
+           w == When::PlayNos || w == When::PlaySpecial ||
            w == When::AlwaysActive;
 }
 
@@ -1126,10 +1122,8 @@ bool ButtonShown(size_t i) {
             return ctx == game::UiContext::Gameplay && analog;
         case When::PlayNos:
             return ctx == game::UiContext::Gameplay &&
-                   game::Telemetry().has_nos.load(std::memory_order_relaxed);
-        case When::PlayTurbo:
-            return ctx == game::UiContext::Gameplay &&
-                   game::Telemetry().turbo_ready.load(std::memory_order_relaxed);
+                   (game::Telemetry().has_nos.load(std::memory_order_relaxed) ||
+                    game::Telemetry().turbo_ready.load(std::memory_order_relaxed));
         case When::PlaySpecial:
             return ctx == game::UiContext::Gameplay &&
                    game::Telemetry().special_ready.load(std::memory_order_relaxed);
@@ -1511,7 +1505,7 @@ void FingerDown(SDL_FingerID id, float x, float y) {
     // Interactive first-time tutorial spotlight: tapping the glowing Turbo or Special button
     // immediately fires it, marks the tutorial completed, and smoothly ramps back to 100% speed!
     if (g_tut_active != TutKind::None && ctx == game::UiContext::Gameplay) {
-        const size_t target_idx = (g_tut_active == TutKind::Turbo) ? kIdxTurbo : kIdxSpecial;
+        const size_t target_idx = (g_tut_active == TutKind::Turbo) ? kIdxNitro : kIdxSpecial;
         float tx0, ty0, tx1, ty1;
         ButtonRect(target_idx, tx0, ty0, tx1, ty1);
         const float tcx = (tx0 + tx1) * 0.5f;
@@ -2216,11 +2210,16 @@ bool ReadSvgFile(const char* skin_dir, const char* icon_name, std::string& out) 
 
 SvgIcon ActiveIconForButton(size_t i) {
     const Button& b = kButtons[i];
-    if (b.when == When::PlaySpecial && !g_editing) {
-        const int8_t st = game::Telemetry().special_type.load(std::memory_order_relaxed);
-        if (st == 0) return SvgIcon::SpecialZone;
-        if (st == 1) return SvgIcon::SpecialAgro;
-        if (st == 2) return SvgIcon::SpecialRoar;
+    if (!g_editing) {
+        if (b.when == When::PlayNos && game::Telemetry().turbo_ready.load(std::memory_order_relaxed)) {
+            return SvgIcon::Turbo;
+        }
+        if (b.when == When::PlaySpecial) {
+            const int8_t st = game::Telemetry().special_type.load(std::memory_order_relaxed);
+            if (st == 0) return SvgIcon::SpecialZone;
+            if (st == 1) return SvgIcon::SpecialAgro;
+            if (st == 2) return SvgIcon::SpecialRoar;
+        }
     }
     return b.icon;
 }
@@ -2335,7 +2334,7 @@ void UpdateTutorialLocked(uint64_t now) {
         }
     } else if (touch_ok && g_tut_dim < 0.05f && now >= g_tut_cooldown_until) {
         const uint32_t seen = game::Opt().tutorial_seen;
-        if (!(seen & kTutBitTurbo) && !g_layout[kIdxTurbo].hidden &&
+        if (!(seen & kTutBitTurbo) && !g_layout[kIdxNitro].hidden &&
             tel.turbo_ready.load(std::memory_order_relaxed)) {
             g_tut_active = TutKind::Turbo;
             g_tut_visual = TutKind::Turbo;
@@ -2713,23 +2712,22 @@ void BuildOverlay(std::vector<Quad>& out) {
         const float cy = (1.0f - 0.115f - r_share) * h;
 
         const float prog = g_fmv_progress;
-        const float pulse = 1.0f + prog * 0.09f;
-        const float vis_a = fade_alpha * g_opacity;
+        const float vis_a = fade_alpha * (prog > 0.01f ? std::min(1.0f, g_opacity + 0.10f) : g_opacity);
 
-        // Circular progress ring (subtle track at rest, bright white/gold clockwise fill when holding anywhere!)
+        // Circular progress ring (stay completely still — no scale effect, smooth clockwise arc fill)
         const float track_a = (prog > 0.01f ? 0.35f : 0.22f) * vis_a;
         const float active_a = 0.98f * vis_a;
-        EmitRing(out, cx, cy, ring_r * pulse, std::max(4.0f, h * 0.0085f), prog,
+        EmitRing(out, cx, cy, ring_r, std::max(4.0f, h * 0.0085f), prog,
                  1.0f, 0.88f, 0.38f, active_a,
                  1.0f, 1.0f, 1.0f, track_a);
 
-        // start.svg icon inside the ring
+        // start.svg icon inside the ring (stationary, no scale)
         const AtlasUv& uv = g_atlas_uv[skin][static_cast<size_t>(SvgIcon::Start)];
-        const float ir = btn_r * 0.92f * pulse;
+        const float ir = btn_r * 0.92f;
         if (atlas_ok && uv.valid) {
             out.push_back(Quad{cx - ir, cy - ir, cx + ir, cy + ir,
                                uv.u0, uv.v0, uv.u1, uv.v1,
-                               1.0f, 1.0f, 1.0f, std::min(1.0f, vis_a * (prog > 0.01f ? 1.15f : 0.95f)),
+                               1.0f, 1.0f, 1.0f, vis_a,
                                0, 0, 0, 0, 0, 0, 0u});
         } else {
             EmitPanel(out, cx - ir, cy - ir, cx + ir, cy + ir,
@@ -2754,7 +2752,11 @@ void BuildOverlay(std::vector<Quad>& out) {
 
         const bool hidden = g_layout[i].hidden;
         const bool on = !editing && g_pressed[i];
-        const float vis = (hidden ? 0.32f : 1.0f) * g_opacity * fade_alpha;
+        const bool stick_active = !editing && i == kIdxSteerStick &&
+                                  (std::fabs(g_stick_raw_x) > 0.01f || std::fabs(g_stick_raw_y) > 0.01f);
+        const bool pressed_vis = on || stick_active;
+        const float press_opacity = pressed_vis ? std::min(1.0f, g_opacity + 0.10f) : g_opacity;
+        const float eff_vis = (hidden ? 0.32f : 1.0f) * press_opacity * fade_alpha;
         const float press_scale = on ? 0.94f : 1.0f;
 
         const float dx0 = cx - bw * 0.5f * press_scale;
@@ -2763,11 +2765,8 @@ void BuildOverlay(std::vector<Quad>& out) {
         const float dy1 = cy + bh * 0.5f * press_scale;
 
         const SvgIcon icon = ActiveIconForButton(i);
-        const bool stick_active = !editing && i == kIdxSteerStick &&
-                                  (std::fabs(g_stick_raw_x) > 0.01f || std::fabs(g_stick_raw_y) > 0.01f);
         const bool is_bike = (ctx == game::UiContext::Gameplay) &&
                              game::Telemetry().is_bike.load(std::memory_order_relaxed);
-        const float eff_vis = vis;
 
         if (i == kIdxSteerStick) {
             // Native SDF Analog Steering Thumbstick (sleek thin Outline style + NFSU2 lime active glow)
@@ -2840,17 +2839,19 @@ void BuildOverlay(std::vector<Quad>& out) {
 
             const AtlasUv& uv = g_atlas_uv[skin][static_cast<size_t>(icon)];
             if (atlas_ok && uv.valid) {
-                float tr = 1.0f, tg = 1.0f, tb = 1.0f, ta = std::min(1.0f, eff_vis * (on ? 1.15f : 0.92f));
-                if (kButtons[i].when == When::PlayTurbo && !editing) {
+                const bool turbo_morph = !editing && (i == kIdxNitro) &&
+                                         game::Telemetry().turbo_ready.load(std::memory_order_relaxed);
+                float tr = 1.0f, tg = 1.0f, tb = 1.0f, ta = std::min(1.0f, eff_vis);
+                if (turbo_morph) {
                     tr = on ? 1.0f : 0.48f;
                     tg = on ? 0.94f : 0.92f;
                     tb = on ? 0.72f : 1.0f;
-                    ta = std::min(1.0f, eff_vis * 1.10f);
+                    ta = std::min(1.0f, eff_vis + 0.12f);
                 } else if (race_about_to_start) {
                     tr = on ? 0.55f : 0.42f;
                     tg = 1.00f;
                     tb = on ? 0.65f : 0.54f;
-                    ta = std::min(1.0f, eff_vis * (on ? 1.15f : 1.00f));
+                    ta = std::min(1.0f, eff_vis + 0.08f);
                 }
                 out.push_back(Quad{dx0, dy0, dx1, dy1, uv.u0, uv.v0, uv.u1, uv.v1,
                                    tr, tg, tb, ta, 0, 0, 0, 0, 0, 0, 0u});
@@ -2938,7 +2939,7 @@ void BuildOverlay(std::vector<Quad>& out) {
     // 4b. First-time mobile interactive spotlight (10% slow-mo + screen dim + glowing Turbo/Special button)
     if (!editing && g_tut_dim > 0.005f && g_tut_visual != TutKind::None && ctx == game::UiContext::Gameplay) {
         const float e = g_tut_dim * g_tut_dim * (3.0f - 2.0f * g_tut_dim);
-        const size_t tidx = (g_tut_visual == TutKind::Turbo) ? kIdxTurbo : kIdxSpecial;
+        const size_t tidx = (g_tut_visual == TutKind::Turbo) ? kIdxNitro : kIdxSpecial;
         float tx0, ty0, tx1, ty1;
         ButtonRect(tidx, tx0, ty0, tx1, ty1);
         const float tcx = (tx0 + tx1) * 0.5f;
@@ -2998,7 +2999,7 @@ void BuildOverlay(std::vector<Quad>& out) {
         const float by0 = tcy - tbh * 0.5f * bscale;
         const float bx1 = tcx + tbw * 0.5f * bscale;
         const float by1 = tcy + tbh * 0.5f * bscale;
-        const SvgIcon ticon = ActiveIconForButton(tidx);
+        const SvgIcon ticon = (g_tut_visual == TutKind::Turbo) ? SvgIcon::Turbo : ActiveIconForButton(tidx);
         const AtlasUv& tuv = g_atlas_uv[skin][static_cast<size_t>(ticon)];
         if (atlas_ok && tuv.valid) {
             out.push_back(Quad{bx0, by0, bx1, by1, tuv.u0, tuv.v0, tuv.u1, tuv.v1,
@@ -3316,6 +3317,17 @@ void ResetLayout() {
     g_scale = 1.0f;
     g_controls_hidden = false;
     SaveLayout();
+}
+
+void ResetHints() {
+    std::lock_guard lock(g_lock);
+    g_tut_active = TutKind::None;
+    g_tut_visual = TutKind::None;
+    g_tut_dim = 0.0f;
+    g_tut_cooldown_until = 0;
+    g_tut_fire_pulse_until = 0;
+    game::Telemetry().tutorial_time_scale.store(1.0f, std::memory_order_relaxed);
+    LOGI("[OK] touch: reset first-time spotlight hints");
 }
 
 void AddLook(float dx, float dy) {

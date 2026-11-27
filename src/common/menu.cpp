@@ -45,6 +45,7 @@ uint32_t ControlsSize();
 void StepSize(int step);
 void EditLayout();
 void ResetLayout();
+void ResetHints();
 const char* SkinName();
 void StepSkin(int step);
 const char* StickModeName();
@@ -157,7 +158,7 @@ enum RowId { kRenderResolution, kMaxFps, kVsync, kFpsCounter, kAniso, kReloadBlu
              kCheckUpdates, kTouchSensitivity, kLeftDeadzone, kRightDeadzone, kLeftSensitivity, kRightSensitivity,
              kScreenFilter, kGyroInvertX, kGyroInvertY, kTouchSkin, kCredit, kBloom,
              kFog, kAntiAliasing, kMotionBlur, kReflections, kTouchStick, kDynamicRes, kDynamicTarget, kDynamicMin,
-             kDynamicMax, kDynamicHold, kAutoUpdate, kTouchReset, kAutoBurnout, kDisplayLogs };
+             kDynamicMax, kDynamicHold, kAutoUpdate, kTouchReset, kAutoBurnout, kDisplayLogs, kResetHints };
 
 using rows::Kind;
 using rows::Row;
@@ -186,6 +187,7 @@ constexpr Row kTouchRows[] = {
     {Kind::Value, kTouchStick, "Steering Mode"},
     {Kind::Value, kTouchOpacity, "Controls Opacity"},
     {Kind::Value, kAutoBurnout, "Auto Burnout"},
+    {Kind::Value, kResetHints, "Reset Hints"},
     {Kind::Action, kTouchEdit, "Edit Control Layout"},
 };
 
@@ -461,6 +463,16 @@ void StepInputRow(int id, int step, char (&text)[64]) {
                 s_reset_done = true;
             }
             std::snprintf(text, sizeof(text), "%s", s_reset_done ? "Done!" : "Default");
+            break;
+        }
+        case kResetHints: {
+            static bool s_hints_reset = false;
+            if (step) {
+                o.tutorial_seen = 0u;
+                touch::ResetHints();
+                s_hints_reset = true;
+            }
+            std::snprintf(text, sizeof(text), "%s", s_hints_reset ? "Done!" : "Reset");
             break;
         }
         case kCheckUpdates:

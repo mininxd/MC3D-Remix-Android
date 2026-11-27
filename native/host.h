@@ -115,6 +115,7 @@ uint32_t ControlsSize();  // percent of each control's own size
 void StepSize(int step);
 void EditLayout();  // custom native Vulkan editor over the screen to drag/resize/hide controls
 void ResetLayout(); // reset touch control positions, sizes, and visibility to default
+void ResetHints();  // reset first-time touch spotlight hints (Turbo / Special)
 const char* SkinName();  // OUTLINE, FILLED WHITE, FILLED DARK
 void StepSkin(int step);
 const char* StickModeName();
