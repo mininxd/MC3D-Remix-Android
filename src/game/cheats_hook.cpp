@@ -633,6 +633,7 @@ void UpdateTouchTelemetry() {
     bool has_nos = false;
     bool turbo_ready = false;
     bool special_ready = false;
+    bool special_full = false;
     int8_t special_type = -1;
     float speed_kmh = 0.0f;
     bool is_bike = false;
@@ -700,6 +701,7 @@ void UpdateTouchTelemetry() {
             if (stype >= 0 && stype <= 2) {
                 special_type = static_cast<int8_t>(stype);
                 special_ready = (sstate == 3) || (std::isfinite(sfill) && sfill >= 0.25f);
+                special_full = (sstate != 3) && std::isfinite(sfill) && (sfill >= 0.99f);
             }
         }
     }
@@ -707,6 +709,7 @@ void UpdateTouchTelemetry() {
     tel.has_nos.store(has_nos, std::memory_order_relaxed);
     tel.turbo_ready.store(turbo_ready, std::memory_order_relaxed);
     tel.special_ready.store(special_ready, std::memory_order_relaxed);
+    tel.special_full.store(special_full, std::memory_order_relaxed);
     tel.special_type.store(special_type, std::memory_order_relaxed);
     tel.speed_kmh.store(speed_kmh, std::memory_order_relaxed);
     tel.is_bike.store(is_bike, std::memory_order_relaxed);

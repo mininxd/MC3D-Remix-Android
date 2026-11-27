@@ -1555,7 +1555,28 @@ X86_FUNC(sub_0020B6F0) {
             }
         }
     }
+    uint32_t saved_ts_bits = 0u;
+    bool scaled_ts = false;
+    if (!replaying && game::safe_mem::CanAccess(0x004B2D6Cu, 4u)) {
+        const float tut_scale = std::clamp(
+            game::Telemetry().tutorial_time_scale.load(std::memory_order_relaxed), 0.05f, 1.0f);
+        if (tut_scale < 0.999f) {
+            saved_ts_bits = X86_MEM32(0x004B2D6Cu);
+            float orig_ts = 1.0f;
+            std::memcpy(&orig_ts, &saved_ts_bits, sizeof(orig_ts));
+            if (std::isfinite(orig_ts) && orig_ts > 0.0f) {
+                const float slowed = orig_ts * tut_scale;
+                uint32_t bits = 0u;
+                std::memcpy(&bits, &slowed, sizeof(bits));
+                X86_MEM32(0x004B2D6Cu) = bits;
+                scaled_ts = true;
+            }
+        }
+    }
     __imp__sub_0020B6F0(ctx, base);
+    if (scaled_ts && game::safe_mem::CanAccess(0x004B2D6Cu, 4u)) {
+        X86_MEM32(0x004B2D6Cu) = saved_ts_bits;
+    }
     game::cheats::OnFrameTick();
     game::cheats::SyncPromptVisibility(ctx, base);
 }

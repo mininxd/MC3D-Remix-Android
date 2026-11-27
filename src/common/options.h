@@ -12,6 +12,7 @@ inline constexpr const char* kLanguages[] = {"int", "fra", "deu", "ita", "esp"};
 struct Options {
     bool touch_controls = true;   // mobile touch controls (auto-hides when physical gamepad is active)
     bool auto_burnout = true;     // auto-hold Handbrake with Gas during pre-race countdown for burnout launch
+    uint32_t tutorial_seen = 0;   // bitmask of completed first-time touch spotlights (1=Turbo, 2=Special)
     bool skip_intros = false;
     bool fps_counter = false;
     uint32_t display_logs = 0;  // 0 Off, 1 Minimal, 2 Full, 3 Debug

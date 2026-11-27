@@ -93,6 +93,7 @@ const app::GameInfo app::kGame = {
     .images = {{"default.xbe", "MC3D Remix"}},
     .options = {{"fps_counter", &game::Opt().fps_counter, nullptr},
                 {"display_logs", nullptr, &game::Opt().display_logs},
+                {"tutorial_seen", nullptr, &game::Opt().tutorial_seen},
                 {"bloom", &game::Opt().bloom, nullptr},
                 {"fog", &game::Opt().fog, nullptr},
                 {"motion_blur", nullptr, &game::Opt().motion_blur},

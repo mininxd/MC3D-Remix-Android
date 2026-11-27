@@ -794,6 +794,20 @@ uint64_t g_map_full_pulse_until = 0;
 bool g_map_hold_fired = false;
 bool g_map_was_down = false;
 
+// First-time mobile interactive spotlight tutorial (10% slow-mo + screen dim + glowing button)
+enum class TutKind : uint8_t { None = 0, Turbo = 1, Special = 2 };
+constexpr uint32_t kTutBitTurbo = 1u << 0;
+constexpr uint32_t kTutBitSpecial = 1u << 1;
+TutKind g_tut_active = TutKind::None;
+TutKind g_tut_visual = TutKind::None;
+TutKind g_tut_fire_kind = TutKind::None;
+float g_tut_dim = 0.0f;
+uint64_t g_tut_last_ms = 0;
+uint64_t g_tut_started_ms = 0;
+uint64_t g_tut_cooldown_until = 0;
+uint64_t g_tut_fire_pulse_until = 0;
+std::atomic<bool> g_tut_save_pending{false};
+
 // Analog steering stick, Bike auto-analog + weight transfer, & Garage 1-finger orbit state (under g_lock)
 bool g_analog_stick = false;
 bool g_last_is_bike = false;
@@ -1490,6 +1504,44 @@ void FingerDown(SDL_FingerID id, float x, float y) {
         return;
     }
     if (ctx == game::UiContext::FmvUnskippable || ctx == game::UiContext::Loading) {
+        g_fingers.push_back(f);
+        return;
+    }
+
+    // Interactive first-time tutorial spotlight: tapping the glowing Turbo or Special button
+    // immediately fires it, marks the tutorial completed, and smoothly ramps back to 100% speed!
+    if (g_tut_active != TutKind::None && ctx == game::UiContext::Gameplay) {
+        const size_t target_idx = (g_tut_active == TutKind::Turbo) ? kIdxTurbo : kIdxSpecial;
+        float tx0, ty0, tx1, ty1;
+        ButtonRect(target_idx, tx0, ty0, tx1, ty1);
+        const float tcx = (tx0 + tx1) * 0.5f;
+        const float tcy = (ty0 + ty1) * 0.5f;
+        const float trad = std::max(tx1 - tx0, ty1 - ty0) * 0.5f * 1.45f;
+        const float d2 = (x - tcx) * (x - tcx) + (y - tcy) * (y - tcy);
+        if (d2 <= trad * trad) {
+            const uint32_t bit = (g_tut_active == TutKind::Turbo) ? kTutBitTurbo : kTutBitSpecial;
+            game::Opt().tutorial_seen |= bit;
+            g_tut_save_pending.store(true, std::memory_order_relaxed);
+            g_tut_fire_kind = g_tut_active;
+            g_tut_fire_pulse_until = now + 180u;
+            g_tut_active = TutKind::None;
+            g_tut_cooldown_until = now + 2000u;
+            f.role = Role::Button;
+            f.button = target_idx;
+            g_fingers.push_back(f);
+            Recount();
+            LOGI("[OK] touch: first-time %s spotlight tapped -> resuming 100%% speed",
+                 bit == kTutBitTurbo ? "Turbo" : "Special");
+            return;
+        }
+        // Ignore stray taps on other controls during spotlight (auto-dismiss safety after 8s tap anywhere)
+        if (g_tut_started_ms != 0 && now > g_tut_started_ms + 8000u) {
+            const uint32_t bit = (g_tut_active == TutKind::Turbo) ? kTutBitTurbo : kTutBitSpecial;
+            game::Opt().tutorial_seen |= bit;
+            g_tut_save_pending.store(true, std::memory_order_relaxed);
+            g_tut_active = TutKind::None;
+            g_tut_cooldown_until = now + 2000u;
+        }
         g_fingers.push_back(f);
         return;
     }
@@ -2263,6 +2315,55 @@ void UpdateMapHoldLocked(uint64_t now) {
     }
 }
 
+void UpdateTutorialLocked(uint64_t now) {
+    const uint64_t dt_ms = (g_tut_last_ms != 0 && now >= g_tut_last_ms)
+                               ? std::min<uint64_t>(now - g_tut_last_ms, 100u)
+                               : 16u;
+    g_tut_last_ms = now;
+
+    const auto ctx = CurrentUiContext();
+    const auto& tel = game::Telemetry();
+    const bool touch_ok = !g_editing && !g_controls_hidden && input::g_touch.load(std::memory_order_relaxed) &&
+                          (CurrentFadeAlphaLocked(now) > 0.5f) && (ctx == game::UiContext::Gameplay);
+
+    if (g_tut_active != TutKind::None) {
+        const bool meter_ok = (g_tut_active == TutKind::Turbo)
+                                  ? tel.turbo_ready.load(std::memory_order_relaxed)
+                                  : tel.special_ready.load(std::memory_order_relaxed);
+        if (!touch_ok || !meter_ok) {
+            g_tut_active = TutKind::None;
+        }
+    } else if (touch_ok && g_tut_dim < 0.05f && now >= g_tut_cooldown_until) {
+        const uint32_t seen = game::Opt().tutorial_seen;
+        if (!(seen & kTutBitTurbo) && !g_layout[kIdxTurbo].hidden &&
+            tel.turbo_ready.load(std::memory_order_relaxed)) {
+            g_tut_active = TutKind::Turbo;
+            g_tut_visual = TutKind::Turbo;
+            g_tut_started_ms = now;
+            LOGI("[OK] touch: starting first-time Slipstream Turbo slow-mo spotlight");
+        } else if (!(seen & kTutBitSpecial) && !g_layout[kIdxSpecial].hidden &&
+                   tel.special_full.load(std::memory_order_relaxed)) {
+            g_tut_active = TutKind::Special;
+            g_tut_visual = TutKind::Special;
+            g_tut_started_ms = now;
+            LOGI("[OK] touch: starting first-time Special Ability slow-mo spotlight");
+        }
+    }
+
+    if (g_tut_active != TutKind::None) {
+        g_tut_dim = std::min(1.0f, g_tut_dim + float(dt_ms) / 220.0f);
+    } else {
+        g_tut_dim = std::max(0.0f, g_tut_dim - float(dt_ms) / 240.0f);
+        if (g_tut_dim <= 0.001f) {
+            g_tut_visual = TutKind::None;
+        }
+    }
+
+    const float e = g_tut_dim * g_tut_dim * (3.0f - 2.0f * g_tut_dim);
+    const float target_scale = (ctx == game::UiContext::Gameplay && !g_editing) ? (1.0f - 0.90f * e) : 1.0f;
+    game::Telemetry().tutorial_time_scale.store(std::clamp(target_scale, 0.10f, 1.0f), std::memory_order_relaxed);
+}
+
 }  // namespace
 
 bool OnEvent(const SDL_Event& e) {
@@ -2300,18 +2401,28 @@ bool OnEvent(const SDL_Event& e) {
         case SDL_EVENT_FINGER_UP:
         case SDL_EVENT_FINGER_CANCELED: {
             float x = e.tfinger.x * Width(), y = e.tfinger.y * Height();
-            std::lock_guard lock(g_lock);
-            EnsureLayout();
-            if (e.type == SDL_EVENT_FINGER_DOWN) {
-                FingerDown(e.tfinger.fingerID, x, y);
-                return true;
+            bool handled = true;
+            {
+                std::lock_guard lock(g_lock);
+                EnsureLayout();
+                if (e.type == SDL_EVENT_FINGER_DOWN) {
+                    FingerDown(e.tfinger.fingerID, x, y);
+                } else {
+                    bool ours = std::any_of(g_fingers.begin(), g_fingers.end(),
+                                            [&](const Finger& f) { return f.id == e.tfinger.fingerID; });
+                    if (!ours) {
+                        handled = false;
+                    } else if (e.type == SDL_EVENT_FINGER_MOTION) {
+                        FingerMove(e.tfinger.fingerID, x, y);
+                    } else {
+                        FingerUp(e.tfinger.fingerID);
+                    }
+                }
             }
-            bool ours = std::any_of(g_fingers.begin(), g_fingers.end(),
-                                    [&](const Finger& f) { return f.id == e.tfinger.fingerID; });
-            if (!ours) return false;
-            if (e.type == SDL_EVENT_FINGER_MOTION) FingerMove(e.tfinger.fingerID, x, y);
-            else FingerUp(e.tfinger.fingerID);
-            return true;
+            if (g_tut_save_pending.exchange(false, std::memory_order_relaxed)) {
+                app::Save();
+            }
+            return handled;
         }
         default:
             return false;
@@ -2423,6 +2534,7 @@ void Apply(int port, input::Pad& pad) {
     UpdateFmvHoldLocked(now);
     Recount();
     UpdateMapHoldLocked(now);
+    UpdateTutorialLocked(now);
     bool used = false;
     bool gas_held = false;
     int steer = 0;
@@ -2504,6 +2616,17 @@ void Apply(int port, input::Pad& pad) {
         }
     }
 
+    // First-time spotlight tap completion -> fire Turbo or Special cleanly as time ramps back to 100%
+    if (ctx == game::UiContext::Gameplay && now < g_tut_fire_pulse_until) {
+        if (g_tut_fire_kind == TutKind::Turbo) {
+            ApplyRemappedAction(pad, game::GameAction::Nitro, 0, kAnalogX);
+            used = true;
+        } else if (g_tut_fire_kind == TutKind::Special) {
+            ApplyRemappedAction(pad, game::GameAction::Special, 0, kBit + 6);
+            used = true;
+        }
+    }
+
     // FMV hold-anywhere skip completed -> fire Start + A to skip movie cleanly
     if (now < g_fmv_skip_pulse_until) {
         pad.buttons |= uint16_t(1u << 4);  // Start
@@ -2532,6 +2655,7 @@ void BuildOverlay(std::vector<Quad>& out) {
     SyncBikeModeLocked(now);
     UpdateFmvHoldLocked(now);
     UpdateMapHoldLocked(now);
+    UpdateTutorialLocked(now);
 
     const bool editing = g_editing;
     const float fade_alpha = CurrentFadeAlphaLocked(now);
@@ -2809,6 +2933,102 @@ void BuildOverlay(std::vector<Quad>& out) {
                   th * 1.1f, 0.784f, 0.941f, 0.533f, 0.85f * alpha);
         EmitTextCentered(out, w * 0.5f, ty, h * 0.032f,
                          0.784f, 0.941f, 0.533f, 0.98f * alpha, msg);
+    }
+
+    // 4b. First-time mobile interactive spotlight (10% slow-mo + screen dim + glowing Turbo/Special button)
+    if (!editing && g_tut_dim > 0.005f && g_tut_visual != TutKind::None && ctx == game::UiContext::Gameplay) {
+        const float e = g_tut_dim * g_tut_dim * (3.0f - 2.0f * g_tut_dim);
+        const size_t tidx = (g_tut_visual == TutKind::Turbo) ? kIdxTurbo : kIdxSpecial;
+        float tx0, ty0, tx1, ty1;
+        ButtonRect(tidx, tx0, ty0, tx1, ty1);
+        const float tcx = (tx0 + tx1) * 0.5f;
+        const float tcy = (ty0 + ty1) * 0.5f;
+        const float tbw = tx1 - tx0;
+        const float tbh = ty1 - ty0;
+        const float trad = std::max(tbw, tbh) * 0.5f;
+
+        // Smooth full-screen dim layer underneath the spotlighted button
+        EmitPanel(out, 0.0f, 0.0f, w, h, 0.02f, 0.03f, 0.06f, 0.62f * e, 0.0f);
+
+        // Accent color & contextual title
+        float ar = 0.28f, ag = 0.92f, ab = 1.00f;
+        const char* title = "SLIPSTREAM TURBO READY";
+        const char* sub = "Tap to Boost";
+        if (g_tut_visual == TutKind::Special) {
+            const int8_t st = game::Telemetry().special_type.load(std::memory_order_relaxed);
+            if (st == 0) {
+                ar = 0.28f; ag = 0.88f; ab = 1.00f;
+                title = "ZONE READY";
+            } else if (st == 1) {
+                ar = 1.00f; ag = 0.44f; ab = 0.22f;
+                title = "AGRO READY";
+            } else if (st == 2) {
+                ar = 1.00f; ag = 0.82f; ab = 0.24f;
+                title = "ROAR READY";
+            } else {
+                ar = 1.00f; ag = 0.84f; ab = 0.30f;
+                title = "SPECIAL READY";
+            }
+            sub = "Tap to Activate";
+        }
+
+        const float pulse = 0.5f + 0.5f * std::sin(float(now % 6283u) * 0.007f);
+        const float ripple = float(now % 1100u) / 1100.0f;
+
+        // Soft luminous radial glow halo behind button
+        const float halo_r = trad * (1.32f + 0.08f * pulse);
+        EmitPanel(out, tcx - halo_r, tcy - halo_r, tcx + halo_r, tcy + halo_r,
+                  ar, ag, ab, (0.20f + 0.12f * pulse) * e, halo_r);
+
+        // Expanding animated ripple ring drawing eye to tap target
+        const float rip_r = trad * (1.10f + 0.48f * ripple);
+        EmitRing(out, tcx, tcy, rip_r, std::max(3.0f, h * 0.006f), 1.0f,
+                 ar, ag, ab, (1.0f - ripple) * 0.85f * e,
+                 ar, ag, ab, 0.0f);
+
+        // Crisp glowing ring hugging the spotlighted button
+        const float ring_r = trad * (1.10f + 0.05f * pulse);
+        EmitRing(out, tcx, tcy, ring_r, std::max(4.0f, h * 0.0085f), 1.0f,
+                 ar, ag, ab, 0.98f * e,
+                 1.0f, 1.0f, 1.0f, 0.18f * e);
+
+        // Re-render the target button icon on top of the dim layer at full brightness with gentle pulse
+        const float bscale = 1.0f + 0.06f * pulse;
+        const float bx0 = tcx - tbw * 0.5f * bscale;
+        const float by0 = tcy - tbh * 0.5f * bscale;
+        const float bx1 = tcx + tbw * 0.5f * bscale;
+        const float by1 = tcy + tbh * 0.5f * bscale;
+        const SvgIcon ticon = ActiveIconForButton(tidx);
+        const AtlasUv& tuv = g_atlas_uv[skin][static_cast<size_t>(ticon)];
+        if (atlas_ok && tuv.valid) {
+            out.push_back(Quad{bx0, by0, bx1, by1, tuv.u0, tuv.v0, tuv.u1, tuv.v1,
+                               0.55f + 0.45f * ar, 0.55f + 0.45f * ag, 0.55f + 0.45f * ab, e,
+                               0, 0, 0, 0, 0, 0, 0u});
+        }
+
+        // Sleek floating callout card beside the glowing button (clamped inside screen bounds)
+        const float s = UiScale(w, h);
+        const float title_h = std::clamp(13.0f * s, 16.0f, h * 0.030f);
+        const float sub_h = std::clamp(11.0f * s, 14.0f, h * 0.025f);
+        const float pad_x = 14.0f * s;
+        const float pad_y = 9.0f * s;
+        const float gap_y = 4.0f * s;
+        const float card_w = std::max(MeasureTextWidth(title_h, title), MeasureTextWidth(sub_h, sub)) + pad_x * 2.0f;
+        const float card_h = title_h + sub_h + gap_y + pad_y * 2.0f;
+        const float margin = 14.0f * s;
+
+        float card_x0 = (tcx > w * 0.5f) ? (tcx - halo_r - 16.0f * s - card_w) : (tcx + halo_r + 16.0f * s);
+        card_x0 = std::clamp(card_x0, margin, std::max(margin, w - card_w - margin));
+        float card_y0 = std::clamp(tcy - card_h * 0.5f, margin, std::max(margin, h - card_h - margin));
+
+        EmitPanel(out, card_x0, card_y0, card_x0 + card_w, card_y0 + card_h,
+                  0.055f, 0.075f, 0.115f, 0.92f * e, 12.0f * s,
+                  std::max(1.5f, 1.6f * s), ar, ag, ab, 0.92f * e);
+        const float card_cx = card_x0 + card_w * 0.5f;
+        EmitTextCentered(out, card_cx, card_y0 + pad_y + title_h * 0.5f, title_h,
+                         ar, ag, ab, 0.98f * e, title);
+        EmitTextCentered(out, card_cx, card_y0 + pad_y + title_h + gap_y + sub_h * 0.5f, sub_h,
+                         1.0f, 1.0f, 1.0f, 0.92f * e, sub);
     }
 
     // 5. Exact NFSU2 RacingControlsView Floating Draggable Layout Editor Card (563x96dp, 44x80dp Hamburger Box)

@@ -47,8 +47,10 @@ struct TouchTelemetry {
     std::atomic<uint8_t> ui_context{static_cast<uint8_t>(UiContext::Loading)};
     std::atomic<bool> has_nos{false};        // player car has NOS purchased (max_nos > 0)
     std::atomic<bool> turbo_ready{false};    // slipstream turbo filled AND car speed >= 10 km/h (not burnout)
-    std::atomic<bool> special_ready{false};  // special ability meter ready/active
+    std::atomic<bool> special_ready{false};  // special ability meter ready/active (>= 25% or active)
+    std::atomic<bool> special_full{false};   // special ability meter 100% filled and not yet active
     std::atomic<int8_t> special_type{-1};    // 0 = Zone, 1 = Agro, 2 = Roar, -1 = None
+    std::atomic<float> tutorial_time_scale{1.0f}; // smooth 0.10x..1.0x slow-mo during first-time touch spotlight
     std::atomic<float> speed_kmh{0.0f};      // current car speed in km/h
     std::atomic<bool> is_bike{false};        // true when riding a Chopper (5) or Sport Bike (6)
     std::atomic<bool> race_countdown{false}; // true during pre-race 3-2-1 staging countdown before GO!
