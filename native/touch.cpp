@@ -881,56 +881,153 @@ void StartFadeLocked(float target, uint64_t now) {
     g_fade_start_ms = now;
 }
 
-std::filesystem::path LayoutFile() { return app::ExeDir() / "layout.toml"; }
+std::filesystem::path LayoutFile() { return app::ExeDir() / "adjustable.cfg"; }
+std::filesystem::path LegacyLayoutFile() { return app::ExeDir() / "layout.toml"; }
+
+std::string TrimCfg(std::string_view sv) {
+    size_t a = 0;
+    while (a < sv.size() && std::isspace(static_cast<unsigned char>(sv[a]))) ++a;
+    size_t b = sv.size();
+    while (b > a && std::isspace(static_cast<unsigned char>(sv[b - 1]))) --b;
+    return std::string(sv.substr(a, b - a));
+}
+
+bool ParseBoolCfg(const std::string& v) {
+    return v == "1" || v == "true" || v == "TRUE" || v == "yes" || v == "YES";
+}
+
+bool ParseAdjustableCfg(const std::filesystem::path& path) {
+    std::ifstream in(path);
+    if (!in) return false;
+
+    int version = 6;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const std::string trimmed = TrimCfg(line);
+        if (trimmed.empty() || trimmed[0] == '#' || trimmed[0] == ';' ||
+            (trimmed.size() >= 2 && trimmed[0] == '/' && trimmed[1] == '/')) {
+            continue;
+        }
+        const size_t eq = trimmed.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string key = TrimCfg(std::string_view(trimmed).substr(0, eq));
+        const std::string val = TrimCfg(std::string_view(trimmed).substr(eq + 1));
+        if (key.empty() || val.empty()) continue;
+
+        try {
+            if (key == "layout_version") {
+                version = std::stoi(val);
+            } else if (key == "opacity") {
+                g_opacity = std::clamp(std::stof(val), 0.10f, 1.0f);
+            } else if (key == "scale") {
+                g_scale = std::clamp(std::stof(val), 0.5f, 1.5f);
+            } else if (key == "analog_stick") {
+                g_analog_stick = ParseBoolCfg(val);
+            } else if (key == "controls_hidden") {
+                g_controls_hidden = ParseBoolCfg(val);
+            } else if (key.rfind("control.", 0) == 0 && version >= 6) {
+                const std::string id = key.substr(8);
+                for (size_t i = 0; i < kButtonCount; ++i) {
+                    if (id != kButtons[i].id) continue;
+                    float px = g_layout[i].x;
+                    float py = g_layout[i].y;
+                    float pr = g_layout[i].r;
+                    int ph = g_layout[i].hidden ? 1 : 0;
+                    const int n = std::sscanf(val.c_str(), "%f , %f , %f , %d", &px, &py, &pr, &ph);
+                    if (n >= 3 && std::isfinite(px) && std::isfinite(py) && std::isfinite(pr)) {
+                        Place& pl = g_layout[i];
+                        pl.x = std::clamp(px, 0.02f, 0.98f);
+                        pl.y = std::clamp(py, 0.04f, 0.96f);
+                        pl.r = std::clamp(pr, 0.03f, 0.28f);
+                        if (n >= 4) pl.hidden = (ph != 0) && !kButtons[i].keep;
+                    }
+                    break;
+                }
+            }
+        } catch (...) {
+        }
+    }
+    return true;
+}
+
+void SaveLayout() {
+    const auto path = LayoutFile();
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) {
+        LOGW("touch: failed to write %s", path.c_str());
+        return;
+    }
+
+    char buf[256];
+    out << "# MC3D Remix Touch Control Positions (adjustable.cfg)\n";
+    out << "# Auto-saved when you tap SAVE in Layout Settings.\n";
+    out << "# Format: control.<id> = <x>, <y>, <r>, <hidden:0|1>\n";
+    out << "#   x = horizontal center (0.02..0.98 of screen width)\n";
+    out << "#   y = vertical center   (0.04..0.96 of screen height)\n";
+    out << "#   r = half-height size  (0.03..0.28 of screen height)\n\n";
+
+    std::snprintf(buf, sizeof(buf),
+                  "layout_version = 6\n"
+                  "screen_w = %d\n"
+                  "screen_h = %d\n"
+                  "opacity = %.2f\n"
+                  "scale = %.2f\n"
+                  "analog_stick = %d\n"
+                  "controls_hidden = %d\n\n",
+                  int(std::lround(Width())), int(std::lround(Height())),
+                  double(g_opacity), double(g_scale),
+                  g_analog_stick ? 1 : 0, g_controls_hidden ? 1 : 0);
+    out << buf;
+
+    out << "# Touch Controls\n";
+    for (size_t i = 0; i < kButtonCount; ++i) {
+        const Place& p = g_layout[i];
+        std::snprintf(buf, sizeof(buf), "control.%s = %.4f, %.4f, %.4f, %d\n",
+                      kButtons[i].id, double(p.x), double(p.y), double(p.r), p.hidden ? 1 : 0);
+        out << buf;
+    }
+    out.flush();
+    LOGI("[OK] touch: saved adjustable.cfg (%s)", path.c_str());
+}
 
 void LoadLayout() {
     g_loaded = true;
     g_layout_w = Width();
     g_layout_h = Height();
     g_layout = ComputeDefaultLayout(g_layout_w, g_layout_h);
+
+    if (ParseAdjustableCfg(LayoutFile())) {
+        LOGI("[OK] touch: loaded adjustable.cfg (%s)", LayoutFile().c_str());
+        return;
+    }
+
+    // One-time migration from legacy layout.toml if present
     try {
-        toml::table t = toml::parse_file(LayoutFile().string());
-        g_opacity = std::clamp(float(t["opacity"].value_or(double(g_opacity))), 0.10f, 1.0f);
-        g_scale = std::clamp(float(t["scale"].value_or(double(g_scale))), 0.5f, 1.5f);
-        g_analog_stick = t["analog_stick"].value_or(false);
-        g_controls_hidden = t["controls_hidden"].value_or(false);
-        std::string skin = t["skin"].value_or(std::string(kSkinDirs[g_skin]));
-        for (uint32_t i = 0; i < kSkins; i++) {
-            if (skin == kSkinDirs[i]) g_skin = i;
-        }
-        // layout_version >= 6 uses exact NFSU2 virtual-dp button sizes & positions
-        if (t["layout_version"].value_or(0) >= 6) {
-            for (size_t i = 0; i < kButtonCount; i++) {
-                const toml::table* p = t["controls"][kButtons[i].id].as_table();
-                if (!p) continue;
-                Place& pl = g_layout[i];
-                pl.x = std::clamp(float((*p)["x"].value_or(double(pl.x))), 0.02f, 0.98f);
-                pl.y = std::clamp(float((*p)["y"].value_or(double(pl.y))), 0.04f, 0.96f);
-                pl.r = std::clamp(float((*p)["r"].value_or(double(pl.r))), 0.03f, 0.28f);
-                pl.hidden = (*p)["hidden"].value_or(pl.hidden) && !kButtons[i].keep;
+        std::error_code ec;
+        if (std::filesystem::exists(LegacyLayoutFile(), ec)) {
+            toml::table t = toml::parse_file(LegacyLayoutFile().string());
+            g_opacity = std::clamp(float(t["opacity"].value_or(double(g_opacity))), 0.10f, 1.0f);
+            g_scale = std::clamp(float(t["scale"].value_or(double(g_scale))), 0.5f, 1.5f);
+            g_analog_stick = t["analog_stick"].value_or(false);
+            g_controls_hidden = t["controls_hidden"].value_or(false);
+            if (t["layout_version"].value_or(0) >= 6) {
+                for (size_t i = 0; i < kButtonCount; i++) {
+                    const toml::table* p = t["controls"][kButtons[i].id].as_table();
+                    if (!p) continue;
+                    Place& pl = g_layout[i];
+                    pl.x = std::clamp(float((*p)["x"].value_or(double(pl.x))), 0.02f, 0.98f);
+                    pl.y = std::clamp(float((*p)["y"].value_or(double(pl.y))), 0.04f, 0.96f);
+                    pl.r = std::clamp(float((*p)["r"].value_or(double(pl.r))), 0.03f, 0.28f);
+                    pl.hidden = (*p)["hidden"].value_or(pl.hidden) && !kButtons[i].keep;
+                }
             }
         }
     } catch (...) {
     }
-}
 
-void SaveLayout() {
-    toml::table controls;
-    for (size_t i = 0; i < kButtonCount; i++) {
-        const Place& p = g_layout[i];
-        controls.insert(kButtons[i].id,
-                        toml::table{{"x", double(p.x)}, {"y", double(p.y)}, {"r", double(p.r)}, {"hidden", p.hidden}});
-    }
-    toml::table t{
-        {"layout_version", 6},
-        {"opacity", double(g_opacity)},
-        {"scale", double(g_scale)},
-        {"analog_stick", g_analog_stick},
-        {"controls_hidden", g_controls_hidden},
-        {"skin", kSkinDirs[g_skin]},
-        {"controls", controls},
-    };
-    std::ofstream(LayoutFile()) << t << "\n";
+    // Always materialize adjustable.cfg inside the game folder on first boot
+    SaveLayout();
 }
 
 void EnsureLayout() {
