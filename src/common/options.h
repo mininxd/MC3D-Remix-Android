@@ -22,7 +22,7 @@ struct Options {
     uint32_t motion_blur = 1;   // 0 Off, 1 Low (reduced native), 2 Strong (stock native)
     uint32_t reflections = 1;   // 0 Off, 1 On (full dynamic cubemap)
     bool debug_logging = false; // object_logs.txt telemetry (off by default for best CPU performance)
-    uint32_t anti_aliasing = 0;  // 0 off, 1 FXAA, 2 SSAA
+    uint32_t anti_aliasing = 0;  // 0 Off, 1 FXAA, 2 MSAA 2x, 3 MSAA 4x, 4 SSAA 2x
     bool hdr = false;
     uint32_t draw_distance = 1;
     bool dynamic_resolution = true;

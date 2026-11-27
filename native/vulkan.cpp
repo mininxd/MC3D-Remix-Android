@@ -90,70 +90,106 @@ float4 psmain(O i) : SV_Target {
 }
 )";
 
-// Native 2D overlay shader (zero ImGui): textured SVG/font atlas quads + SDF rounded panels/borders
-const char* kOverlayHlsl = R"(
-cbuffer B : register(b1) {
-    float4 uvrect;
-    float4 tint;
-    float4 geom;
-    float4 bcol;
-    float4 mode;
-};
+// Batched 2D touch overlay shaders (split for minimal VGPRs & 1-draw-call batching per run):
+// 1. Ultra-lightweight textured quad shader (SVG button skins & Roboto glyphs)
+const char* kOverlayTexHlsl = R"(
 Texture2D img : register(t0);
 SamplerState ls : register(s0);
-struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; float2 loc : TEXCOORD1; };
-O vs(uint id : SV_VertexID) {
-    float tx = (id == 1 || id == 3 || id == 4) ? 1.0 : 0.0;
-    float ty = (id == 2 || id == 4 || id == 5) ? 1.0 : 0.0;
-    float2 t = float2(tx, ty);
+struct I {
+    float2 v0 : ATTR0;
+    float2 v1 : ATTR1;
+    float4 v2 : ATTR2;
+};
+struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; float4 col : TEXCOORD1; };
+O vs(I i) {
     O o;
-    o.p = float4(t * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
-    o.uv = uvrect.xy + t * uvrect.zw;
-    o.loc = t;
+    o.p = float4(i.v0, 0.0, 1.0);
+    o.uv = i.v1;
+    o.col = i.v2;
     return o;
 }
 float4 psmain(O i) : SV_Target {
-    if (mode.x < 0.5) {
-        float4 c = img.SampleLevel(ls, i.uv, 0) * tint;
-        return float4(c.rgb * c.a, c.a);
-    }
-    if (mode.x > 1.5) {
-        // mode 2: Anti-aliased circular progress ring (clockwise from 12 o'clock)
-        // geom.xy = size px, geom.z = progress (0..1), geom.w = stroke thickness px
-        float2 p = (i.loc - 0.5) * geom.xy;
-        float outerR = min(geom.x, geom.y) * 0.5 - 1.5;
-        float innerR = max(outerR - max(geom.w, 2.0), 1.0);
+    float4 c = img.SampleLevel(ls, i.uv, 0) * i.col;
+    return float4(c.rgb * c.a, c.a);
+}
+)";
+
+// 2. SDF rounded panel / border / clockwise progress ring shader (bound only when SDF quads exist)
+const char* kOverlaySdfHlsl = R"(
+struct I {
+    float2 v0 : ATTR0;
+    float2 v1 : ATTR1;
+    float4 v2 : ATTR2;
+    float4 v3 : ATTR3;
+    float4 v4 : ATTR4;
+    float  v5 : ATTR5;
+};
+struct O {
+    float4 p : SV_Position;
+    float2 loc : TEXCOORD0;
+    float4 tint : TEXCOORD1;
+    float4 geom : TEXCOORD2;
+    float4 bcol : TEXCOORD3;
+    float  mode : TEXCOORD4;
+};
+O vs(I i) {
+    O o;
+    o.p = float4(i.v0, 0.0, 1.0);
+    o.loc = i.v1;
+    o.tint = i.v2;
+    o.geom = i.v3;
+    o.bcol = i.v4;
+    o.mode = i.v5;
+    return o;
+}
+float4 psmain(O i) : SV_Target {
+    if (i.mode > 1.5) {
+        float2 p = (i.loc - 0.5) * i.geom.xy;
+        float outerR = min(i.geom.x, i.geom.y) * 0.5 - 1.5;
+        float innerR = max(outerR - max(i.geom.w, 2.0), 1.0);
         float dist = length(p);
         float ringMask = saturate(0.5 - (dist - outerR)) * saturate(0.5 - (innerR - dist));
         float ang = atan2(p.x, -p.y);
         float frac = (ang < 0.0) ? (ang * 0.15915494 + 1.0) : (ang * 0.15915494);
-        float prog = saturate(geom.z);
+        float prog = saturate(i.geom.z);
         float fillMask = (prog >= 0.999) ? 1.0 : ((prog <= 0.001) ? 0.0 : saturate((prog - frac) * 90.0));
-        float fa = tint.a * ringMask * fillMask;
-        float ba = bcol.a * ringMask * (1.0 - fillMask);
+        float fa = i.tint.a * ringMask * fillMask;
+        float ba = i.bcol.a * ringMask * (1.0 - fillMask);
         float outA = fa + ba;
-        float3 outRgb = (outA > 1e-4) ? ((tint.rgb * fa + bcol.rgb * ba) / outA) : float3(0.0, 0.0, 0.0);
+        float3 outRgb = (outA > 1e-4) ? ((i.tint.rgb * fa + i.bcol.rgb * ba) / outA) : float3(0.0, 0.0, 0.0);
         return float4(outRgb * outA, outA);
     }
-    float2 halfSz = max(geom.xy * 0.5, float2(1.0, 1.0));
-    float2 p = (i.loc - 0.5) * geom.xy;
-    float r = min(geom.z, min(halfSz.x, halfSz.y));
+    float2 halfSz = max(i.geom.xy * 0.5, float2(1.0, 1.0));
+    float2 p = (i.loc - 0.5) * i.geom.xy;
+    float r = min(i.geom.z, min(halfSz.x, halfSz.y));
     float2 q = abs(p) - (halfSz - float2(r, r));
     float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
     float fillMask = saturate(0.5 - d);
-    float4 outCol = float4(tint.rgb, tint.a * fillMask);
-    if (geom.w > 0.01) {
-        float innerMask = saturate(0.5 - (d + geom.w));
+    float4 outCol = float4(i.tint.rgb, i.tint.a * fillMask);
+    if (i.geom.w > 0.01) {
+        float innerMask = saturate(0.5 - (d + i.geom.w));
         float borderMask = saturate(fillMask - innerMask);
-        float fa = tint.a * innerMask;
-        float ba = bcol.a * borderMask;
+        float fa = i.tint.a * innerMask;
+        float ba = i.bcol.a * borderMask;
         float outA = ba + fa * (1.0 - ba);
-        float3 outRgb = (outA > 1e-4) ? ((bcol.rgb * ba + tint.rgb * fa * (1.0 - ba)) / outA) : float3(0.0, 0.0, 0.0);
+        float3 outRgb = (outA > 1e-4) ? ((i.bcol.rgb * ba + i.tint.rgb * fa * (1.0 - ba)) / outA) : float3(0.0, 0.0, 0.0);
         outCol = float4(outRgb, outA);
     }
     return float4(outCol.rgb * outCol.a, outCol.a);
 }
 )";
+
+struct OverlayTexVert {
+    float x, y, u, v, r, g, b, a;
+};
+struct OverlaySdfVert {
+    float x, y, lx, ly, r, g, b, a, gw, gh, rad, bw, br, bg, bb, ba, mode;
+};
+struct OverlayRun {
+    bool sdf = false;
+    uint32_t first = 0;
+    uint32_t count = 0;
+};
 
 // the screen filters, the frame onto the screen through one of them. src.xy a texel of the frame, src.z seconds for
 // what moves (grain, VHS), src.w the colour look. pscrt: crt.x the lines, a whole number of pixels each so they never
@@ -776,6 +812,7 @@ struct Image {
     Allocator::Alloc mem;
     VkFormat fmt = VK_FORMAT_UNDEFINED;
     uint32_t w = 1, h = 1, d = 1, layers = 1, levels = 1;
+    VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     uint64_t cb_render_seq = 0;
     bool depth = false, stencil = false;
@@ -787,9 +824,27 @@ struct Buffer {
     Allocator::Alloc mem;
 };
 
+// Persistent DEVICE_LOCAL static geometry / object cache entry (+ cached 3D AABB for O(1) frustum culling)
+struct StaticBuf {
+    Buffer gpu;
+    uint32_t bytes = 0;
+    uint64_t epoch = 0;
+    uint64_t fast_sig = 0;
+    uint64_t last_frame = 0;
+    uint32_t stable_frames = 0;
+    bool promoted = false;
+    bool has_aabb = false;
+    uint32_t aabb_stride = 0;
+    uint32_t aabb_offset = 0;
+    uint32_t aabb_vcount = 0;
+    float min_p[3] = {};
+    float max_p[3] = {};
+};
+
 // a console surface the renderer draws into
 struct Target {
     Image img;
+    Image msaa;                   // optional MSAA 2x/4x companion image resolved directly into img
     bool depth = false;
     uint32_t gw = 0, gh = 0, w = 0, h = 0;
     uint32_t data = 0, bytes = 0;
@@ -830,6 +885,8 @@ struct PsoKey {
     int32_t zbias;
     float zslope;
     uint32_t rtfmt;
+    uint32_t samples;
+    uint32_t has_resolve;
 };
 
 struct BlitOptions {
@@ -1193,26 +1250,20 @@ void ComputeFixedMatrices(const State& s, GuestExtent size, float wv[16], float 
     MatMul(wvp, vpm, full);
 }
 
-// Conservative clip-space frustum cull for fixed-function 3D draws (front-of-camera culling).
-// Exits on the very first visible vertex (1 dot-product on visible draws); only culls when
-// ALL vertices lie strictly outside the same clip plane (behind camera or outside viewport).
-bool IsFixedDrawOutsideFrustum(const Assembled& a, const float full[16]) {
-    if (!a.vertices.empty() || a.vertex_count < 3u || a.vertex_count > 256u) return false;
-    if (!(a.regs & 1u) || a.elements[0].format != DXGI_FORMAT_R32G32B32_FLOAT) return false;
-    const VertexElement& e = a.elements[0];
-    const VertexBuffer& vb = a.buffers[e.buffer];
-    if (!vb.src || !vb.stride || uint64_t(a.vertex_count) * vb.stride > vb.bytes) return false;
+// Conservative 8-corner local-space AABB clip-space frustum test (~40ns for any mesh size!).
+bool IsAabbOutsideFrustum(const float min_p[3], const float max_p[3], const float full[16]) {
     uint32_t all_out = 0x3Fu;
-    for (uint32_t v = 0; v < a.vertex_count; ++v) {
-        float p[3];
-        std::memcpy(p, vb.src + size_t(v) * vb.stride + e.offset, sizeof(p));
-        const float cx = p[0] * full[0] + p[1] * full[4] + p[2] * full[8] + full[12];
-        const float cy = p[0] * full[1] + p[1] * full[5] + p[2] * full[9] + full[13];
-        const float cz = p[0] * full[2] + p[1] * full[6] + p[2] * full[10] + full[14];
-        const float cw = p[0] * full[3] + p[1] * full[7] + p[2] * full[11] + full[15];
+    for (int i = 0; i < 8; ++i) {
+        const float px = (i & 1) ? max_p[0] : min_p[0];
+        const float py = (i & 2) ? max_p[1] : min_p[1];
+        const float pz = (i & 4) ? max_p[2] : min_p[2];
+        const float cx = px * full[0] + py * full[4] + pz * full[8] + full[12];
+        const float cy = px * full[1] + py * full[5] + pz * full[9] + full[13];
+        const float cz = px * full[2] + py * full[6] + pz * full[10] + full[14];
+        const float cw = px * full[3] + py * full[7] + pz * full[11] + full[15];
         uint32_t out = 0u;
         if (cw <= 1e-6f) {
-            out = (1u << 4);  // strictly behind near/camera plane
+            out = (1u << 4);
         } else {
             const float wx = cw * 1.05f;
             const float wy = cw * 1.05f;
@@ -1227,6 +1278,78 @@ bool IsFixedDrawOutsideFrustum(const Assembled& a, const float full[16]) {
         if (all_out == 0u) return false;
     }
     return all_out != 0u;
+}
+
+// Conservative clip-space frustum cull for fixed-function 3D draws (front-of-camera culling).
+// Uses direct vertex test for tiny draws (<=256 verts) and cached 3D AABB object cache for larger meshes (up to 16384 verts!).
+bool IsFixedDrawOutsideFrustum(const Assembled& a, const float full[16],
+                               std::unordered_map<uint64_t, StaticBuf>& static_bufs) {
+    if (!a.vertices.empty() || a.vertex_count < 3u || a.vertex_count > 16384u) return false;
+    if (!(a.regs & 1u) || a.elements[0].format != DXGI_FORMAT_R32G32B32_FLOAT) return false;
+    const VertexElement& e = a.elements[0];
+    const VertexBuffer& vb = a.buffers[e.buffer];
+    if (!vb.src || !vb.stride || uint64_t(a.vertex_count) * vb.stride > vb.bytes) return false;
+
+    if (a.vertex_count <= 256u) {
+        uint32_t all_out = 0x3Fu;
+        for (uint32_t v = 0; v < a.vertex_count; ++v) {
+            float p[3];
+            std::memcpy(p, vb.src + size_t(v) * vb.stride + e.offset, sizeof(p));
+            const float cx = p[0] * full[0] + p[1] * full[4] + p[2] * full[8] + full[12];
+            const float cy = p[0] * full[1] + p[1] * full[5] + p[2] * full[9] + full[13];
+            const float cz = p[0] * full[2] + p[1] * full[6] + p[2] * full[10] + full[14];
+            const float cw = p[0] * full[3] + p[1] * full[7] + p[2] * full[11] + full[15];
+            uint32_t out = 0u;
+            if (cw <= 1e-6f) {
+                out = (1u << 4);
+            } else {
+                const float wx = cw * 1.05f;
+                const float wy = cw * 1.05f;
+                if (cx < -wx) out |= (1u << 0);
+                if (cx >  wx) out |= (1u << 1);
+                if (cy < -wy) out |= (1u << 2);
+                if (cy >  wy) out |= (1u << 3);
+                if (cz < -cw * 0.02f) out |= (1u << 4);
+                if (cz >  cw * 1.02f) out |= (1u << 5);
+            }
+            all_out &= out;
+            if (all_out == 0u) return false;
+        }
+        return all_out != 0u;
+    }
+
+    // Large static mesh (257..16384 verts): reuse or compute cached 3D AABB in static_bufs_!
+    if (!kernel::g_base) return false;
+    const uintptr_t p_addr = reinterpret_cast<uintptr_t>(vb.src);
+    const uintptr_t base = reinterpret_cast<uintptr_t>(kernel::g_base);
+    if (p_addr < base || (p_addr - base) >= 0x100000000ull) return false;
+    const uint32_t guest_va = uint32_t(p_addr - base);
+    const uint64_t key = (uint64_t(guest_va) << 32) | uint64_t(vb.bytes);
+    const uint64_t ep = DirtyEpoch(guest_va);
+    StaticBuf& sb = static_bufs[key];
+    if (!sb.has_aabb || sb.epoch != ep || sb.aabb_stride != vb.stride ||
+        sb.aabb_offset != e.offset || sb.aabb_vcount != a.vertex_count) {
+        float mn[3] = {1e30f, 1e30f, 1e30f};
+        float mx[3] = {-1e30f, -1e30f, -1e30f};
+        for (uint32_t v = 0; v < a.vertex_count; ++v) {
+            float pt[3];
+            std::memcpy(pt, vb.src + size_t(v) * vb.stride + e.offset, sizeof(pt));
+            for (int k = 0; k < 3; ++k) {
+                if (pt[k] < mn[k]) mn[k] = pt[k];
+                if (pt[k] > mx[k]) mx[k] = pt[k];
+            }
+        }
+        if (!std::isfinite(mn[0]) || !std::isfinite(mx[0])) return false;
+        std::memcpy(sb.min_p, mn, sizeof(mn));
+        std::memcpy(sb.max_p, mx, sizeof(mx));
+        sb.epoch = ep;
+        sb.bytes = vb.bytes;
+        sb.aabb_stride = vb.stride;
+        sb.aabb_offset = e.offset;
+        sb.aabb_vcount = a.vertex_count;
+        sb.has_aabb = true;
+    }
+    return IsAabbOutsideFrustum(sb.min_p, sb.max_p, full);
 }
 
 void FillTransformConstants(const State& s, const float wv[16], const float full[16], DrawConstants& c) {
@@ -1404,12 +1527,13 @@ private:
 
     // memory and objects
     bool CreateImage(Image& im, VkFormat fmt, uint32_t w, uint32_t h, uint32_t d, uint32_t layers, uint32_t levels,
-                     VkImageUsageFlags usage, VkImageViewType vt, bool cube = false);
+                     VkImageUsageFlags usage, VkImageViewType vt, bool cube = false,
+                     VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT);
     bool CreateBuffer(Buffer& b, VkDeviceSize size, VkBufferUsageFlags usage, bool host);
     void Destroy(Image& im);
     void Destroy(Buffer& b);
     void Retire(Image& im) {
-        if (rend_color_ == &im || rend_depth_ == &im) EndRender();
+        if (rend_color_ == &im || rend_depth_ == &im || rend_resolve_ == &im) EndRender();
         if (im) CurrentFrame().images.push_back(im);
         im = {};
     }
@@ -1430,14 +1554,16 @@ private:
     void PollFences();
     void ResetFrame(Frame& f);
     void Transition(Image& im, VkImageLayout to);
-    void BeginRender(Image* color, Image* depth);
+    void BeginRender(Image* color, Image* depth, Image* resolve = nullptr);
     void BeginRenderClear(Image* color, Image* depth, bool clear_c, const float cc[4], bool clear_z, float z,
-                          bool clear_s, uint32_t stencil);
+                          bool clear_s, uint32_t stencil, Image* resolve = nullptr);
     void EndRender();
     // without dynamic rendering: render passes that only load and store, and framebuffers per pair of views
-    VkRenderPass Pass(VkFormat color, VkFormat depth, bool clear_c = false, bool clear_ds = false);
+    VkRenderPass Pass(VkFormat color, VkFormat depth, bool clear_c = false, bool clear_ds = false,
+                      VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT, bool has_resolve = false);
     VkFramebuffer Framebuffer(VkFormat color_fmt, VkFormat depth_fmt, VkImageView color, VkImageView depth,
-                              uint32_t w, uint32_t h);
+                              uint32_t w, uint32_t h, VkImageView resolve = VK_NULL_HANDLE,
+                              VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT);
     void DropFramebuffers(VkImageView v);
     void SetViewport(float x, float y, float w, float h);
     void SetScissor(int32_t x0, int32_t y0, int32_t x1, int32_t y1);
@@ -1451,9 +1577,11 @@ private:
     VkShaderModule Module(const std::string& src, const char* entry, vkshader::Stage stage, uint64_t& hash);
     VkPipeline FullScreenPipeline(const char* hlsl, const char* ps_entry, VkFormat color, VkFormat depth, bool over,
                                   uint8_t wmask = 0xF);
+    VkPipeline OverlayPipeline(bool sdf, VkFormat color);
     VkPipeline EnsurePipeline(const PsoKey& k, VkShaderModule vs, VkShaderModule ps);
     VkSampler Sampler(const VkSamplerCreateInfo& ci);
     VkSampler StageSampler(const State& s, int i, const DrawTextures& stages, bool clamp);
+    VkSampleCountFlagBits DesiredMsaaSamples() const;
 
     // targets
     Target* FindTarget(const Surface& s, bool depth);
@@ -1489,6 +1617,7 @@ private:
     // present
     bool AcquireImage(uint32_t& index);
     void DrawFrame(Target* t, uint32_t index);
+    void PrepareUi(float w, float h);
     void RenderUi();
     void UploadGammaRamp();
     void UploadSkin();
@@ -1508,6 +1637,8 @@ private:
     VkQueue queue_ = VK_NULL_HANDLE;
     std::vector<const char*> dev_exts_;
     bool bc_ = false;
+    VkSampleCountFlags msaa_caps_ = VK_SAMPLE_COUNT_1_BIT;
+    VkSampleCountFlagBits msaa_samples_ = VK_SAMPLE_COUNT_1_BIT;
     VkFormat depth_fmt_ = VK_FORMAT_D24_UNORM_S8_UINT;
     bool depth_linear_ = false;
     bool r32f_linear_ = false;
@@ -1528,7 +1659,7 @@ private:
     uint64_t fenced_ = 0;  // the highest value whose fence signalled
     std::unordered_map<uint64_t, VkRenderPass> passes_;
     struct Fb {
-        VkImageView color, depth;
+        VkImageView color, depth, resolve;
         VkFramebuffer fb;
     };
     std::unordered_map<uint64_t, Fb> framebuffers_;
@@ -1549,6 +1680,7 @@ private:
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
     VkPipelineCache cache_ = VK_NULL_HANDLE;
     size_t cache_saved_ = 0;
+    std::atomic<bool> cache_saving_{false};
     VkSemaphore timeline_ = VK_NULL_HANDLE;
     std::atomic<uint64_t> value_{0};
     Frame frames_[kFrames];
@@ -1558,6 +1690,7 @@ private:
     bool rendering_ = false;
     Image* rend_color_ = nullptr;
     Image* rend_depth_ = nullptr;
+    Image* rend_resolve_ = nullptr;
     uint64_t render_seq_ = 1;
     VkPipeline cmd_pipe_ = VK_NULL_HANDLE;
     VkDescriptorSet cmd_set_ = VK_NULL_HANDLE;
@@ -1580,13 +1713,26 @@ private:
     std::vector<uint8_t> upload_decoded_;
     DxtWorkerPool dxt_pool_;
     uint64_t perf_vb_hits_ = 0;
+    uint64_t perf_static_buf_hits_ = 0;
     uint64_t perf_vsc_hits_ = 0;
     uint64_t perf_dc_hits_ = 0;
     uint64_t perf_pso_hits_ = 0;
     uint64_t perf_fast_tex_hits_ = 0;
     uint64_t perf_clear_coalesced_ = 0;
     uint64_t perf_frustum_culled_ = 0;
+    uint64_t perf_scissor_culled_ = 0;
     uint64_t perf_dxt_parallel_ = 0;
+
+    // Cached batched 2D touch overlay pipelines & pre-pass vertex buffers
+    VkPipeline overlay_tex_pipe_ = VK_NULL_HANDLE;
+    VkPipeline overlay_sdf_pipe_ = VK_NULL_HANDLE;
+    VkFormat overlay_pipe_fmt_ = VK_FORMAT_UNDEFINED;
+    std::vector<touch::Quad> ui_quads_;
+    std::vector<OverlayTexVert> ui_tex_verts_;
+    std::vector<OverlaySdfVert> ui_sdf_verts_;
+    std::vector<OverlayRun> ui_runs_;
+    Alloc ui_tex_alloc_{};
+    Alloc ui_sdf_alloc_{};
 
     uint64_t mru_vkey_ = 0;
     uint64_t mru_vh_ = 0;
@@ -1601,8 +1747,11 @@ private:
     std::unordered_map<uint64_t, uint64_t> shader_src_;
     std::unordered_map<uint64_t, VkPipeline> pipelines_;
     std::unordered_map<uint64_t, VkSampler> samplers_;
+    std::unordered_map<uint64_t, VkSampler> stage_samplers_;
     std::unordered_map<uint64_t, Target> targets_;
     std::unordered_map<uint64_t, Tex> textures_;
+    std::unordered_map<uint64_t, StaticBuf> static_bufs_;
+    VkDeviceSize static_buf_bytes_ = 0;
     Image lut_;
     Image dummy_[3];  // 2D, 3D, cube
     VkSampler linear_ = VK_NULL_HANDLE, point_ = VK_NULL_HANDLE;
@@ -1822,9 +1971,19 @@ bool VulkanBackend::CreateDevice() {
     depth_linear_ = fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
     vkGetPhysicalDeviceFormatProperties(pd_, VK_FORMAT_R32_SFLOAT, &fp);
     r32f_linear_ = fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-    LOGI("vulkan: depth %s, BC textures %s", depth_fmt_ == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8",
-         bc_ ? "on the GPU" : "decoded on the CPU");
+    msaa_caps_ = props_.limits.framebufferColorSampleCounts & props_.limits.framebufferDepthSampleCounts;
+    msaa_samples_ = DesiredMsaaSamples();
+    LOGI("vulkan: depth %s, BC textures %s, MSAA caps 0x%x (active %ux)",
+         depth_fmt_ == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8",
+         bc_ ? "on the GPU" : "decoded on the CPU", uint32_t(msaa_caps_), uint32_t(msaa_samples_));
     return true;
+}
+
+VkSampleCountFlagBits VulkanBackend::DesiredMsaaSamples() const {
+    const uint32_t aa = game::Opt().anti_aliasing;
+    if (aa == 3 && (msaa_caps_ & VK_SAMPLE_COUNT_4_BIT)) return VK_SAMPLE_COUNT_4_BIT;
+    if ((aa == 2 || aa == 3) && (msaa_caps_ & VK_SAMPLE_COUNT_2_BIT)) return VK_SAMPLE_COUNT_2_BIT;
+    return VK_SAMPLE_COUNT_1_BIT;
 }
 
 bool VulkanBackend::CreateSwapchain() {
@@ -2035,7 +2194,8 @@ bool VulkanBackend::CreateFixedImages() {
 // ---- memory and objects
 
 bool VulkanBackend::CreateImage(Image& im, VkFormat fmt, uint32_t w, uint32_t h, uint32_t d, uint32_t layers,
-                                uint32_t levels, VkImageUsageFlags usage, VkImageViewType vt, bool cube) {
+                                uint32_t levels, VkImageUsageFlags usage, VkImageViewType vt, bool cube,
+                                VkSampleCountFlagBits samples) {
     im = {};
     im.fmt = fmt;
     im.w = w;
@@ -2043,6 +2203,7 @@ bool VulkanBackend::CreateImage(Image& im, VkFormat fmt, uint32_t w, uint32_t h,
     im.d = d;
     im.layers = layers;
     im.levels = levels;
+    im.samples = samples;
     im.depth = fmt == depth_fmt_;
     im.stencil = im.depth && HasStencil(fmt);
     VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -2052,7 +2213,7 @@ bool VulkanBackend::CreateImage(Image& im, VkFormat fmt, uint32_t w, uint32_t h,
     ci.extent = {w, h, d};
     ci.mipLevels = levels;
     ci.arrayLayers = layers;
-    ci.samples = VK_SAMPLE_COUNT_1_BIT;
+    ci.samples = samples;
     ci.tiling = VK_IMAGE_TILING_OPTIMAL;
     ci.usage = usage;
     ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -2070,7 +2231,8 @@ bool VulkanBackend::CreateImage(Image& im, VkFormat fmt, uint32_t w, uint32_t h,
     vi.format = fmt;
     vi.subresourceRange = {VkImageAspectFlags(im.depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), 0,
                            levels, 0, layers};
-    if (usage & VK_IMAGE_USAGE_SAMPLED_BIT) vkCreateImageView(dev_, &vi, nullptr, &im.view);
+    if ((usage & VK_IMAGE_USAGE_SAMPLED_BIT) && samples == VK_SAMPLE_COUNT_1_BIT)
+        vkCreateImageView(dev_, &vi, nullptr, &im.view);
     if (usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
         vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
         vi.subresourceRange = {VkImageAspectFlags(im.depth ? VK_IMAGE_ASPECT_DEPTH_BIT | (im.stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0)
@@ -2166,6 +2328,69 @@ VulkanBackend::Alloc VulkanBackend::UploadCached(const uint8_t* src, uint32_t by
             const uint64_t key = (uint64_t(guest_va) << 32) | uint64_t(bytes);
             const uint64_t ep = DirtyEpoch(guest_va);
             const uint64_t sig = FastBufSig(src, bytes);
+
+            // 1. Persistent DEVICE_LOCAL Static Object / Geometry Cache (zero per-frame memcpy, fast VRAM reads!)
+            constexpr VkDeviceSize kStaticBufBudget = 64ull << 20;
+            StaticBuf& sb = static_bufs_[key];
+            if (sb.promoted && sb.gpu.buf && sb.bytes == bytes && sb.epoch == ep &&
+                (sb.last_frame == presents_ + 1 || sb.fast_sig == sig)) {
+                sb.last_frame = presents_ + 1;
+                ++perf_static_buf_hits_;
+                return {sb.gpu.buf, 0, nullptr};
+            }
+            if (sb.promoted && (sb.bytes != bytes || sb.epoch != ep || sb.fast_sig != sig)) {
+                if (sb.gpu.buf) {
+                    static_buf_bytes_ -= std::min<VkDeviceSize>(static_buf_bytes_, sb.bytes);
+                    Retire(sb.gpu);
+                }
+                sb.promoted = false;
+                sb.stable_frames = 0;
+                sb.has_aabb = false;
+            }
+            if (!sb.promoted) {
+                if (sb.bytes == bytes && sb.epoch == ep && sb.fast_sig == sig) {
+                    if (sb.last_frame != presents_ + 1) ++sb.stable_frames;
+                } else {
+                    sb.bytes = bytes;
+                    sb.epoch = ep;
+                    sb.fast_sig = sig;
+                    sb.stable_frames = 0;
+                    sb.has_aabb = false;
+                }
+                sb.last_frame = presents_ + 1;
+                if (sb.stable_frames >= 2u && bytes <= (4u << 20) && static_buf_bytes_ + bytes <= kStaticBufBudget) {
+                    Buffer dev_buf;
+                    if (CreateBuffer(dev_buf, alloc_bytes,
+                                     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                                         VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                     false)) {
+                        Alloc stg = Upload(alloc_bytes, align);
+                        if (stg.cpu) {
+                            std::memcpy(stg.cpu, src, bytes);
+                            EndRender();
+                            VkBufferCopy cp{stg.off, 0, alloc_bytes};
+                            vkCmdCopyBuffer(Cb(), stg.buf, dev_buf.buf, 1, &cp);
+                            VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+                            bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                            bb.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT;
+                            bb.srcQueueFamilyIndex = bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                            bb.buffer = dev_buf.buf;
+                            bb.offset = 0;
+                            bb.size = alloc_bytes;
+                            vkCmdPipelineBarrier(Cb(), VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                 VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 0, nullptr, 1, &bb, 0, nullptr);
+                            sb.gpu = dev_buf;
+                            sb.promoted = true;
+                            static_buf_bytes_ += bytes;
+                            ++perf_static_buf_hits_;
+                            return {sb.gpu.buf, 0, nullptr};
+                        }
+                        Destroy(dev_buf);
+                    }
+                }
+            }
+
+            // 2. Intra-frame upload ring deduplication cache
             Frame& f = CurrentFrame();
             auto it = f.buf_cache.find(key);
             if (it != f.buf_cache.end() && it->second.epoch == ep && it->second.sig == sig) {
@@ -2360,13 +2585,16 @@ void VulkanBackend::Transition(Image& im, VkImageLayout to) {
 
 // a rendering over the whole of the attachments, which keep what they hold; the one under way carries on when it
 // has the same ones
-void VulkanBackend::BeginRender(Image* color, Image* depth) {
-    if (rendering_ && color == rend_color_ && depth == rend_depth_) return;
+void VulkanBackend::BeginRender(Image* color, Image* depth, Image* resolve) {
+    if (rendering_ && color == rend_color_ && depth == rend_depth_ && resolve == rend_resolve_) return;
     EndRender();
     if (color) Transition(*color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    if (resolve) Transition(*resolve, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     if (depth) Transition(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-    // Emit attachment write->read/write barrier only if either attachment already rendered in this CB without transition.
-    if ((color && color->cb_render_seq == render_seq_) || (depth && depth->cb_render_seq == render_seq_)) {
+    // Emit attachment write->read/write barrier only if any attachment already rendered in this CB without transition.
+    if ((color && color->cb_render_seq == render_seq_) ||
+        (resolve && resolve->cb_render_seq == render_seq_) ||
+        (depth && depth->cb_render_seq == render_seq_)) {
         VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         mb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         mb.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
@@ -2377,17 +2605,22 @@ void VulkanBackend::BeginRender(Image* color, Image* depth) {
         vkCmdPipelineBarrier(Cb(), st, st, 0, 1, &mb, 0, nullptr, 0, nullptr);
     }
     if (color) color->cb_render_seq = render_seq_;
+    if (resolve) resolve->cb_render_seq = render_seq_;
     if (depth) depth->cb_render_seq = render_seq_;
     rendering_ = true;
     rend_color_ = color;
     rend_depth_ = depth;
+    rend_resolve_ = resolve;
+    Image* any = color ? color : depth;
+    const VkSampleCountFlagBits samples = any ? any->samples : VK_SAMPLE_COUNT_1_BIT;
+    const bool has_resolve = (color != nullptr) && (resolve != nullptr) && (samples > VK_SAMPLE_COUNT_1_BIT);
     if (!dynamic_) {
-        Image* any = color ? color : depth;
         VkFormat cf = color ? color->fmt : VK_FORMAT_UNDEFINED, df = depth ? depth->fmt : VK_FORMAT_UNDEFINED;
         VkRenderPassBeginInfo bi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-        bi.renderPass = Pass(cf, df);
-        bi.framebuffer = Framebuffer(cf, df, color ? color->attach : VK_NULL_HANDLE, depth ? depth->attach : VK_NULL_HANDLE,
-                                     any->w, any->h);
+        bi.renderPass = Pass(cf, df, false, false, samples, has_resolve);
+        bi.framebuffer = Framebuffer(cf, df, color ? color->attach : VK_NULL_HANDLE,
+                                     depth ? depth->attach : VK_NULL_HANDLE, any->w, any->h,
+                                     has_resolve ? resolve->attach : VK_NULL_HANDLE, samples);
         bi.renderArea = {{0, 0}, {any->w, any->h}};
         vkCmdBeginRenderPass(Cb(), &bi, VK_SUBPASS_CONTENTS_INLINE);
         return;
@@ -2395,7 +2628,6 @@ void VulkanBackend::BeginRender(Image* color, Image* depth) {
     VkRenderingAttachmentInfoKHR ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR};
     VkRenderingAttachmentInfoKHR da{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR};
     VkRenderingInfoKHR ri{VK_STRUCTURE_TYPE_RENDERING_INFO_KHR};
-    Image* any = color ? color : depth;
     ri.renderArea = {{0, 0}, {any->w, any->h}};
     ri.layerCount = 1;
     if (color) {
@@ -2403,6 +2635,11 @@ void VulkanBackend::BeginRender(Image* color, Image* depth) {
         ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         ca.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        if (has_resolve) {
+            ca.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+            ca.resolveImageView = resolve->attach;
+            ca.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        }
         ri.colorAttachmentCount = 1;
         ri.pColorAttachments = &ca;
     }
@@ -2418,11 +2655,14 @@ void VulkanBackend::BeginRender(Image* color, Image* depth) {
 }
 
 void VulkanBackend::BeginRenderClear(Image* color, Image* depth, bool clear_c, const float cc[4], bool clear_z, float z,
-                                     bool clear_s, uint32_t stencil) {
+                                     bool clear_s, uint32_t stencil, Image* resolve) {
     EndRender();
     if (color) Transition(*color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    if (resolve) Transition(*resolve, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     if (depth) Transition(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-    if ((color && color->cb_render_seq == render_seq_) || (depth && depth->cb_render_seq == render_seq_)) {
+    if ((color && color->cb_render_seq == render_seq_) ||
+        (resolve && resolve->cb_render_seq == render_seq_) ||
+        (depth && depth->cb_render_seq == render_seq_)) {
         VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         mb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         mb.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
@@ -2433,29 +2673,35 @@ void VulkanBackend::BeginRenderClear(Image* color, Image* depth, bool clear_c, c
         vkCmdPipelineBarrier(Cb(), st, st, 0, 1, &mb, 0, nullptr, 0, nullptr);
     }
     if (color) color->cb_render_seq = render_seq_;
+    if (resolve) resolve->cb_render_seq = render_seq_;
     if (depth) depth->cb_render_seq = render_seq_;
     rendering_ = true;
     rend_color_ = color;
     rend_depth_ = depth;
+    rend_resolve_ = resolve;
     Image* any = color ? color : depth;
+    const VkSampleCountFlagBits samples = any ? any->samples : VK_SAMPLE_COUNT_1_BIT;
+    const bool has_resolve = (color != nullptr) && (resolve != nullptr) && (samples > VK_SAMPLE_COUNT_1_BIT);
     if (!dynamic_) {
         VkFormat cf = color ? color->fmt : VK_FORMAT_UNDEFINED;
         VkFormat df = depth ? depth->fmt : VK_FORMAT_UNDEFINED;
         const bool clear_ds = depth && clear_z && (!depth->stencil || clear_s);
-        VkClearValue cvs[2] = {};
+        VkClearValue cvs[3] = {};
         uint32_t cv_count = 0;
         if (color) {
             if (clear_c) std::memcpy(cvs[cv_count].color.float32, cc, sizeof(float) * 4);
             ++cv_count;
+            if (has_resolve) ++cv_count;
         }
         if (depth) {
             cvs[cv_count].depthStencil = {std::clamp(z, 0.0f, 1.0f), stencil & 0xFF};
             ++cv_count;
         }
         VkRenderPassBeginInfo bi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-        bi.renderPass = Pass(cf, df, clear_c, clear_ds);
+        bi.renderPass = Pass(cf, df, clear_c, clear_ds, samples, has_resolve);
         bi.framebuffer = Framebuffer(cf, df, color ? color->attach : VK_NULL_HANDLE,
-                                     depth ? depth->attach : VK_NULL_HANDLE, any->w, any->h);
+                                     depth ? depth->attach : VK_NULL_HANDLE, any->w, any->h,
+                                     has_resolve ? resolve->attach : VK_NULL_HANDLE, samples);
         bi.renderArea = {{0, 0}, {any->w, any->h}};
         bi.clearValueCount = cv_count;
         bi.pClearValues = cvs;
@@ -2482,6 +2728,11 @@ void VulkanBackend::BeginRenderClear(Image* color, Image* depth, bool clear_c, c
         ca.loadOp = clear_c ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
         ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         if (clear_c) std::memcpy(ca.clearValue.color.float32, cc, sizeof(float) * 4);
+        if (has_resolve) {
+            ca.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+            ca.resolveImageView = resolve->attach;
+            ca.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        }
         ri.colorAttachmentCount = 1;
         ri.pColorAttachments = &ca;
     }
@@ -2508,7 +2759,7 @@ void VulkanBackend::EndRender() {
     else
         vkCmdEndRenderPass(Cb());
     rendering_ = false;
-    rend_color_ = rend_depth_ = nullptr;
+    rend_color_ = rend_depth_ = rend_resolve_ = nullptr;
     cmd_pipe_ = VK_NULL_HANDLE;
     cmd_set_ = VK_NULL_HANDLE;
     cmd_vb_count_ = 0;
@@ -2518,26 +2769,37 @@ void VulkanBackend::EndRender() {
 
 // the layouts stay the attachment ones throughout, as with dynamic rendering: barriers outside do the transitions.
 // pipelines only need a compatible pass, which load ops are not part of
-VkRenderPass VulkanBackend::Pass(VkFormat color, VkFormat depth, bool clear_c, bool clear_ds) {
-    const uint64_t k[4] = {uint64_t(color), uint64_t(depth), uint64_t(clear_c), uint64_t(clear_ds)};
+VkRenderPass VulkanBackend::Pass(VkFormat color, VkFormat depth, bool clear_c, bool clear_ds,
+                                 VkSampleCountFlagBits samples, bool has_resolve) {
+    const bool resolve = has_resolve && (color != VK_FORMAT_UNDEFINED) && (samples > VK_SAMPLE_COUNT_1_BIT);
+    const uint64_t k[6] = {uint64_t(color), uint64_t(depth), uint64_t(clear_c), uint64_t(clear_ds),
+                           uint64_t(samples), uint64_t(resolve)};
     uint64_t key = Hash(k, sizeof(k));
     if (auto it = passes_.find(key); it != passes_.end()) return it->second;
-    VkAttachmentDescription at[2] = {};
+    VkAttachmentDescription at[3] = {};
     VkAttachmentReference cr{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference rr{VK_ATTACHMENT_UNUSED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
     VkAttachmentReference dr{0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
     VkSubpassDescription sp{};
     sp.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     uint32_t n = 0;
     if (color != VK_FORMAT_UNDEFINED) {
-        at[n] = {0, color, VK_SAMPLE_COUNT_1_BIT, clear_c ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
+        at[n] = {0, color, samples, clear_c ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
                  VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE,
                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
         cr.attachment = n++;
         sp.colorAttachmentCount = 1;
         sp.pColorAttachments = &cr;
+        if (resolve) {
+            at[n] = {0, color, VK_SAMPLE_COUNT_1_BIT, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                     VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+            rr.attachment = n++;
+            sp.pResolveAttachments = &rr;
+        }
     }
     if (depth != VK_FORMAT_UNDEFINED) {
-        at[n] = {0, depth, VK_SAMPLE_COUNT_1_BIT, clear_ds ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
+        at[n] = {0, depth, samples, clear_ds ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
                  VK_ATTACHMENT_STORE_OP_STORE,
                  clear_ds ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE,
                  VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
@@ -2556,16 +2818,22 @@ VkRenderPass VulkanBackend::Pass(VkFormat color, VkFormat depth, bool clear_c, b
 }
 
 VkFramebuffer VulkanBackend::Framebuffer(VkFormat color_fmt, VkFormat depth_fmt, VkImageView color, VkImageView depth,
-                                         uint32_t w, uint32_t h) {
-    const uint64_t k[4] = {uint64_t(color), uint64_t(depth), w, h};
+                                         uint32_t w, uint32_t h, VkImageView resolve,
+                                         VkSampleCountFlagBits samples) {
+    const bool has_resolve = (color != VK_NULL_HANDLE) && (resolve != VK_NULL_HANDLE) && (samples > VK_SAMPLE_COUNT_1_BIT);
+    const uint64_t k[6] = {uint64_t(color), uint64_t(depth), uint64_t(has_resolve ? resolve : VK_NULL_HANDLE),
+                           uint64_t(samples), w, h};
     uint64_t key = Hash(k, sizeof(k));
     if (auto it = framebuffers_.find(key); it != framebuffers_.end()) return it->second.fb;
-    VkImageView views[2];
+    VkImageView views[3];
     uint32_t n = 0;
-    if (color) views[n++] = color;
+    if (color) {
+        views[n++] = color;
+        if (has_resolve) views[n++] = resolve;
+    }
     if (depth) views[n++] = depth;
     VkFramebufferCreateInfo ci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-    ci.renderPass = Pass(color_fmt, depth_fmt);
+    ci.renderPass = Pass(color_fmt, depth_fmt, false, false, samples, has_resolve);
     ci.attachmentCount = n;
     ci.pAttachments = views;
     ci.width = w;
@@ -2573,7 +2841,7 @@ VkFramebuffer VulkanBackend::Framebuffer(VkFormat color_fmt, VkFormat depth_fmt,
     ci.layers = 1;
     VkFramebuffer fb = VK_NULL_HANDLE;
     if (vkCreateFramebuffer(dev_, &ci, nullptr, &fb) != VK_SUCCESS) LOGE("vulkan: framebuffer %ux%u failed", w, h);
-    framebuffers_[key] = {color, depth, fb};
+    framebuffers_[key] = {color, depth, has_resolve ? resolve : VK_NULL_HANDLE, fb};
     return fb;
 }
 
@@ -2581,7 +2849,7 @@ VkFramebuffer VulkanBackend::Framebuffer(VkFormat color_fmt, VkFormat depth_fmt,
 void VulkanBackend::DropFramebuffers(VkImageView v) {
     if (!v || framebuffers_.empty()) return;
     for (auto it = framebuffers_.begin(); it != framebuffers_.end();) {
-        if (it->second.color == v || it->second.depth == v) {
+        if (it->second.color == v || it->second.depth == v || it->second.resolve == v) {
             vkDestroyFramebuffer(dev_, it->second.fb, nullptr);
             it = framebuffers_.erase(it);
         } else {
@@ -2800,6 +3068,112 @@ VkPipeline VulkanBackend::FullScreenPipeline(const char* hlsl, const char* ps_en
     return pipe;
 }
 
+VkPipeline VulkanBackend::OverlayPipeline(bool sdf, VkFormat color) {
+    if (overlay_pipe_fmt_ == color) {
+        VkPipeline cached = sdf ? overlay_sdf_pipe_ : overlay_tex_pipe_;
+        if (cached != VK_NULL_HANDLE) return cached;
+    } else {
+        overlay_tex_pipe_ = VK_NULL_HANDLE;
+        overlay_sdf_pipe_ = VK_NULL_HANDLE;
+        overlay_pipe_fmt_ = color;
+    }
+    const char* hlsl = sdf ? kOverlaySdfHlsl : kOverlayTexHlsl;
+    uint64_t key = Hash(hlsl, std::strlen(hlsl), (uint64_t(color) << 32) | (sdf ? 0x201u : 0x101u));
+    if (auto it = pipelines_.find(key); it != pipelines_.end()) {
+        if (sdf) overlay_sdf_pipe_ = it->second;
+        else overlay_tex_pipe_ = it->second;
+        return it->second;
+    }
+    uint64_t hv, hp;
+    VkShaderModule vs = Module(hlsl, "vs", vkshader::Stage::Vertex, hv);
+    VkShaderModule ps = Module(hlsl, "psmain", vkshader::Stage::Pixel, hp);
+    VkPipeline pipe = VK_NULL_HANDLE;
+    if (vs && ps) {
+        VkPipelineShaderStageCreateInfo st[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
+                                                 {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
+        st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        st[0].module = vs;
+        st[0].pName = "main";
+        st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        st[1].module = ps;
+        st[1].pName = "main";
+
+        VkVertexInputBindingDescription vb{};
+        vb.binding = 0;
+        vb.stride = sdf ? sizeof(OverlaySdfVert) : sizeof(OverlayTexVert);
+        vb.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+        VkVertexInputAttributeDescription va[6]{};
+        uint32_t na = 0;
+        if (!sdf) {
+            va[0] = {0, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(OverlayTexVert, x)};
+            va[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(OverlayTexVert, u)};
+            va[2] = {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(OverlayTexVert, r)};
+            na = 3;
+        } else {
+            va[0] = {0, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(OverlaySdfVert, x)};
+            va[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(OverlaySdfVert, lx)};
+            va[2] = {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(OverlaySdfVert, r)};
+            va[3] = {3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(OverlaySdfVert, gw)};
+            va[4] = {4, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(OverlaySdfVert, br)};
+            va[5] = {5, 0, VK_FORMAT_R32_SFLOAT, offsetof(OverlaySdfVert, mode)};
+            na = 6;
+        }
+        VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        vi.vertexBindingDescriptionCount = 1;
+        vi.pVertexBindingDescriptions = &vb;
+        vi.vertexAttributeDescriptionCount = na;
+        vi.pVertexAttributeDescriptions = va;
+
+        VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        vp.viewportCount = vp.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        rs.polygonMode = VK_POLYGON_MODE_FILL;
+        rs.cullMode = VK_CULL_MODE_NONE;
+        rs.lineWidth = 1;
+        VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+        VkPipelineColorBlendAttachmentState ba{};
+        ba.colorWriteMask = 0xF;
+        ba.blendEnable = VK_TRUE;
+        ba.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        ba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        ba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        ba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        cb.attachmentCount = 1;
+        cb.pAttachments = &ba;
+        VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+        dy.dynamicStateCount = 2;
+        dy.pDynamicStates = dyn;
+        VkPipelineRenderingCreateInfoKHR rinfo{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR};
+        rinfo.colorAttachmentCount = 1;
+        rinfo.pColorAttachmentFormats = &color;
+        VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, dynamic_ ? &rinfo : nullptr};
+        if (!dynamic_) pi.renderPass = Pass(color, VK_FORMAT_UNDEFINED);
+        pi.stageCount = 2;
+        pi.pStages = st;
+        pi.pVertexInputState = &vi;
+        pi.pInputAssemblyState = &ia;
+        pi.pViewportState = &vp;
+        pi.pRasterizationState = &rs;
+        pi.pMultisampleState = &ms;
+        pi.pDepthStencilState = &ds;
+        pi.pColorBlendState = &cb;
+        pi.pDynamicState = &dy;
+        pi.layout = layout_;
+        if (vkCreateGraphicsPipelines(dev_, cache_, 1, &pi, nullptr, &pipe) != VK_SUCCESS) pipe = VK_NULL_HANDLE;
+    }
+    pipelines_[key] = pipe;
+    if (sdf) overlay_sdf_pipe_ = pipe;
+    else overlay_tex_pipe_ = pipe;
+    return pipe;
+}
+
 VkPipeline VulkanBackend::EnsurePipeline(const PsoKey& k, VkShaderModule vs, VkShaderModule ps) {
     uint64_t h = Hash(&k, sizeof(k));
     if (mru_pso_pipe_ != VK_NULL_HANDLE && mru_pso_hash_ == h) {
@@ -2852,7 +3226,8 @@ VkPipeline VulkanBackend::EnsurePipeline(const PsoKey& k, VkShaderModule vs, VkS
     rs.depthBiasSlopeFactor = k.zslope;
     rs.lineWidth = 1;
     VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    const VkSampleCountFlagBits samples = VkSampleCountFlagBits(k.samples ? k.samples : VK_SAMPLE_COUNT_1_BIT);
+    ms.rasterizationSamples = samples;
     VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     ds.depthTestEnable = k.zen;
     ds.depthWriteEnable = k.zwrite;
@@ -2884,7 +3259,9 @@ VkPipeline VulkanBackend::EnsurePipeline(const PsoKey& k, VkShaderModule vs, VkS
     rinfo.depthAttachmentFormat = k.has_ds ? depth_fmt_ : VK_FORMAT_UNDEFINED;
     rinfo.stencilAttachmentFormat = k.has_ds && HasStencil(depth_fmt_) ? depth_fmt_ : VK_FORMAT_UNDEFINED;
     VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, dynamic_ ? &rinfo : nullptr};
-    if (!dynamic_) pi.renderPass = Pass(k.has_rt ? color : VK_FORMAT_UNDEFINED, k.has_ds ? depth_fmt_ : VK_FORMAT_UNDEFINED);
+    if (!dynamic_) pi.renderPass = Pass(k.has_rt ? color : VK_FORMAT_UNDEFINED,
+                                        k.has_ds ? depth_fmt_ : VK_FORMAT_UNDEFINED, false, false,
+                                        samples, k.has_resolve != 0);
     pi.stageCount = 2;
     pi.pStages = st;
     pi.pVertexInputState = &vi;
@@ -2922,29 +3299,59 @@ VkBorderColor Border(uint32_t argb) {
 }
 
 VkSampler VulkanBackend::StageSampler(const State& s, int i, const DrawTextures& stages, bool clamp) {
-    VkSamplerCreateInfo sd{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     const auto& t = s.tss[size_t(i)];
+    const uint32_t user_aniso = app::Get().aniso;
+    const uint32_t shadow_func = stages.info[i].shadow ? CmpIndex(s.rs[kRsShadowFunc]) : 0u;
+    const bool filterable = stages.fmt[i] != VK_FORMAT_R32_SFLOAT || r32f_linear_;
+    const uint32_t flags = (clamp ? 1u : 0u) | (filterable ? 2u : 0u) | (stages.rt[i] ? 4u : 0u) |
+                           (stages.info[i].shadow ? 8u : 0u) | (stages.info[i].rect ? 16u : 0u) |
+                           (uint32_t(stages.info[i].kind & 3u) << 5) | (shadow_func << 8);
+    const uint32_t sk[12] = {
+        t[kTssMagFilter], t[kTssMinFilter], t[kTssMipFilter], t[kTssMaxAnisotropy],
+        t[kTssAddressU], t[kTssAddressV], t[kTssAddressW], t[kTssMipLodBias],
+        t[kTssMaxMipLevel], t[kTssBorderColor], stages.levels[i], (user_aniso << 16) | flags,
+    };
+    const uint64_t skey = Hash(sk, sizeof(sk));
+    if (auto it = stage_samplers_.find(skey); it != stage_samplers_.end()) return it->second;
+
+    VkSamplerCreateInfo sd{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     uint32_t mag = t[kTssMagFilter], min = t[kTssMinFilter], mip = t[kTssMipFilter];
     auto lin = [](uint32_t f) { return f >= kTexfLinear; };
-    bool filterable = stages.fmt[i] != VK_FORMAT_R32_SFLOAT || r32f_linear_;
     sd.minFilter = lin(min) && filterable ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
     sd.magFilter = lin(mag) && filterable ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
     sd.mipmapMode = mip == kTexfLinear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    bool anisotropic = min == kTexfAnisotropic || mag == kTexfAnisotropic;
-    uint32_t an = anisotropic ? std::max<uint32_t>(t[kTssMaxAnisotropy], 1) : 1;
-    uint32_t aniso = app::Get().aniso;
-    bool mipped = mip && stages.levels[i] > 1;
-    if (aniso && lin(min) && mipped && !stages.info[i].shadow) an = aniso;
+
+    // Accurate Anisotropic Filtering:
+    // Only apply AF to filterable mipped 2D world textures (never UI rects, RTs, cubemaps, or shadow maps).
+    // When user forces AF (2x..16x), upgrade mipmapMode to LINEAR (true trilinear AF) to eliminate road mip seams!
+    const bool mipped = mip && stages.levels[i] > 1;
+    const bool eligible_af = (stages.info[i].kind == kTex2D) && !stages.rt[i] &&
+                             !stages.info[i].shadow && !stages.info[i].rect && filterable && mipped;
+    uint32_t an = 1;
+    if (eligible_af && user_aniso > 1 && lin(min)) {
+        an = user_aniso;
+        sd.minFilter = VK_FILTER_LINEAR;
+        sd.magFilter = VK_FILTER_LINEAR;
+        sd.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    } else if (eligible_af && user_aniso > 0 && (min == kTexfAnisotropic || mag == kTexfAnisotropic)) {
+        an = std::max<uint32_t>(t[kTssMaxAnisotropy], 1);
+    }
     if (an > 1 && feats_.samplerAnisotropy) {
         sd.anisotropyEnable = VK_TRUE;
         sd.maxAnisotropy = std::min(float(an), props_.limits.maxSamplerAnisotropy);
+    } else {
+        sd.anisotropyEnable = VK_FALSE;
+        sd.maxAnisotropy = 1.0f;
     }
+
     uint32_t u = t[kTssAddressU], v = t[kTssAddressV];
     sd.addressModeU = Address(clamp && u == kTaddressWrap ? kTaddressClamp : u);
     sd.addressModeV = Address(clamp && v == kTaddressWrap ? kTaddressClamp : v);
     sd.addressModeW = Address(t[kTssAddressW]);
-    float limit = props_.limits.maxSamplerLodBias;
-    sd.mipLodBias = std::clamp(Bits(t[kTssMipLodBias]), -limit, limit);
+    const float limit = props_.limits.maxSamplerLodBias;
+    float bias = mipped ? std::clamp(Bits(t[kTssMipLodBias]), -limit, limit) : 0.0f;
+    if (sd.anisotropyEnable) bias = std::clamp(bias, -0.5f, 0.5f);
+    sd.mipLodBias = bias;
     sd.minLod = std::min(float(t[kTssMaxMipLevel]), float(stages.levels[i] - 1));
     sd.maxLod = mip ? VK_LOD_CLAMP_NONE : sd.minLod;
     sd.borderColor = Border(t[kTssBorderColor]);
@@ -2955,11 +3362,14 @@ VkSampler VulkanBackend::StageSampler(const State& s, int i, const DrawTextures&
         sd.minFilter = sd.magFilter = linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
         sd.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
         sd.compareEnable = VK_TRUE;
-        sd.compareOp = VkCompareOp(swap[CmpIndex(s.rs[kRsShadowFunc])]);
+        sd.compareOp = VkCompareOp(swap[shadow_func]);
         sd.anisotropyEnable = VK_FALSE;
-        sd.maxAnisotropy = 1;
+        sd.maxAnisotropy = 1.0f;
+        sd.mipLodBias = 0.0f;
     }
-    return Sampler(sd);
+    VkSampler res = Sampler(sd);
+    if (stage_samplers_.size() < 4096) stage_samplers_[skey] = res;
+    return res;
 }
 
 // ---- targets
@@ -2977,6 +3387,7 @@ void VulkanBackend::ReleaseTarget(std::unordered_map<uint64_t, Target>::iterator
     if (draw_rt_ == &it->second) draw_rt_ = nullptr;
     if (draw_ds_ == &it->second) draw_ds_ = nullptr;
     Retire(it->second.img);
+    Retire(it->second.msaa);
     Retire(it->second.fb);
     targets_.erase(it);
 }
@@ -3011,6 +3422,21 @@ Target* VulkanBackend::EnsureTarget(const Surface& s, bool depth) {
         VkClearColorValue black{};
         VkImageSubresourceRange r{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         vkCmdClearColorImage(Cb(), t.img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &r);
+    }
+    // Companion hardware MSAA 2x/4x attachment for full-size 3D scene color & depth targets
+    if (msaa_samples_ > VK_SAMPLE_COUNT_1_BIT && gw >= guest_w_ && gh >= guest_h_) {
+        VkImageUsageFlags ms_usage = depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                                           : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        if (CreateImage(t.msaa, depth ? depth_fmt_ : kBgra, t.w, t.h, 1, 1, 1, ms_usage,
+                        VK_IMAGE_VIEW_TYPE_2D, false, msaa_samples_)) {
+            const float zero[4] = {0, 0, 0, 0};
+            if (depth) {
+                BeginRenderClear(nullptr, &t.msaa, false, zero, true, 1.0f, t.msaa.stencil, 0u, nullptr);
+            } else {
+                BeginRenderClear(&t.msaa, nullptr, true, zero, false, 1.0f, false, 0u, &t.img);
+            }
+            EndRender();
+        }
     }
     t.data = data;
     t.bytes = depth ? gw * gh * 4 : GuestPitch(gw) * gh;
@@ -3049,8 +3475,17 @@ void VulkanBackend::UpgradeTargetSigned(Target& t) {
     }
     EndRender();
     Retire(t.img);
+    Retire(t.msaa);
     Retire(t.fb);
     t.img = std::move(fresh);
+    if (msaa_samples_ > VK_SAMPLE_COUNT_1_BIT && t.gw >= guest_w_ && t.gh >= guest_h_) {
+        if (CreateImage(t.msaa, kSignedFmt, t.w, t.h, 1, 1, 1, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                        VK_IMAGE_VIEW_TYPE_2D, false, msaa_samples_)) {
+            const float zero[4] = {0, 0, 0, 0};
+            BeginRenderClear(&t.msaa, nullptr, true, zero, false, 1.0f, false, 0u, nullptr);
+            EndRender();
+        }
+    }
     LOGR("[OK] vulkan: upgraded target 0x%08X (%ux%u) to RGBA16F for signed blend ops", t.data, t.gw, t.gh);
 }
 
@@ -3498,6 +3933,10 @@ void VulkanBackend::BuildPipelineKey(const State& s, const Assembled& a, const D
     k.has_rt = draw_rt_ != nullptr;
     k.has_ds = draw_ds_ != nullptr;
     k.rtfmt = draw_rt_ ? uint32_t(draw_rt_->img.fmt) : 0;
+    const bool use_msaa = (msaa_samples_ > VK_SAMPLE_COUNT_1_BIT) && (draw_rt_ || draw_ds_) &&
+                          (!draw_rt_ || bool(draw_rt_->msaa)) && (!draw_ds_ || bool(draw_ds_->msaa));
+    k.samples = uint32_t(use_msaa ? msaa_samples_ : VK_SAMPLE_COUNT_1_BIT);
+    k.has_resolve = (use_msaa && draw_rt_ != nullptr) ? 1u : 0u;
     KeyBlend(s, k);
     if (k.has_ds) KeyDepthStencil(s, a, k);
     KeyRasterizer(s, a, k);
@@ -3544,14 +3983,37 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
     draw_rt_ = rt;
     draw_ds_ = ds;
 
-    DrawShaders sh = ClassifyShaders(s, a);
+    // Early zero-area scissor & no-op write culling (before shader/texture/UBO/VB work!)
+    Target& bt_pre = draw_rt_ ? *draw_rt_ : *draw_ds_;
     GuestExtent size;
     SurfaceSize(draw_rt_ ? s.rt : s.zs, size.w, size.h);
+    {
+        const float W = float(bt_pre.w), H = float(bt_pre.h);
+        const float sc = W / size.w;
+        int32_t x0 = int32_t(s.viewport.x * sc), y0 = int32_t(s.viewport.y * sc);
+        int32_t x1 = int32_t((s.viewport.x + s.viewport.w) * sc), y1 = int32_t((s.viewport.y + s.viewport.h) * sc);
+        if (s.scissor_count) {
+            x0 = std::max(x0, int32_t(s.scissors[0] * sc));
+            y0 = std::max(y0, int32_t(s.scissors[1] * sc));
+            x1 = std::min(x1, int32_t(s.scissors[2] * sc));
+            y1 = std::min(y1, int32_t(s.scissors[3] * sc));
+        }
+        x0 = std::clamp(x0, 0, int32_t(W));
+        y0 = std::clamp(y0, 0, int32_t(H));
+        x1 = std::clamp(x1, 0, int32_t(W));
+        y1 = std::clamp(y1, 0, int32_t(H));
+        if (x1 <= x0 || y1 <= y0) {
+            ++perf_scissor_culled_;
+            return;
+        }
+    }
+
+    DrawShaders sh = ClassifyShaders(s, a);
     float fixed_wv[16], fixed_full[16];
     if (sh.fixed_transform) {
         ComputeFixedMatrices(s, size, fixed_wv, fixed_full);
         if (!a.pretransformed && s.rs[kRsVertexBlend] == 0 && a.topology != Topology::Points && !s.scissor_count &&
-            IsFixedDrawOutsideFrustum(a, fixed_full)) {
+            IsFixedDrawOutsideFrustum(a, fixed_full, static_bufs_)) {
             ++perf_frustum_culled_;
             return;
         }
@@ -3643,8 +4105,13 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
     for (int i = 0; i < 4; i++) samplers[i] = s.textures[size_t(i)] ? StageSampler(s, i, stages, clamp) : point_;
     VkDescriptorSet set = Set(stages.view, samplers);
 
-    // the rendering
-    BeginRender(draw_rt_ ? &draw_rt_->img : nullptr, draw_ds_ ? &draw_ds_->img : nullptr);
+    // the rendering (bind companion MSAA 2x/4x attachments + automatic hardware resolve when active)
+    const bool use_msaa = (msaa_samples_ > VK_SAMPLE_COUNT_1_BIT) && (draw_rt_ || draw_ds_) &&
+                          (!draw_rt_ || bool(draw_rt_->msaa)) && (!draw_ds_ || bool(draw_ds_->msaa));
+    Image* rt_att = draw_rt_ ? (use_msaa ? &draw_rt_->msaa : &draw_rt_->img) : nullptr;
+    Image* ds_att = draw_ds_ ? (use_msaa ? &draw_ds_->msaa : &draw_ds_->img) : nullptr;
+    Image* rt_res = (use_msaa && draw_rt_) ? &draw_rt_->img : nullptr;
+    BeginRender(rt_att, ds_att, rt_res);
     if (draw_rt_) draw_rt_->drawn = true;
     if (draw_ds_) draw_ds_->drawn = true;
     BindPipeline(pipe);
@@ -3723,7 +4190,7 @@ void VulkanBackend::ClearTarget(Target& t, const State& s, uint32_t count, const
                         ((flags & kClearStencil) && t.img.stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
         if (!ca.aspectMask) return;
         ca.clearValue.depthStencil = {std::clamp(z, 0.0f, 1.0f), stencil & 0xFF};
-        BeginRender(nullptr, &t.img);
+        BeginRender(nullptr, t.msaa ? &t.msaa : &t.img);
     } else {
         // pixels the CPU wrote before this clear go in first, a later upload would paint over the clear
         if (LatchCpuWrite(t)) UploadTarget(t, s.rt);
@@ -3752,7 +4219,7 @@ void VulkanBackend::ClearTarget(Target& t, const State& s, uint32_t count, const
         }
         ca.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         Color(color, ca.clearValue.color.float32);
-        BeginRender(&t.img, nullptr);
+        BeginRender(t.msaa ? &t.msaa : &t.img, nullptr, t.msaa ? &t.img : nullptr);
     }
     vkCmdClearAttachments(Cb(), 1, &ca, uint32_t(rs.size()), rs.data());
 }
@@ -3792,8 +4259,13 @@ void VulkanBackend::Clear(const State& s, uint32_t count, const uint8_t* rects, 
             if (clear_z || clear_s) ds->drawn = true;
             float cc[4] = {};
             if (clear_c) Color(color, cc);
-            BeginRenderClear(bind_rt ? &bind_rt->img : nullptr, (clear_z || clear_s) ? &ds->img : nullptr,
-                             clear_c, cc, clear_z, z, clear_s, stencil);
+            const bool use_msaa = (msaa_samples_ > VK_SAMPLE_COUNT_1_BIT) &&
+                                  (!bind_rt || bool(bind_rt->msaa)) &&
+                                  (!(clear_z || clear_s) || bool(ds->msaa));
+            Image* c_att = bind_rt ? (use_msaa ? &bind_rt->msaa : &bind_rt->img) : nullptr;
+            Image* d_att = (clear_z || clear_s) ? (use_msaa ? &ds->msaa : &ds->img) : nullptr;
+            Image* c_res = (use_msaa && bind_rt) ? &bind_rt->img : nullptr;
+            BeginRenderClear(c_att, d_att, clear_c, cc, clear_z, z, clear_s, stencil, c_res);
             ++perf_clear_coalesced_;
             return;
         }
@@ -3995,6 +4467,8 @@ bool VulkanBackend::AcquireImage(uint32_t& index) {
 
 void VulkanBackend::DrawFrame(Target* t, uint32_t index) {
     EndRender();
+    // Build & upload batched 2D touch overlay vertex buffers BEFORE swapchain barrier & render pass!
+    PrepareUi(float(swap_extent_.width), float(swap_extent_.height));
     VkCommandBuffer cb = Cb();
     VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     b.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -4011,7 +4485,7 @@ void VulkanBackend::DrawFrame(Target* t, uint32_t index) {
     float vw = std::min(w, h * aspect), vh = vw / aspect;
     uint32_t filter = std::min(game::Opt().screen_filter, 8u);
     uint32_t crt = filter <= 2 ? filter : 0;
-    bool fxaa = game::Opt().anti_aliasing == 1, ssaa = game::Opt().anti_aliasing == 2;
+    bool fxaa = game::Opt().anti_aliasing == 1, ssaa = game::Opt().anti_aliasing == 4;
     bool post = game::Opt().hdr || fxaa;
     // opts.z: the taps a side over each screen pixel, 2 averaging SSAA's samples
     float c[24] = {0, 0, 1, 1, gamma_ ? 1.0f : 0.0f, 0, ssaa ? 2.0f : 1.0f, 1};
@@ -4094,39 +4568,105 @@ void VulkanBackend::DrawFrame(Target* t, uint32_t index) {
                          nullptr, 0, nullptr, 1, &b);
 }
 
-void VulkanBackend::RenderUi() {
+void VulkanBackend::PrepareUi(float w, float h) {
     if (app::kGame.ui) app::kGame.ui(fps_);
-    static std::vector<touch::Quad> quads;
-    quads.clear();
-    touch::BuildOverlay(quads);
-    if (quads.empty()) return;
+    ui_quads_.clear();
+    ui_tex_verts_.clear();
+    ui_sdf_verts_.clear();
+    ui_runs_.clear();
+    ui_tex_alloc_ = {};
+    ui_sdf_alloc_ = {};
 
-    VkPipeline pipe = FullScreenPipeline(kOverlayHlsl, "psmain", swap_fmt_, VK_FORMAT_UNDEFINED, true);
-    if (!pipe) return;
+    touch::BuildOverlay(ui_quads_);
+    if (ui_quads_.empty() || w <= 1.0f || h <= 1.0f) return;
+
+    const float inv_w = 2.0f / w;
+    const float inv_h = 2.0f / h;
+    for (const touch::Quad& q : ui_quads_) {
+        const float qw = q.x1 - q.x0;
+        const float qh = q.y1 - q.y0;
+        if (qw <= 0.5f || qh <= 0.5f) continue;
+
+        const float nx0 = q.x0 * inv_w - 1.0f;
+        const float nx1 = q.x1 * inv_w - 1.0f;
+        const float ny0 = 1.0f - q.y0 * inv_h;
+        const float ny1 = 1.0f - q.y1 * inv_h;
+        const bool is_sdf = (q.mode != 0u);
+
+        if (!is_sdf) {
+            const uint32_t first = uint32_t(ui_tex_verts_.size());
+            ui_tex_verts_.push_back({nx0, ny0, q.u0, q.v0, q.r, q.g, q.b, q.a});
+            ui_tex_verts_.push_back({nx1, ny0, q.u1, q.v0, q.r, q.g, q.b, q.a});
+            ui_tex_verts_.push_back({nx0, ny1, q.u0, q.v1, q.r, q.g, q.b, q.a});
+            ui_tex_verts_.push_back({nx1, ny0, q.u1, q.v0, q.r, q.g, q.b, q.a});
+            ui_tex_verts_.push_back({nx1, ny1, q.u1, q.v1, q.r, q.g, q.b, q.a});
+            ui_tex_verts_.push_back({nx0, ny1, q.u0, q.v1, q.r, q.g, q.b, q.a});
+            if (!ui_runs_.empty() && !ui_runs_.back().sdf) {
+                ui_runs_.back().count += 6u;
+            } else {
+                ui_runs_.push_back({false, first, 6u});
+            }
+        } else {
+            const uint32_t first = uint32_t(ui_sdf_verts_.size());
+            const float fm = float(q.mode);
+            ui_sdf_verts_.push_back({nx0, ny0, 0.0f, 0.0f, q.r, q.g, q.b, q.a, qw, qh, q.radius_px, q.border_px, q.br, q.bg, q.bb, q.ba, fm});
+            ui_sdf_verts_.push_back({nx1, ny0, 1.0f, 0.0f, q.r, q.g, q.b, q.a, qw, qh, q.radius_px, q.border_px, q.br, q.bg, q.bb, q.ba, fm});
+            ui_sdf_verts_.push_back({nx0, ny1, 0.0f, 1.0f, q.r, q.g, q.b, q.a, qw, qh, q.radius_px, q.border_px, q.br, q.bg, q.bb, q.ba, fm});
+            ui_sdf_verts_.push_back({nx1, ny0, 1.0f, 0.0f, q.r, q.g, q.b, q.a, qw, qh, q.radius_px, q.border_px, q.br, q.bg, q.bb, q.ba, fm});
+            ui_sdf_verts_.push_back({nx1, ny1, 1.0f, 1.0f, q.r, q.g, q.b, q.a, qw, qh, q.radius_px, q.border_px, q.br, q.bg, q.bb, q.ba, fm});
+            ui_sdf_verts_.push_back({nx0, ny1, 0.0f, 1.0f, q.r, q.g, q.b, q.a, qw, qh, q.radius_px, q.border_px, q.br, q.bg, q.bb, q.ba, fm});
+            if (!ui_runs_.empty() && ui_runs_.back().sdf) {
+                ui_runs_.back().count += 6u;
+            } else {
+                ui_runs_.push_back({true, first, 6u});
+            }
+        }
+    }
+
+    const VkDeviceSize tex_bytes = ui_tex_verts_.size() * sizeof(OverlayTexVert);
+    const VkDeviceSize sdf_bytes = ui_sdf_verts_.size() * sizeof(OverlaySdfVert);
+    const VkDeviceSize need_ui = tex_bytes + sdf_bytes + kUboRange + 1024;
+    if (need_ui < kUploadSize / 4 && CurrentFrame().used + need_ui > kUploadSize) {
+        Submit(true, false);
+    }
+    if (tex_bytes > 0) {
+        ui_tex_alloc_ = Upload(tex_bytes, 16);
+        if (ui_tex_alloc_.cpu) std::memcpy(ui_tex_alloc_.cpu, ui_tex_verts_.data(), size_t(tex_bytes));
+    }
+    if (sdf_bytes > 0) {
+        ui_sdf_alloc_ = Upload(sdf_bytes, 16);
+        if (ui_sdf_alloc_.cpu) std::memcpy(ui_sdf_alloc_.cpu, ui_sdf_verts_.data(), size_t(sdf_bytes));
+    }
+}
+
+void VulkanBackend::RenderUi() {
+    if (ui_runs_.empty()) return;
+
+    VkCommandBuffer cb = Cb();
     VkImageView atlas_view = skin_.view ? skin_.view : dummy_[0].view;
     const VkImageView views[4] = {atlas_view, dummy_[0].view, VK_NULL_HANDLE, VK_NULL_HANDLE};
     const VkSampler samplers[4] = {linear_, point_, point_, point_};
     VkDescriptorSet set = Set(views, samplers);
 
-    VkCommandBuffer cb = Cb();
-    BindPipeline(pipe);
+    SetViewport(0, 0, float(swap_extent_.width), float(swap_extent_.height));
     SetScissor(0, 0, int32_t(swap_extent_.width), int32_t(swap_extent_.height));
-    for (const touch::Quad& q : quads) {
-        const float qw = q.x1 - q.x0;
-        const float qh = q.y1 - q.y0;
-        if (qw <= 0.5f || qh <= 0.5f) continue;
-        float c[20] = {
-            q.u0, q.v0, q.u1 - q.u0, q.v1 - q.v0,
-            q.r, q.g, q.b, q.a,
-            qw, qh, q.radius_px, q.border_px,
-            q.br, q.bg, q.bb, q.ba,
-            float(q.mode), 0.0f, 0.0f, 0.0f,
-        };
-        Alloc cbuf = Constants(c, sizeof(c));
-        if (!cbuf.cpu) break;
-        BindSet(set, cbuf.off, cbuf.off);
-        SetViewport(q.x0, q.y0, qw, qh);
-        vkCmdDraw(cb, 6, 1, 0, 0);
+    BindSet(set, 0, 0);
+
+    VkBuffer bound_vb = VK_NULL_HANDLE;
+    VkDeviceSize bound_off = 0;
+    for (const OverlayRun& run : ui_runs_) {
+        const Alloc& a = run.sdf ? ui_sdf_alloc_ : ui_tex_alloc_;
+        if (!a.buf || run.count == 0u) continue;
+        VkPipeline pipe = OverlayPipeline(run.sdf, swap_fmt_);
+        if (!pipe) continue;
+        BindPipeline(pipe);
+        if (bound_vb != a.buf || bound_off != a.off) {
+            bound_vb = a.buf;
+            bound_off = a.off;
+            vkCmdBindVertexBuffers(cb, 0, 1, &a.buf, &a.off);
+            cmd_vb_count_ = 0;
+        }
+        vkCmdDraw(cb, run.count, 1, run.first, 0);
     }
 }
 
@@ -4174,45 +4714,69 @@ void VulkanBackend::ReleaseOldTextures() {
     constexpr uint64_t kSweepEvery = 60;
     constexpr size_t kTexturesKept = 2048;  // keep active open-world city textures warm to avoid re-decoding stalls
     constexpr uint64_t kIdleFrames = 1800;
-    if (presents_ % kSweepEvery != 0 || textures_.size() <= kTexturesKept) return;
-    for (auto it = textures_.begin(); it != textures_.end();) {
-        if (it->second.frame + kIdleFrames < presents_) {
-            Retire(it->second.img);
-            it = textures_.erase(it);
-        } else {
-            ++it;
+    if (presents_ % kSweepEvery != 0) return;
+    if (textures_.size() > kTexturesKept) {
+        for (auto it = textures_.begin(); it != textures_.end();) {
+            if (it->second.frame + kIdleFrames < presents_) {
+                Retire(it->second.img);
+                it = textures_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    if (static_bufs_.size() > 512) {
+        for (auto it = static_bufs_.begin(); it != static_bufs_.end();) {
+            if (it->second.last_frame + kIdleFrames < presents_) {
+                if (it->second.gpu.buf) {
+                    static_buf_bytes_ -= std::min<VkDeviceSize>(static_buf_bytes_, it->second.bytes);
+                    Retire(it->second.gpu);
+                }
+                it = static_bufs_.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
 }
 
 void VulkanBackend::ApplySettings() {
-    float want = app::RenderScale(guest_h_);
-    if (std::fabs(want - scale_) <= 1e-4f) return;
+    const float want = app::RenderScale(guest_h_);
+    const VkSampleCountFlagBits want_msaa = DesiredMsaaSamples();
+    if (std::fabs(want - scale_) <= 1e-4f && want_msaa == msaa_samples_) return;
     Submit(true, false);
     for (auto& [key, t] : targets_) {
         Retire(t.img);
+        Retire(t.msaa);
         Retire(t.fb);
     }
     targets_.clear();
     draw_rt_ = draw_ds_ = nullptr;
     scale_ = want;
-    LOGI("vulkan: render scale %.3f", scale_);
+    msaa_samples_ = want_msaa;
+    LOGI("vulkan: render scale %.3f, MSAA %ux", scale_, uint32_t(msaa_samples_));
 }
 
 void VulkanBackend::SavePipelineCache() {
+    if (cache_saving_.load(std::memory_order_relaxed)) return;
     size_t size = 0;
-    if (vkGetPipelineCacheData(dev_, cache_, &size, nullptr) != VK_SUCCESS || size == cache_saved_) return;
+    if (vkGetPipelineCacheData(dev_, cache_, &size, nullptr) != VK_SUCCESS || size == 0 || size == cache_saved_) return;
     std::vector<char> blob(size);
     if (vkGetPipelineCacheData(dev_, cache_, &size, blob.data()) != VK_SUCCESS) return;
-    std::filesystem::path p = app::ExeDir() / "shadercache" / "pipelines.bin", tmp = p;
-    tmp += ".tmp";
-    {
-        std::ofstream f(tmp, std::ios::binary);
-        f.write(blob.data(), std::streamsize(size));
-    }
-    std::error_code ec;
-    std::filesystem::rename(tmp, p, ec);
     cache_saved_ = size;
+    cache_saving_.store(true, std::memory_order_relaxed);
+    const std::filesystem::path p = app::ExeDir() / "shadercache" / "pipelines.bin";
+    std::thread([this, p, data = std::move(blob)]() mutable {
+        std::filesystem::path tmp = p;
+        tmp += ".tmp";
+        {
+            std::ofstream f(tmp, std::ios::binary);
+            if (f) f.write(data.data(), std::streamsize(data.size()));
+        }
+        std::error_code ec;
+        std::filesystem::rename(tmp, p, ec);
+        cache_saving_.store(false, std::memory_order_relaxed);
+    }).detach();
 }
 
 void VulkanBackend::Present(const Surface& front) {
@@ -4255,14 +4819,16 @@ void VulkanBackend::Present(const Surface& front) {
         fps_n_ = 0;
         fps_t_ = now;
     }
-    if (presents_ % 600 == 0) {
+    if (presents_ == 180 || presents_ % 600 == 0) {
         SavePipelineCache();
-        LOGR("[INFO] vkPerf: frame=%llu fps=%.1f tex=%zu vbHits=%llu vscHits=%llu dcHits=%llu psoHits=%llu fastTex=%llu clearCoalesce=%llu culled=%llu dxtPar=%llu",
-             (unsigned long long)presents_, fps_, textures_.size(),
+        LOGR("[INFO] vkPerf: frame=%llu fps=%.1f msaa=%ux tex=%zu objBufs=%zu objHits=%llu vbHits=%llu vscHits=%llu dcHits=%llu psoHits=%llu fastTex=%llu clearCoalesce=%llu frustumCull=%llu scissorCull=%llu dxtPar=%llu",
+             (unsigned long long)presents_, fps_, uint32_t(msaa_samples_),
+             textures_.size(), static_bufs_.size(), (unsigned long long)perf_static_buf_hits_,
              (unsigned long long)perf_vb_hits_, (unsigned long long)perf_vsc_hits_,
              (unsigned long long)perf_dc_hits_, (unsigned long long)perf_pso_hits_,
              (unsigned long long)perf_fast_tex_hits_, (unsigned long long)perf_clear_coalesced_,
-             (unsigned long long)perf_frustum_culled_, (unsigned long long)perf_dxt_parallel_);
+             (unsigned long long)perf_frustum_culled_, (unsigned long long)perf_scissor_culled_,
+             (unsigned long long)perf_dxt_parallel_);
     }
     dynres::Frame();
     ApplySettings();

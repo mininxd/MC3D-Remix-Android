@@ -1619,6 +1619,14 @@ void FingerMove(SDL_FingerID id, float x, float y) {
             if (f.button < kButtonCount && (f.button == kIdxModeSwap || f.button == kIdxEditBtn)) {
                 continue;
             }
+            // Skip redundant 24-button HitButton() scans on sub-pixel touch jitter (240Hz digitizer noise)
+            const float jdx = x - f.last_x;
+            const float jdy = y - f.last_y;
+            if (jdx * jdx + jdy * jdy < 4.0f) {
+                continue;
+            }
+            f.last_x = x;
+            f.last_y = y;
             // NFSU2-style free slide-across touching: glide seamlessly into or between any buttons!
             const size_t hit = HitButton(x, y);
             if (hit < kButtonCount && IsNoSlideButton(hit) && f.button != hit) {
@@ -2980,7 +2988,6 @@ bool Firing() {
 }
 
 void Pump() {
-    gyro::Pump();
     SDL_Window* window = host::Window();
     bool capture = input::g_keyboard && !input::g_touch && LookActive();
     if (window && capture != SDL_GetWindowRelativeMouseMode(window)) SDL_SetWindowRelativeMouseMode(window, capture);

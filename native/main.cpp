@@ -35,6 +35,8 @@
 namespace {
 
 SDL_Window* g_window = nullptr;
+std::atomic<int> g_win_w{0};
+std::atomic<int> g_win_h{0};
 std::atomic<bool> g_foreground{true};
 std::atomic<uint32_t> g_surface_epoch{0};
 std::mutex g_foreground_lock;
@@ -99,9 +101,26 @@ void WaitForeground() {
     g_foreground_cv.wait(lock, [] { return g_foreground.load(); });
 }
 
+void RefreshWindowPixels() {
+    if (!g_window) return;
+    int w = 0, h = 0;
+    SDL_GetWindowSizeInPixels(g_window, &w, &h);
+    if (w > 0 && h > 0) {
+        g_win_w.store(w, std::memory_order_relaxed);
+        g_win_h.store(h, std::memory_order_relaxed);
+    }
+}
+
 void WindowPixels(int& w, int& h) {
-    w = h = 0;
-    if (g_window) SDL_GetWindowSizeInPixels(g_window, &w, &h);
+    w = g_win_w.load(std::memory_order_relaxed);
+    h = g_win_h.load(std::memory_order_relaxed);
+    if ((w <= 0 || h <= 0) && g_window) {
+        SDL_GetWindowSizeInPixels(g_window, &w, &h);
+        if (w > 0 && h > 0) {
+            g_win_w.store(w, std::memory_order_relaxed);
+            g_win_h.store(h, std::memory_order_relaxed);
+        }
+    }
 }
 
 }  // namespace host
@@ -236,7 +255,7 @@ bool Widescreen() {
 
 // SSAA renders twice as wide and high, the present averaging each 2x2 back to a pixel
 float RenderScale(uint32_t guest_height) {
-    float ssaa = game::Opt().anti_aliasing == 2 ? 2.0f : 1.0f;
+    float ssaa = game::Opt().anti_aliasing == 4 ? 2.0f : 1.0f;
     float h = Output().height * (dynres::Percent() / 100.0f) * ssaa;
     return guest_height ? std::max(h / guest_height, 0.1f) : 1.0f;
 }
@@ -314,13 +333,17 @@ void Dispatch(const SDL_Event& e) {
             break;
         case SDL_EVENT_DID_ENTER_FOREGROUND:
             SetForeground(true);
+            host::RefreshWindowPixels();
+            break;
+        case SDL_EVENT_WINDOW_RESIZED:
+        case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+            host::RefreshWindowPixels();
             break;
         case SDL_EVENT_LOW_MEMORY:
             LOGW("app: Android is low on memory");
             break;
         case SDL_EVENT_SENSOR_UPDATE:
         case SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
-            gyro::OnEvent(e);
             return;
         case SDL_EVENT_GAMEPAD_ADDED:
         case SDL_EVENT_GAMEPAD_REMOVED:
@@ -339,7 +362,7 @@ int main(int, char**) {
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
     SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO | SDL_INIT_SENSOR)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO)) {
         char err[512];
         std::snprintf(err, sizeof(err), "SDL_Init failed: %s", SDL_GetError());
         __android_log_print(ANDROID_LOG_FATAL, "MC3DR", "%s", err);
@@ -361,6 +384,8 @@ int main(int, char**) {
         return 1;
     }
 
+    host::RefreshWindowPixels();
+
     app::GameFiles game;
     if (!app::FindGame(game)) {
         logx::SaveCrashReport("Fatal Startup Error", "FindGame could not find default.xbe or ISO in storage folders");
@@ -377,12 +402,17 @@ int main(int, char**) {
     }
     game::Loaded();
 
+    uint64_t next_pump_ms = 0;
     for (;;) {
         SDL_Event e;
         if (SDL_WaitEventTimeout(&e, 100)) {
             Dispatch(e);
             while (SDL_PollEvent(&e)) Dispatch(e);
         }
-        touch::Pump();
+        const uint64_t now_ms = SDL_GetTicks();
+        if (now_ms >= next_pump_ms) {
+            touch::Pump();
+            next_pump_ms = now_ms + 100u;
+        }
     }
 }

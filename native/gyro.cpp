@@ -152,7 +152,9 @@ bool PadGyroActive() {
 void Pump() {
     if (!g_loaded) Load();
     bool want = g_mode != kOff && host::Foreground();
-    g_pad_gyro = PumpPads(want);
+    if (want || g_pad_gyro) {
+        g_pad_gyro = PumpPads(want);
+    }
     if (!g_pad_gyro) {
         g_pad_received_ns = 0;
         g_pad_last_ns = 0;

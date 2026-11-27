@@ -1,10 +1,14 @@
 // HLSL to SPIR-V for the Vulkan renderer, through glslang's HLSL front end, with a cache on disk
 #include "vk_shader.h"
 
+#include <condition_variable>
 #include <cstdio>
+#include <deque>
 #include <fstream>
 #include <mutex>
 #include <regex>
+#include <thread>
+#include <unordered_map>
 
 #include <SPIRV/GlslangToSpv.h>
 #include <glslang/Public/ResourceLimits.h>
@@ -18,8 +22,22 @@ namespace {
 
 std::filesystem::path g_dir;
 std::mutex g_lock;
+std::mutex g_cache_lock;
+std::unordered_map<uint64_t, std::vector<uint32_t>> g_mem_cache;
+
+// Async background writer for packed SPIR-V archive (eliminates Android FUSE open/write stalls on render thread)
+struct PendingSpv {
+    uint64_t hash;
+    std::vector<uint32_t> spirv;
+};
+std::mutex g_io_lock;
+std::condition_variable g_io_cv;
+std::deque<PendingSpv> g_io_queue;
+bool g_io_started = false;
+
 // bumped when the translation below changes, so older cached modules are not used
 constexpr uint32_t kCacheVersion = 2;
+constexpr uint32_t kPackMagic = 0x53505650u;  // 'SPVP'
 
 struct Param {
     std::string type, name;
@@ -107,7 +125,70 @@ std::filesystem::path CachePath(uint64_t hash) {
     return g_dir / name;
 }
 
+std::filesystem::path PackPath() {
+    char name[40];
+    std::snprintf(name, sizeof(name), "shaders_pack_v%u.bin", kCacheVersion);
+    return g_dir / name;
+}
+
+void StartIoThreadLocked() {
+    if (g_io_started || g_dir.empty()) return;
+    g_io_started = true;
+    const std::filesystem::path pack_path = PackPath();
+    std::thread([pack_path] {
+        for (;;) {
+            PendingSpv job;
+            {
+                std::unique_lock lk(g_io_lock);
+                g_io_cv.wait(lk, [] { return !g_io_queue.empty(); });
+                job = std::move(g_io_queue.front());
+                g_io_queue.pop_front();
+            }
+            std::ofstream f(pack_path, std::ios::binary | std::ios::app);
+            if (!f) continue;
+            struct EntryHeader {
+                uint32_t magic;
+                uint32_t word_count;
+                uint64_t hash;
+            } hdr{kPackMagic, uint32_t(job.spirv.size()), job.hash};
+            f.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+            f.write(reinterpret_cast<const char*>(job.spirv.data()), std::streamsize(job.spirv.size() * 4));
+        }
+    }).detach();
+}
+
+void LoadPackIntoMemory() {
+    if (g_dir.empty()) return;
+    std::ifstream f(PackPath(), std::ios::binary);
+    if (!f) return;
+    size_t loaded = 0;
+    struct EntryHeader {
+        uint32_t magic;
+        uint32_t word_count;
+        uint64_t hash;
+    } hdr{};
+    std::lock_guard lk(g_cache_lock);
+    while (f.read(reinterpret_cast<char*>(&hdr), sizeof(hdr))) {
+        if (hdr.magic != kPackMagic || hdr.word_count == 0 || hdr.word_count > (4u << 20)) break;
+        std::vector<uint32_t> spv(hdr.word_count);
+        if (!f.read(reinterpret_cast<char*>(spv.data()), std::streamsize(size_t(hdr.word_count) * 4))) break;
+        g_mem_cache[hdr.hash] = std::move(spv);
+        ++loaded;
+    }
+    if (loaded > 0) {
+        LOGI("[OK] vkshader: preloaded %zu cached SPIR-V shaders from shaders_pack_v%u.bin", loaded, kCacheVersion);
+    }
+}
+
 bool Load(uint64_t hash, std::vector<uint32_t>& spirv) {
+    {
+        std::lock_guard lk(g_cache_lock);
+        auto it = g_mem_cache.find(hash);
+        if (it != g_mem_cache.end()) {
+            spirv = it->second;
+            return true;
+        }
+    }
     if (g_dir.empty()) return false;
     std::ifstream f(CachePath(hash), std::ios::binary | std::ios::ate);
     if (!f) return false;
@@ -115,20 +196,33 @@ bool Load(uint64_t hash, std::vector<uint32_t>& spirv) {
     if (n <= 0 || n % 4) return false;
     spirv.resize(size_t(n) / 4);
     f.seekg(0);
-    return bool(f.read(reinterpret_cast<char*>(spirv.data()), n));
+    if (!f.read(reinterpret_cast<char*>(spirv.data()), n)) return false;
+    // Migrate legacy individual .spv into packed cache asynchronously
+    {
+        std::lock_guard lk(g_cache_lock);
+        g_mem_cache[hash] = spirv;
+    }
+    {
+        std::lock_guard lk(g_io_lock);
+        StartIoThreadLocked();
+        g_io_queue.push_back({hash, spirv});
+    }
+    g_io_cv.notify_one();
+    return true;
 }
 
 void Store(uint64_t hash, const std::vector<uint32_t>& spirv) {
-    if (g_dir.empty()) return;
-    std::filesystem::path p = CachePath(hash), tmp = p;
-    tmp += ".tmp";
     {
-        std::ofstream f(tmp, std::ios::binary);
-        if (!f) return;
-        f.write(reinterpret_cast<const char*>(spirv.data()), std::streamsize(spirv.size() * 4));
+        std::lock_guard lk(g_cache_lock);
+        g_mem_cache[hash] = spirv;
     }
-    std::error_code ec;
-    std::filesystem::rename(tmp, p, ec);
+    if (g_dir.empty()) return;
+    {
+        std::lock_guard lk(g_io_lock);
+        StartIoThreadLocked();
+        g_io_queue.push_back({hash, spirv});
+    }
+    g_io_cv.notify_one();
 }
 
 }  // namespace
@@ -139,6 +233,7 @@ void Init(const std::filesystem::path& cache_dir) {
     std::error_code ec;
     std::filesystem::create_directories(cache_dir, ec);
     g_dir = ec ? std::filesystem::path() : cache_dir;
+    LoadPackIntoMemory();
 }
 
 bool Compile(const std::string& hlsl, const char* entry, Stage stage, uint64_t hash, std::vector<uint32_t>& spirv) {

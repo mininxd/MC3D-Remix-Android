@@ -4,6 +4,7 @@
 // and locks wait for that.
 #include <arm_neon.h>
 #include <pthread.h>
+#include <sys/resource.h>
 
 #include <algorithm>
 #include <chrono>
@@ -26,8 +27,8 @@ namespace gpu {
 
 namespace {
 
-// commands handed over at once, so the render thread keeps close behind and a wait is short
-constexpr uint32_t kBatchCommands = 64;
+// commands handed over at once: larger batch halves mutex/CV wakeups during heavy city frames
+constexpr uint32_t kBatchCommands = 128;
 
 // resource headers the render thread reads: common, data, lock, format, size
 constexpr uint32_t kHeaderBytes = 20;
@@ -422,6 +423,8 @@ private:
 
     void Run() {
         pthread_setname_np(pthread_self(), "render");
+        // Keep the async Vulkan render thread scheduled on big/prime CPU cores for steady 60fps pacing
+        setpriority(PRIO_PROCESS, 0, -4);
         for (;;) {
             Batch* b;
             {
