@@ -17,6 +17,7 @@ X86_EXTERN_FUNC(sub_00192350);
 X86_EXTERN_FUNC(sub_002693C0);
 X86_EXTERN_FUNC(sub_002693D0);
 X86_EXTERN_FUNC(sub_002BF570);
+X86_EXTERN_FUNC(sub_00326FE0);
 
 X86_EXTERN_FUNC(__imp__sub_001923B0);
 X86_EXTERN_FUNC(__imp__sub_00292CD0);
@@ -103,12 +104,50 @@ void ApplyTrafficSettings() {
 
 void ApplyArcadeSettings() {
     if (!g_state.arcade_powerups.load(std::memory_order_relaxed)) return;
-    for (uint32_t ptr_va : {kRaceSettingsPtrAddr, kRaceSettingsShadowPtrAddr, kMenuRaceSettingsPtrAddr}) {
+    for (uint32_t ptr_va : {kRaceSettingsPtrAddr, kRaceSettingsShadowPtrAddr}) {
         const uint32_t rs = safe_mem::Read32(ptr_va, 0u);
         if (rs && safe_mem::CanAccess(rs + 0x1Cu, 4u)) {
             kernel::W32(rs + 0x1Cu, 1u);
         }
     }
+}
+
+void SpawnRandomArcadePowerupsIfEmpty(X86Context& ctx, uint8_t* base) {
+    if (!g_state.arcade_powerups.load(std::memory_order_relaxed)) return;
+    const uint32_t race_mgr = safe_mem::Read32(0x00557EECu, 0u);
+    if (!race_mgr || !safe_mem::CanAccess(race_mgr + 0x80u, 0x10u)) return;
+    const uint16_t cur_count = safe_mem::Read16(race_mgr + 0x80u + 0x08u, 0u);
+    if (cur_count > 0u) return;
+
+    uint32_t course = safe_mem::Read32(race_mgr + 0xB4u, 0u);
+    auto valid_course = [](uint32_t c) {
+        if (!c || !safe_mem::CanAccess(c + 0x110u, 4u)) return false;
+        const float len = safe_mem::ReadF32(c + 0x110u, 0.0f);
+        return len > 1.0f && len < 100000.0f;
+    };
+    if (!valid_course(course)) {
+        course = valid_course(race_mgr) ? race_mgr : 0u;
+    }
+    if (!course) return;
+
+    const uint32_t orig_esp = ctx.esp;
+    const uint32_t orig_eax = ctx.eax;
+    const uint32_t orig_ecx = ctx.ecx;
+    const uint32_t orig_edx = ctx.edx;
+
+    ctx.ecx = race_mgr + 0x80u;
+    X86_PUSH32(0u);
+    X86_PUSH32(course);
+    X86_PUSH32(10u);  // 10 * 5 = 50 randomized pickups along course (Paint-style)
+    X86_PUSH32(0x00029685u);
+    sub_00326FE0(ctx, base);
+
+    ctx.esp = orig_esp;
+    ctx.eax = orig_eax;
+    ctx.ecx = orig_ecx;
+    ctx.edx = orig_edx;
+    LOGI("[OK] cheats: ARCADE spawned randomized powerups (count=%u)",
+         unsigned(safe_mem::Read16(race_mgr + 0x80u + 0x08u, 0u)));
 }
 
 void ApplyUnlockFlags() {
@@ -289,18 +328,28 @@ bool TryHandleCheatCode(const std::string& raw) {
     }
     if (code == "NOCOPS") {
         const bool on = Toggle(g_state.no_cops);
+        if (on) {
+            g_state.more_cops.store(false, std::memory_order_relaxed);
+            g_state.more_more_cops.store(false, std::memory_order_relaxed);
+        }
         LOGI("[OK] cheats: NOCOPS -> %s", on ? "ON" : "OFF");
         return true;
     }
     if (code == "MORECOPS") {
         const bool on = Toggle(g_state.more_cops);
-        if (on) g_state.more_more_cops.store(false, std::memory_order_relaxed);
+        if (on) {
+            g_state.no_cops.store(false, std::memory_order_relaxed);
+            g_state.more_more_cops.store(false, std::memory_order_relaxed);
+        }
         LOGI("[OK] cheats: MORECOPS -> %s", on ? "ON" : "OFF");
         return true;
     }
     if (code == "MOREMORECOPS") {
         const bool on = Toggle(g_state.more_more_cops);
-        if (on) g_state.more_cops.store(false, std::memory_order_relaxed);
+        if (on) {
+            g_state.no_cops.store(false, std::memory_order_relaxed);
+            g_state.more_cops.store(false, std::memory_order_relaxed);
+        }
         LOGI("[OK] cheats: MOREMORECOPS -> %s", on ? "ON" : "OFF");
         return true;
     }
@@ -420,6 +469,7 @@ X86_FUNC(sub_00029337) {
     game::cheats::ApplySuperCopy();
     game::cheats::ApplyPoliceCheats();
     __imp__sub_00029337(ctx, base);
+    game::cheats::SpawnRandomArcadePowerupsIfEmpty(ctx, base);
 }
 
 // Race vehicle spawn/init.
