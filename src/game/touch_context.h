@@ -4,13 +4,14 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 
 namespace game {
 
 // Live game/UI context used by mobile touch controls to show only minimal relevant buttons.
 enum class UiContext : uint8_t {
     MainMenu = 0,        // Frontend, Pause Menu, Options, Save Select -> D-Pad + OK + Back
-    Garage = 1,          // Garage / Showroom -> D-Pad Left/Right + OK + Back
+    Garage = 1,          // Garage / Showroom -> Full 4-way D-Pad + OK + Back + Native Touch Car Orbit
     Gameplay = 2,        // Driving / Racing / Cruise -> Tall Steer/Gas/Brake + dynamic NOS/Turbo/Special + Radio swipe
     Loading = 3,         // Loading screen / Transition -> hide all buttons
     FmvUnskippable = 4,  // Boot Rockstar/Legal intro -> hide all buttons
@@ -51,15 +52,54 @@ struct TouchTelemetry {
     std::atomic<float> speed_kmh{0.0f};      // current car speed in km/h
     std::atomic<bool> is_bike{false};        // true when riding a Chopper (5) or Sport Bike (6)
     std::atomic<bool> race_countdown{false}; // true during pre-race 3-2-1 staging countdown before GO!
-    std::atomic<bool> garage_vertical{false};// true in Garage when submenu list scrolls Up/Down (depth >= 1)
     std::atomic<uint64_t> fmv_frame_ms{0};   // steady clock ms of last active Bink FMV frame
     std::atomic<bool> fmv_unskippable{true}; // true during unskippable boot Rockstar/Legal movie
     std::array<RemapSlot, static_cast<size_t>(GameAction::Count)> bindings{};
+
+    // Native direct-touch Garage polar camera orbit/zoom deltas (bypasses Right-Stick analog simulation)
+    std::mutex garage_orbit_lock;
+    float garage_orbit_dyaw = 0.0f;
+    float garage_orbit_dpitch = 0.0f;
+    float garage_orbit_dzoom = 0.0f;
+    std::atomic<bool> garage_orbit_touching{false};
 };
 
 inline TouchTelemetry& Telemetry() {
     static TouchTelemetry t;
     return t;
+}
+
+inline void AddGarageTouchOrbit(float dyaw, float dpitch, float dzoom) {
+    auto& t = Telemetry();
+    std::lock_guard<std::mutex> lock(t.garage_orbit_lock);
+    t.garage_orbit_dyaw += dyaw;
+    t.garage_orbit_dpitch += dpitch;
+    t.garage_orbit_dzoom += dzoom;
+}
+
+inline void SetGarageTouchActive(bool active) {
+    Telemetry().garage_orbit_touching.store(active, std::memory_order_relaxed);
+}
+
+inline void ClearGarageTouchOrbit() {
+    auto& t = Telemetry();
+    std::lock_guard<std::mutex> lock(t.garage_orbit_lock);
+    t.garage_orbit_dyaw = 0.0f;
+    t.garage_orbit_dpitch = 0.0f;
+    t.garage_orbit_dzoom = 0.0f;
+    t.garage_orbit_touching.store(false, std::memory_order_relaxed);
+}
+
+inline bool ConsumeGarageTouchOrbit(float& dyaw, float& dpitch, float& dzoom) {
+    auto& t = Telemetry();
+    std::lock_guard<std::mutex> lock(t.garage_orbit_lock);
+    dyaw = t.garage_orbit_dyaw;
+    dpitch = t.garage_orbit_dpitch;
+    dzoom = t.garage_orbit_dzoom;
+    t.garage_orbit_dyaw = 0.0f;
+    t.garage_orbit_dpitch = 0.0f;
+    t.garage_orbit_dzoom = 0.0f;
+    return (dyaw != 0.0f || dpitch != 0.0f || dzoom != 0.0f);
 }
 
 void NotifyFmvOpen(const char* name);

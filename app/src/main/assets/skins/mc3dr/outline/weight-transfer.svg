@@ -1,17 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Weight Transfer / 2-Wheel (Outline)">
   <g id="btn-weight-transfer" transform="scale(4)">
-    <circle cx="64" cy="64" r="52" fill="none" stroke="#FFFFFF" stroke-width="6"/>
-    <line x1="33" y1="90" x2="95" y2="90" stroke="#FFFFFF" stroke-width="5.2" stroke-linecap="round"/>
+    <circle cx="64" cy="64" r="52" fill="none" stroke="#FFFFFF" stroke-width="3.2"/>
+    <line x1="33" y1="90" x2="95" y2="90" stroke="#FFFFFF" stroke-width="3.4" stroke-linecap="round"/>
     <g transform="rotate(28 80 83)">
-      <path d="M 49 62 L 53.5 50.5 A 4.5 4.5 0 0 1 57.7 48 L 73.3 48 A 4.5 4.5 0 0 1 77.5 50.5 L 82 62" fill="none" stroke="#FFFFFF" stroke-width="4.9" stroke-linecap="round" stroke-linejoin="round"/>
-      <rect x="44" y="62" width="43" height="15" rx="5" fill="none" stroke="#FFFFFF" stroke-width="4.9"/>
+      <path d="M 49 62 L 53.5 50.5 A 4.5 4.5 0 0 1 57.7 48 L 73.3 48 A 4.5 4.5 0 0 1 77.5 50.5 L 82 62" fill="none" stroke="#FFFFFF" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="44" y="62" width="43" height="15" rx="5" fill="none" stroke="#FFFFFF" stroke-width="3.2"/>
       <rect x="47.5" y="77" width="7.5" height="6.2" rx="2.8" fill="#FFFFFF"/>
       <rect x="76" y="77" width="7.5" height="6.2" rx="2.8" fill="#FFFFFF"/>
       <circle cx="52" cy="69.5" r="2.5" fill="#FFFFFF"/>
       <circle cx="79" cy="69.5" r="2.5" fill="#FFFFFF"/>
     </g>
-    <path d="M 35 77 A 34 34 0 0 1 48 44" fill="none" stroke="#FFFFFF" stroke-width="5" stroke-linecap="round"/>
-    <path d="M 39 43 L 49 43 L 49 53" fill="none" stroke="#FFFFFF" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M 35 77 A 34 34 0 0 1 48 44" fill="none" stroke="#FFFFFF" stroke-width="3.3" stroke-linecap="round"/>
+    <path d="M 39 43 L 49 43 L 49 53" fill="none" stroke="#FFFFFF" stroke-width="3.3" stroke-linecap="round" stroke-linejoin="round"/>
   </g>
 </svg>

@@ -494,7 +494,7 @@ namespace {
 
 using input::NowMs;
 
-enum class Role : uint8_t { None, Button, AnalogStick, RadioSwipe, GarageOrbit, FmvHold, Drag, Pinch, ToolbarDrag };
+enum class Role : uint8_t { None, Button, AnalogStick, RadioSwipe, GarageOrbit, GaragePinch, FmvHold, Drag, Pinch, ToolbarDrag };
 
 // Controller press targets
 enum : int {
@@ -539,10 +539,6 @@ enum class SvgIcon : uint8_t {
     DpadDown,
     DpadLeft,
     DpadRight,
-    DpadUpGarage,
-    DpadDownGarage,
-    DpadLeftGarage,
-    DpadRightGarage,
     Ok,
     Back,
     Count,
@@ -580,17 +576,12 @@ constexpr SvgSpec kSvgSpecs[kSvgIconCount] = {
     {"dpad-down",       192, 192},
     {"dpad-left",       192, 192},
     {"dpad-right",      192, 192},
-    {"dpad-up",         256, 128},
-    {"dpad-down",       256, 128},
-    {"dpad-left",       128, 256},
-    {"dpad-right",      128, 256},
     {"ok",              284, 120},
     {"back",            284, 120},
 };
 
-enum Skin : uint32_t { kOutline = 0, kFilledWhite = 1, kFilledDark = 2, kSkins = 3 };
-constexpr const char* kSkinDirs[kSkins] = {"outline", "filled-white", "filled-dark"};
-constexpr const char* kSkinNames[kSkins] = {"Outline", "Filled White", "Filled Dark"};
+enum Skin : uint32_t { kOutline = 0, kSkins = 1 };
+constexpr const char* kSkinDirs[kSkins] = {"outline"};
 
 enum class When : uint8_t {
     Play,
@@ -753,7 +744,9 @@ struct Finger {
     size_t button = 0;
     float x0 = 0, y0 = 0;
     float x = 0, y = 0;
+    float last_x = 0, last_y = 0;
     uint64_t down_ms = 0;
+    uint64_t last_move_ms = 0;
     bool swipe_fired = false;
     float notch_x = 0;
     float notch_y = 0;
@@ -793,8 +786,11 @@ float g_stick_raw_x = 0.0f;
 float g_stick_raw_y = 0.0f;
 float g_stick_x = 0.0f;
 float g_stick_y = 0.0f;
-float g_orbit_x = 0.0f;
-float g_orbit_y = 0.0f;
+// Native direct-touch Garage orbit fling inertia & 2-finger pinch zoom state (under g_lock)
+float g_orbit_vel_yaw = 0.0f;
+float g_orbit_vel_pitch = 0.0f;
+uint64_t g_orbit_last_ms = 0;
+float g_garage_pinch_dist = 0.0f;
 
 Layout g_layout{};
 uint32_t g_skin = kOutline;
@@ -954,21 +950,6 @@ bool EffectiveAnalogMode() {
     return g_analog_stick;
 }
 
-bool GarageVerticalMode() {
-    return !g_editing && CurrentUiContext() == game::UiContext::Garage &&
-           game::Telemetry().garage_vertical.load(std::memory_order_relaxed);
-}
-
-bool IsGarageHorizontalDpad(size_t i) {
-    return !g_editing && CurrentUiContext() == game::UiContext::Garage && !GarageVerticalMode() &&
-           (i == kIdxDpadLeft || i == kIdxDpadRight);
-}
-
-bool IsGarageVerticalDpad(size_t i) {
-    return !g_editing && CurrentUiContext() == game::UiContext::Garage && GarageVerticalMode() &&
-           (i == kIdxDpadUp || i == kIdxDpadDown);
-}
-
 bool ButtonShown(size_t i) {
     const Button& b = kButtons[i];
     if (g_editing) {
@@ -988,12 +969,6 @@ bool ButtonShown(size_t i) {
     // Exact NFSU2 hide-all mode: hide every touch button EXCEPT the top-right Settings button
     if (g_controls_hidden && i != kIdxEditBtn) {
         return false;
-    }
-    if (ctx == game::UiContext::Garage) {
-        // Garage dynamically swaps Left/Right (1:2) <-> Up/Down (2:1) based on active menu orientation
-        const bool vert = game::Telemetry().garage_vertical.load(std::memory_order_relaxed);
-        if (i == kIdxDpadUp || i == kIdxDpadDown) return vert;
-        if (i == kIdxDpadLeft || i == kIdxDpadRight) return !vert;
     }
     const bool analog = EffectiveAnalogMode();
     switch (b.when) {
@@ -1026,33 +1001,10 @@ bool ButtonShown(size_t i) {
 void ButtonRect(size_t i, float& x0, float& y0, float& x1, float& y1) {
     const float w = Width();
     const float h = Height();
-    float cx = g_layout[i].x * w;
-    float cy = g_layout[i].y * h;
-    float half_h = g_layout[i].r * g_scale * h;
-    float aspect_wh = kButtons[i].w_over_h;
-
-    if (IsGarageHorizontalDpad(i)) {
-        // Garage Horizontal mode (Depth 0): 1:2 W:H Left & Right side-by-side at D-Pad center
-        const float mid_x = 0.5f * (g_layout[kIdxDpadLeft].x + g_layout[kIdxDpadRight].x) * w;
-        const float mid_y = 0.5f * (g_layout[kIdxDpadUp].y + g_layout[kIdxDpadDown].y) * h;
-        const float base_r = g_layout[kIdxDpadLeft].r * g_scale * h;
-        aspect_wh = 0.50f;
-        half_h = base_r * 2.0f;  // 1:2 tall (width = 2*base_r, height = 4*base_r)
-        const float half_w = half_h * aspect_wh;  // = base_r
-        cx = mid_x + (i == kIdxDpadLeft ? -half_w * 1.16f : half_w * 1.16f);
-        cy = mid_y;
-    } else if (IsGarageVerticalDpad(i)) {
-        // Garage Vertical mode (Depth >= 1): 2:1 W:H Up & Down stacked top-down (exact transpose of 1:2!)
-        const float mid_x = 0.5f * (g_layout[kIdxDpadLeft].x + g_layout[kIdxDpadRight].x) * w;
-        const float mid_y = 0.5f * (g_layout[kIdxDpadUp].y + g_layout[kIdxDpadDown].y) * h;
-        const float base_r = g_layout[kIdxDpadLeft].r * g_scale * h;
-        aspect_wh = 2.0f;
-        half_h = base_r;         // 2:1 wide (width = 4*base_r, height = 2*base_r -> identical area!)
-        cx = mid_x;
-        cy = mid_y + (i == kIdxDpadUp ? -half_h * 1.18f : half_h * 1.18f);
-    }
-
-    const float half_w = half_h * aspect_wh;
+    const float cx = g_layout[i].x * w;
+    const float cy = g_layout[i].y * h;
+    const float half_h = g_layout[i].r * g_scale * h;
+    const float half_w = half_h * kButtons[i].w_over_h;
     x0 = cx - half_w;
     y0 = cy - half_h;
     x1 = cx + half_w;
@@ -1384,9 +1336,9 @@ void FingerDown(SDL_FingerID id, float x, float y) {
 
     Finger f;
     f.id = id;
-    f.x0 = f.x = x;
-    f.y0 = f.y = y;
-    f.down_ms = now;
+    f.x0 = f.x = f.last_x = x;
+    f.y0 = f.y = f.last_y = y;
+    f.down_ms = f.last_move_ms = now;
     if (g_editing) {
         EditDown(f, x, y);
         g_fingers.push_back(f);
@@ -1419,8 +1371,24 @@ void FingerDown(SDL_FingerID id, float x, float y) {
         const float w = Width();
         const float h = Height();
         if (ctx == game::UiContext::Garage) {
-            // #2 UX: 1-finger drag anywhere in open car viewport orbits garage camera (Right Stick)
-            f.role = Role::GarageOrbit;
+            // Native 1:1 direct-touch Garage car rotation (or 2-finger pinch-to-zoom!)
+            const Finger* existing_orbit = nullptr;
+            for (const Finger& o : g_fingers) {
+                if (o.role == Role::GarageOrbit) {
+                    existing_orbit = &o;
+                    break;
+                }
+            }
+            if (existing_orbit != nullptr) {
+                f.role = Role::GaragePinch;
+                g_garage_pinch_dist = std::max(std::hypot(x - existing_orbit->x, y - existing_orbit->y), 1.0f);
+                g_orbit_vel_yaw = g_orbit_vel_pitch = 0.0f;
+            } else {
+                f.role = Role::GarageOrbit;
+                g_orbit_vel_yaw = g_orbit_vel_pitch = 0.0f;
+                g_orbit_last_ms = now;
+                game::SetGarageTouchActive(true);
+            }
         } else if (ctx == game::UiContext::Gameplay &&
                    x >= w * 0.30f && x <= w * 0.70f && y >= h * 0.72f) {
             f.role = Role::RadioSwipe;
@@ -1558,18 +1526,45 @@ void FingerMove(SDL_FingerID id, float x, float y) {
                 g_radio_toast_until = now + kToastMs;
             }
         }
-        if (f.role == Role::GarageOrbit) {
-            // #2 UX: Smooth 1-finger garage orbit camera drag -> Right Stick (rx / ry)
-            const float dx = x - f.x0;
-            const float dy = y - f.y0;
-            if (std::hypot(dx, dy) > h * 0.012f) {
-                const float max_x = w * 0.14f;
-                const float max_y = h * 0.18f;
-                g_orbit_x = std::clamp(dx / max_x, -1.0f, 1.0f);
-                g_orbit_y = std::clamp(-dy / max_y, -1.0f, 1.0f);
-                // Trailing anchor so reversing orbit direction responds instantly
-                if (std::fabs(dx) > max_x) f.x0 = x - std::copysign(max_x, dx);
-                if (std::fabs(dy) > max_y) f.y0 = y - std::copysign(max_y, dy);
+        if (f.role == Role::GarageOrbit || f.role == Role::GaragePinch) {
+            const Finger* pinch_other = nullptr;
+            for (const Finger& o : g_fingers) {
+                if (&o != &f && (o.role == Role::GarageOrbit || o.role == Role::GaragePinch)) {
+                    pinch_other = &o;
+                    break;
+                }
+            }
+            if (pinch_other != nullptr) {
+                // 2-finger pinch-to-zoom directly drives MC3D's garage FOV/zoom
+                const float dist = std::max(std::hypot(f.x - pinch_other->x, f.y - pinch_other->y), 1.0f);
+                if (g_garage_pinch_dist > 1.0f) {
+                    const float norm_delta = (dist - g_garage_pinch_dist) / std::max(std::min(w, h), 1.0f);
+                    game::AddGarageTouchOrbit(0.0f, 0.0f, norm_delta * 42.0f);
+                }
+                g_garage_pinch_dist = dist;
+                f.last_x = x;
+                f.last_y = y;
+                f.last_move_ms = now;
+            } else if (f.role == Role::GarageOrbit) {
+                // 1-finger 1:1 native touch car rotation directly into MC3D's polar camera angles!
+                const float dx = x - f.last_x;
+                const float dy = y - f.last_y;
+                const float dt_sec = std::clamp(float(now > f.last_move_ms ? (now - f.last_move_ms) : 8u) * 0.001f, 0.004f, 0.08f);
+                f.last_x = x;
+                f.last_y = y;
+                f.last_move_ms = now;
+
+                const float dyaw = (dx / std::max(w, 1.0f)) * 4.4f;
+                const float dpitch = (dy / std::max(h, 1.0f)) * 2.0f;
+                if (std::fabs(dyaw) > 1e-5f || std::fabs(dpitch) > 1e-5f) {
+                    game::AddGarageTouchOrbit(dyaw, dpitch, 0.0f);
+                    // Smoothly track release fling velocity (rad/s) for natural mobile coasting
+                    const float inst_vy = std::clamp(dyaw / dt_sec, -10.0f, 10.0f);
+                    const float inst_vp = std::clamp(dpitch / dt_sec, -5.0f, 5.0f);
+                    g_orbit_vel_yaw = g_orbit_vel_yaw * 0.45f + inst_vy * 0.55f;
+                    g_orbit_vel_pitch = g_orbit_vel_pitch * 0.45f + inst_vp * 0.55f;
+                    g_orbit_last_ms = now;
+                }
             }
         }
     }
@@ -1579,11 +1574,16 @@ void FingerMove(SDL_FingerID id, float x, float y) {
 void FingerUp(SDL_FingerID id) {
     bool open_editor = false;
     bool toggle_mode = false;
+    const uint64_t now = NowMs();
     for (const Finger& f : g_fingers) {
         if (f.id != id || g_editing) continue;
         if (f.role == Role::Button && HitButton(f.x, f.y) == f.button) {
             if (f.button == kIdxModeSwap) toggle_mode = true;
             else if (f.button == kIdxEditBtn) open_editor = true;
+        }
+        // If finger paused still for > 90ms before lifting, stop momentum cleanly (no unwanted drift)
+        if (f.role == Role::GarageOrbit && now > f.last_move_ms + 90u) {
+            g_orbit_vel_yaw = g_orbit_vel_pitch = 0.0f;
         }
     }
 
@@ -1601,14 +1601,21 @@ void FingerUp(SDL_FingerID id) {
         g_stick_raw_x = g_stick_raw_y = g_stick_x = g_stick_y = 0.0f;
     }
     if (std::none_of(g_fingers.begin(), g_fingers.end(),
-                     [](const Finger& f) { return f.role == Role::GarageOrbit; })) {
-        g_orbit_x = g_orbit_y = 0.0f;
+                     [](const Finger& f) { return f.role == Role::GaragePinch; })) {
+        g_garage_pinch_dist = 0.0f;
+    }
+    if (std::none_of(g_fingers.begin(), g_fingers.end(),
+                     [](const Finger& f) { return f.role == Role::GarageOrbit || f.role == Role::GaragePinch; })) {
+        game::SetGarageTouchActive(false);
+        g_orbit_last_ms = now;
     }
 
     if (open_editor) {
         g_fingers.clear();
         g_stick_raw_x = g_stick_raw_y = g_stick_x = g_stick_y = 0.0f;
-        g_orbit_x = g_orbit_y = 0.0f;
+        g_orbit_vel_yaw = g_orbit_vel_pitch = 0.0f;
+        g_garage_pinch_dist = 0.0f;
+        game::ClearGarageTouchOrbit();
         Recount();
         OpenEditor();
         return;
@@ -1816,43 +1823,6 @@ void EmitTextCentered(std::vector<Quad>& out, float cx, float cy, float line_h,
     }
 }
 
-// Dynamic editor UI palette synced with active Button Style (Outline / Filled White / Filled Dark)
-struct EditorTheme {
-    float pill_r, pill_g, pill_b, pill_a;
-    float pill_br, pill_bg, pill_bb, pill_ba;
-    float pill_bw;
-    float pill_tr, pill_tg, pill_tb;
-    float act_r, act_g, act_b, act_a;
-    float act_br, act_bg, act_bb, act_ba;
-    float act_tr, act_tg, act_tb;
-    float dock_r, dock_g, dock_b, dock_a;
-    float dock_br, dock_bg, dock_bb, dock_ba;
-    float dock_tr, dock_tg, dock_tb;
-};
-
-EditorTheme EditorThemeForSkin(uint32_t skin, float th) {
-    if (skin == kFilledWhite) {
-        return EditorTheme{
-            0.96f, 0.97f, 0.99f, 0.92f,  1.00f, 1.00f, 1.00f, 0.98f,  th * 0.6f,  0.07f, 0.08f, 0.11f,
-            0.09f, 0.10f, 0.13f, 0.96f,  1.00f, 1.00f, 1.00f, 0.95f,              1.00f, 1.00f, 1.00f,
-            0.96f, 0.97f, 1.00f, 0.24f,  1.00f, 1.00f, 1.00f, 0.55f,              1.00f, 1.00f, 1.00f,
-        };
-    }
-    if (skin == kFilledDark) {
-        return EditorTheme{
-            0.08f, 0.09f, 0.12f, 0.92f,  1.00f, 1.00f, 1.00f, 0.20f,  th * 0.7f,  0.97f, 0.98f, 1.00f,
-            0.97f, 0.98f, 1.00f, 0.96f,  1.00f, 1.00f, 1.00f, 1.00f,              0.07f, 0.08f, 0.11f,
-            0.05f, 0.06f, 0.08f, 0.68f,  1.00f, 1.00f, 1.00f, 0.16f,              0.96f, 0.97f, 1.00f,
-        };
-    }
-    // kOutline: sleek transparent capsules with crisp pure-white vector borders matching outline/*.svg
-    return EditorTheme{
-        0.04f, 0.05f, 0.07f, 0.24f,  1.00f, 1.00f, 1.00f, 0.94f,  th * 1.15f, 1.00f, 1.00f, 1.00f,
-        1.00f, 1.00f, 1.00f, 0.96f,  1.00f, 1.00f, 1.00f, 1.00f,              0.06f, 0.07f, 0.10f,
-        0.04f, 0.05f, 0.07f, 0.40f,  1.00f, 1.00f, 1.00f, 0.45f,              1.00f, 1.00f, 1.00f,
-    };
-}
-
 // ============================================================================
 // Live SVG Loader & Aspect-Preserving Container Expansion for 1:2 / 2:3 Pedals
 // ============================================================================
@@ -1882,20 +1852,6 @@ void AdaptRectangularSvg(SvgIcon icon, std::string& svg) {
         ReplaceAll(svg, "x=\"12\" y=\"24\" width=\"104\" height=\"80\" rx=\"22\"",
                         "x=\"12\" y=\"12\" width=\"104\" height=\"168\" rx=\"24\"");
         ReplaceAll(svg, "<rect x=\"31\" ", "<rect transform=\"translate(0 32)\" x=\"31\" ");
-    } else if (icon == SvgIcon::DpadLeftGarage || icon == SvgIcon::DpadRightGarage) {
-        ReplaceAll(svg, "viewBox=\"0 0 512 512\" width=\"512\" height=\"512\"",
-                        "viewBox=\"0 0 512 1024\" width=\"512\" height=\"1024\"");
-        ReplaceAll(svg, "width=\"512\" height=\"512\"", "width=\"512\" height=\"1024\"");
-        ReplaceAll(svg, "x=\"12\" y=\"12\" width=\"104\" height=\"104\"",
-                        "x=\"12\" y=\"12\" width=\"104\" height=\"232\"");
-        ReplaceAll(svg, "<path ", "<path transform=\"translate(0 64)\" ");
-    } else if (icon == SvgIcon::DpadUpGarage || icon == SvgIcon::DpadDownGarage) {
-        ReplaceAll(svg, "viewBox=\"0 0 512 512\" width=\"512\" height=\"512\"",
-                        "viewBox=\"0 0 1024 512\" width=\"1024\" height=\"512\"");
-        ReplaceAll(svg, "width=\"512\" height=\"512\"", "width=\"1024\" height=\"512\"");
-        ReplaceAll(svg, "x=\"12\" y=\"12\" width=\"104\" height=\"104\"",
-                        "x=\"12\" y=\"12\" width=\"232\" height=\"104\"");
-        ReplaceAll(svg, "<path ", "<path transform=\"translate(64 0)\" ");
     }
 }
 
@@ -1922,12 +1878,6 @@ bool ReadSvgFile(const char* skin_dir, const char* icon_name, std::string& out) 
 
 SvgIcon ActiveIconForButton(size_t i) {
     const Button& b = kButtons[i];
-    if (IsGarageHorizontalDpad(i)) {
-        return (i == kIdxDpadLeft) ? SvgIcon::DpadLeftGarage : SvgIcon::DpadRightGarage;
-    }
-    if (IsGarageVerticalDpad(i)) {
-        return (i == kIdxDpadUp) ? SvgIcon::DpadUpGarage : SvgIcon::DpadDownGarage;
-    }
     if (b.when == When::PlaySpecial && !g_editing) {
         const int8_t st = game::Telemetry().special_type.load(std::memory_order_relaxed);
         if (st == 0) return SvgIcon::SpecialZone;
@@ -1935,6 +1885,34 @@ SvgIcon ActiveIconForButton(size_t i) {
         if (st == 2) return SvgIcon::SpecialRoar;
     }
     return b.icon;
+}
+
+void StepGarageOrbitInertiaLocked(uint64_t now) {
+    if (g_editing || CurrentUiContext() != game::UiContext::Garage) {
+        if (g_orbit_vel_yaw != 0.0f || g_orbit_vel_pitch != 0.0f) {
+            g_orbit_vel_yaw = g_orbit_vel_pitch = 0.0f;
+            game::ClearGarageTouchOrbit();
+        }
+        return;
+    }
+    const bool holding = std::any_of(g_fingers.begin(), g_fingers.end(), [](const Finger& f) {
+        return f.role == Role::GarageOrbit || f.role == Role::GaragePinch;
+    });
+    if (holding) {
+        g_orbit_last_ms = now;
+        return;
+    }
+    if (std::fabs(g_orbit_vel_yaw) < 0.01f && std::fabs(g_orbit_vel_pitch) < 0.01f) {
+        g_orbit_vel_yaw = g_orbit_vel_pitch = 0.0f;
+        return;
+    }
+    const uint64_t dt_ms = (g_orbit_last_ms != 0 && now > g_orbit_last_ms) ? std::min<uint64_t>(now - g_orbit_last_ms, 50u) : 16u;
+    g_orbit_last_ms = now;
+    const float dt = float(dt_ms) * 0.001f;
+    game::AddGarageTouchOrbit(g_orbit_vel_yaw * dt, g_orbit_vel_pitch * dt, 0.0f);
+    const float decay = std::exp(-dt * 5.5f);
+    g_orbit_vel_yaw *= decay;
+    g_orbit_vel_pitch *= decay;
 }
 
 void UpdateFmvHoldLocked(uint64_t now) {
@@ -2177,13 +2155,8 @@ void Apply(int port, input::Pad& pad) {
         ApplyRemappedAction(pad, game::GameAction::WeightTransfer, 0, kAnalogB);
     }
 
-    // #2 UX: 1-finger Garage orbit camera drag -> Right Stick (rx / ry)
-    if (ctx == game::UiContext::Garage &&
-        (std::fabs(g_orbit_x) > 0.02f || std::fabs(g_orbit_y) > 0.02f)) {
-        pad.rx = int16_t(std::lround(std::clamp(g_orbit_x, -1.0f, 1.0f) * 32767.0f));
-        pad.ry = int16_t(std::lround(std::clamp(g_orbit_y, -1.0f, 1.0f) * 32767.0f));
-        used = true;
-    }
+    // Native direct-touch Garage car orbit fling inertia (directly drives polar camera angles, never pad.rx/ry!)
+    StepGarageOrbitInertiaLocked(now);
 
     // Swipe gestures: during Gameplay, Radio Left/Right follow remapped MUSIC_DOWN / MUSIC_UP!
     for (int bit = 0; bit < 4; ++bit) {
@@ -2336,53 +2309,42 @@ void BuildOverlay(std::vector<Quad>& out) {
                                   : vis;
 
         if (i == kIdxSteerStick) {
-            // Native SDF Analog Steering Thumbstick matching active Button Style + NFSU2 lime active glow
+            // Native SDF Analog Steering Thumbstick (sleek thin Outline style + NFSU2 lime active glow)
             const float rad = std::min(bw, bh) * 0.5f;
-            const float fill_r = (skin == kFilledWhite) ? 0.96f : (skin == kFilledDark ? 0.08f : 0.04f);
-            const float fill_g = (skin == kFilledWhite) ? 0.97f : (skin == kFilledDark ? 0.09f : 0.05f);
-            const float fill_b = (skin == kFilledWhite) ? 0.99f : (skin == kFilledDark ? 0.12f : 0.07f);
-            const float fill_a = (skin == kOutline ? 0.22f : 0.42f) * eff_vis;
             const float rim_r = stick_active ? 0.784f : 1.0f;
             const float rim_g = stick_active ? 0.941f : 1.0f;
             const float rim_b = stick_active ? 0.533f : 1.0f;
-            const float rim_a = (stick_active ? 0.98f : 0.86f) * eff_vis;
-            EmitPanel(out, x0, y0, x1, y1, fill_r, fill_g, fill_b, fill_a, rad,
-                      stick_active ? th * 1.45f : th * 1.15f, rim_r, rim_g, rim_b, rim_a);
+            const float rim_a = (stick_active ? 0.98f : 0.88f) * eff_vis;
+            EmitPanel(out, x0, y0, x1, y1, 0.04f, 0.05f, 0.07f, 0.20f * eff_vis, rad,
+                      stick_active ? th * 0.92f : th * 0.72f, rim_r, rim_g, rim_b, rim_a);
 
             // Subtle directional guide chevrons inside the ring (adds ^ / v on bikes for wheelie/tuck)
-            const float chev_a = (skin == kFilledWhite ? 0.55f : 0.50f) * eff_vis;
-            const float chev_c = (skin == kFilledWhite) ? 0.12f : 1.0f;
-            EmitTextCentered(out, cx - rad * 0.68f, cy, rad * 0.34f, chev_c, chev_c, chev_c, chev_a, "<");
-            EmitTextCentered(out, cx + rad * 0.68f, cy, rad * 0.34f, chev_c, chev_c, chev_c, chev_a, ">");
+            const float chev_a = 0.50f * eff_vis;
+            EmitTextCentered(out, cx - rad * 0.68f, cy, rad * 0.34f, 1.0f, 1.0f, 1.0f, chev_a, "<");
+            EmitTextCentered(out, cx + rad * 0.68f, cy, rad * 0.34f, 1.0f, 1.0f, 1.0f, chev_a, ">");
             if (is_bike) {
-                EmitTextCentered(out, cx, cy - rad * 0.66f, rad * 0.30f, chev_c, chev_c, chev_c, chev_a, "^");
-                EmitTextCentered(out, cx, cy + rad * 0.66f, rad * 0.30f, chev_c, chev_c, chev_c, chev_a, "v");
+                EmitTextCentered(out, cx, cy - rad * 0.66f, rad * 0.30f, 1.0f, 1.0f, 1.0f, chev_a, "^");
+                EmitTextCentered(out, cx, cy + rad * 0.66f, rad * 0.30f, 1.0f, 1.0f, 1.0f, chev_a, "v");
             }
 
             // Animated inner thumb knob (2D movement for both steering & bike wheelie/tuck!)
             const float knob_r = rad * 0.42f;
             const float kx = cx + (editing ? 0.0f : g_stick_raw_x * (rad - knob_r));
             const float ky = cy + (editing ? 0.0f : g_stick_raw_y * (rad - knob_r));
-            const float kf_r = (skin == kFilledDark) ? 0.14f : 0.96f;
-            const float kf_g = (skin == kFilledDark) ? 0.16f : 0.97f;
-            const float kf_b = (skin == kFilledDark) ? 0.20f : 1.00f;
-            const float kf_a = (skin == kOutline ? (stick_active ? 0.45f : 0.26f) : 0.92f) * eff_vis;
+            const float kf_a = (stick_active ? 0.42f : 0.24f) * eff_vis;
             EmitPanel(out, kx - knob_r, ky - knob_r, kx + knob_r, ky + knob_r,
-                      kf_r, kf_g, kf_b, kf_a, knob_r,
-                      th * 1.25f, rim_r, rim_g, rim_b, std::min(1.0f, eff_vis * 1.05f));
+                      0.96f, 0.97f, 1.00f, kf_a, knob_r,
+                      th * 0.78f, rim_r, rim_g, rim_b, std::min(1.0f, eff_vis * 1.05f));
         } else if (i == kIdxModeSwap || i == kIdxEditBtn) {
-            // Exact NFSU2 top-right circular buttons: Mode Swap (Arrows <-> Analog) & Layout Settings (3 sliders)
+            // Exact NFSU2 top-right circular buttons (sleek thin Outline style)
             const float rad = std::min(dx1 - dx0, dy1 - dy0) * 0.5f;
-            const float fill_r = (skin == kFilledWhite) ? 0.96f : (skin == kFilledDark ? 0.08f : 0.04f);
-            const float fill_g = (skin == kFilledWhite) ? 0.97f : (skin == kFilledDark ? 0.09f : 0.05f);
-            const float fill_b = (skin == kFilledWhite) ? 0.99f : (skin == kFilledDark ? 0.12f : 0.07f);
-            const float fill_a = (skin == kOutline ? (on ? 0.45f : 0.34f) : (on ? 0.95f : 0.80f)) * eff_vis;
-            const float ink_r = on ? 0.784f : (skin == kFilledWhite ? 0.09f : 1.0f);
-            const float ink_g = on ? 0.941f : (skin == kFilledWhite ? 0.10f : 1.0f);
-            const float ink_b = on ? 0.533f : (skin == kFilledWhite ? 0.14f : 1.0f);
-            const float rim_a = (on ? 0.98f : 0.86f) * eff_vis;
-            EmitPanel(out, dx0, dy0, dx1, dy1, fill_r, fill_g, fill_b, fill_a, rad,
-                      th * 1.15f, on ? 0.784f : 1.0f, on ? 0.941f : 1.0f, on ? 0.533f : 1.0f, rim_a);
+            const float fill_a = (on ? 0.42f : 0.28f) * eff_vis;
+            const float ink_r = on ? 0.784f : 1.0f;
+            const float ink_g = on ? 0.941f : 1.0f;
+            const float ink_b = on ? 0.533f : 1.0f;
+            const float rim_a = (on ? 0.98f : 0.88f) * eff_vis;
+            EmitPanel(out, dx0, dy0, dx1, dy1, 0.04f, 0.05f, 0.07f, fill_a, rad,
+                      th * 0.72f, ink_r, ink_g, ink_b, rim_a);
 
             if (i == kIdxModeSwap) {
                 if (EffectiveAnalogMode()) {
@@ -2390,7 +2352,7 @@ void BuildOverlay(std::vector<Quad>& out) {
                     const float outer_r = rad * 0.52f;
                     const float inner_r = rad * 0.20f;
                     EmitPanel(out, cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r,
-                              0, 0, 0, 0, outer_r, th * 1.1f, ink_r, ink_g, ink_b, 0.95f * eff_vis);
+                              0, 0, 0, 0, outer_r, th * 0.72f, ink_r, ink_g, ink_b, 0.95f * eff_vis);
                     EmitPanel(out, cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r,
                               ink_r, ink_g, ink_b, 0.95f * eff_vis, inner_r);
                 } else {
@@ -2610,7 +2572,7 @@ void BuildOverlay(std::vector<Quad>& out) {
 
 bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& out_w, uint32_t& out_h) {
     constexpr uint32_t kAtlasW = 2048;
-    constexpr uint32_t kAtlasH = 3072;
+    constexpr uint32_t kAtlasH = 1536;
     constexpr uint32_t kPad = 4;
 
     rgba.assign(size_t(kAtlasW) * kAtlasH * 4u, 0u);
@@ -2646,7 +2608,7 @@ bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& out_w, uint32_t& out_h) {
                 cur_y += row_h + kPad;
                 row_h = 0;
             }
-            if (cur_y + spec.cell_h + kPad > 2420u) {
+            if (cur_y + spec.cell_h + kPad > 920u) {
                 LOGE("touch: SVG atlas overflow at %s/%s", kSkinDirs[s], spec.file);
                 break;
             }
@@ -2671,12 +2633,12 @@ bool LoadSkin(std::vector<uint8_t>& rgba, uint32_t& out_w, uint32_t& out_h) {
         }
     }
 
-    // Bake anti-aliased proportional Google Roboto font into bottom region (y = 2432..3008)
-    BakeRobotoIntoAtlas(rgba, kAtlasW, kAtlasH, 2432u);
+    // Bake anti-aliased proportional Google Roboto font into bottom region (y = 928..1500)
+    BakeRobotoIntoAtlas(rgba, kAtlasW, kAtlasH, 928u);
 
     out_w = kAtlasW;
     out_h = kAtlasH;
-    LOGI("[OK] touch: rasterized %d SVG icons + Roboto font into %ux%u native Vulkan atlas",
+    LOGI("[OK] touch: rasterized %d outline SVG icons + Roboto font into %ux%u native Vulkan atlas",
          loaded_count, out_w, out_h);
     return loaded_count > 0;
 }
@@ -2721,18 +2683,8 @@ void StepSize(int step) {
     SaveLayout();
 }
 
-const char* SkinName() {
-    std::lock_guard lock(g_lock);
-    EnsureLayout();
-    return kSkinNames[std::min<uint32_t>(g_skin, kSkins - 1)];
-}
-
-void StepSkin(int step) {
-    std::lock_guard lock(g_lock);
-    EnsureLayout();
-    g_skin = (g_skin + (step > 0 ? 1 : kSkins - 1)) % kSkins;
-    SaveLayout();
-}
+const char* SkinName() { return "Outline"; }
+void StepSkin(int) {}
 
 const char* StickModeName() {
     std::lock_guard lock(g_lock);

@@ -38,6 +38,7 @@ X86_EXTERN_FUNC(__imp__sub_00329060);
 X86_EXTERN_FUNC(__imp__sub_0010B320);
 X86_EXTERN_FUNC(__imp__sub_0010B370);
 X86_EXTERN_FUNC(__imp__sub_001422D0);
+X86_EXTERN_FUNC(__imp__sub_001442A0);
 X86_EXTERN_FUNC(__imp__sub_00144C90);
 X86_EXTERN_FUNC(__imp__sub_001474A0);
 X86_EXTERN_FUNC(__imp__sub_0014E300);
@@ -498,17 +499,6 @@ void UpdateTouchTelemetry() {
     float speed_kmh = 0.0f;
     bool is_bike = false;
     bool race_countdown = false;
-    bool garage_vertical = false;
-
-    if (ctx == UiContext::Garage) {
-        // mcGarage ([0x0050F12C]): depth [mcGarage + 0x448] == 0 is top-level horizontal bar (Left/Right);
-        // depth >= 1 (submenus: parts, categories, showroom/garage lists) or popup box scrolls Up/Down!
-        const uint32_t garage = safe_mem::Read32(0x0050F12Cu, 0u);
-        if (garage != 0u) {
-            const int32_t depth = static_cast<int32_t>(safe_mem::Read32(garage + 0x448u, 0u));
-            garage_vertical = (depth >= 1) || menu_visible;
-        }
-    }
 
     if (ctx == UiContext::Gameplay && player_car != 0u) {
         const uint32_t veh_p14 = safe_mem::Read32(player_car + 0x14u, 0u);
@@ -588,7 +578,6 @@ void UpdateTouchTelemetry() {
     tel.speed_kmh.store(speed_kmh, std::memory_order_relaxed);
     tel.is_bike.store(is_bike, std::memory_order_relaxed);
     tel.race_countdown.store(race_countdown, std::memory_order_relaxed);
-    tel.garage_vertical.store(garage_vertical, std::memory_order_relaxed);
 
     // Sync active in-game Controller Configuration / Custom Remap table so remapped controls
     // automatically mirror onto touch buttons (sub_002693D0 -> [profile_mgr + 0x114 + 0x18], table @ 0x00558848).
@@ -845,3 +834,115 @@ X86_FUNC(sub_00144C90) {
 
 X86_FUNC(sub_001474A0) { game::cheats::RunWithZeroCost(ctx, base, __imp__sub_001474A0); }
 X86_FUNC(sub_0014E300) { game::cheats::RunWithZeroCost(ctx, base, __imp__sub_0014E300); }
+
+// Native direct-touch Garage Polar Camera orbit & pinch-zoom hook on mcGarage::UpdateCameraOrbit()
+// (__thiscall void sub_001442A0() [ret]). Directly updates [cam + 0xA0] (yaw), [cam + 0xA4] (pitch),
+// and [garage + 0x92C] (FOV zoom) right before cam->Update(), bypassing Right-Stick analog simulation.
+X86_FUNC(sub_001442A0) {
+    const uint32_t garage = ctx.ecx;
+    float dyaw = 0.0f, dpitch = 0.0f, dzoom = 0.0f;
+    const bool has_delta = game::ConsumeGarageTouchOrbit(dyaw, dpitch, dzoom);
+    const bool touching = game::Telemetry().garage_orbit_touching.load(std::memory_order_relaxed);
+
+    if (garage && (touching || has_delta)) {
+        // Keep MC3D's idle showcase timer [0x004B23F0] reset while touch orbiting
+        if (game::safe_mem::CanAccess(0x004B23F0u, 4u)) {
+            kernel::W32(0x004B23F0u, 0u);
+        }
+        // Cancel idle auto-showcase mode ([garage + 0x9FD]) immediately on touch drag
+        if (touching && game::safe_mem::CanAccess(garage + 0x9FCu, 2u) &&
+            game::safe_mem::Read8(garage + 0x9FDu, 0u) != 0u) {
+            *static_cast<uint8_t*>(kernel::HostPtr(garage + 0x9FCu)) = 1u;
+            *static_cast<uint8_t*>(kernel::HostPtr(garage + 0x9FDu)) = 0u;
+            if (game::safe_mem::CanAccess(garage + 0x708u, 1u)) {
+                *static_cast<uint8_t*>(kernel::HostPtr(garage + 0x708u)) = 0u;
+            }
+        }
+    }
+
+    __imp__sub_001442A0(ctx, base);
+
+    if (!garage || !has_delta) return;
+    if (game::safe_mem::Read8(garage + 0x708u, 0u) != 0u) return;
+
+    const uint32_t cam = game::safe_mem::Read32(garage + 0x0Cu, 0u);
+    if (!cam || !game::safe_mem::CanAccess(cam + 0x84u, 0x28u)) return;
+
+    auto read_f32 = [](uint32_t va, float def) -> float {
+        if (!game::safe_mem::CanAccess(va, 4u)) return def;
+        const uint32_t bits = kernel::R32(va);
+        float v = def;
+        std::memcpy(&v, &bits, sizeof(v));
+        return std::isfinite(v) ? v : def;
+    };
+    auto write_f32 = [](uint32_t va, float v) {
+        if (!std::isfinite(v) || !game::safe_mem::CanAccess(va, 4u)) return;
+        uint32_t bits = 0u;
+        std::memcpy(&bits, &v, sizeof(bits));
+        kernel::W32(va, bits);
+    };
+
+    const uint32_t cam_mode = game::safe_mem::Read32(garage + 0x4D4u, 10u);
+
+    // 1. Direct 1:1 Yaw ([cam + 0xA0]) matching MC3D's exact sign & mode bounds (sub_001442A0:27477-27565)
+    if (std::fabs(dyaw) > 1e-6f) {
+        const float yaw_sign = (read_f32(0x0044D068u, 1.0f) < 0.0f) ? -1.0f : 1.0f;
+        float yaw = read_f32(cam + 0xA0u, 0.0f) + dyaw * yaw_sign;
+        if (cam_mode == 10u) {
+            constexpr float kPi = 3.14159265f;
+            constexpr float kTwoPi = 6.28318530f;
+            while (yaw > kPi) yaw -= kTwoPi;
+            while (yaw < -kPi) yaw += kTwoPi;
+        } else {
+            const float base_yaw = read_f32(garage + 0x7A8u, yaw);
+            const float span = std::fabs(read_f32(0x0044DB28u, 1.2f));
+            yaw = std::clamp(yaw, base_yaw - span, base_yaw + span);
+        }
+        write_f32(cam + 0xA0u, yaw);
+    }
+
+    // 2. Direct 1:1 Pitch ([cam + 0xA4]) with MC3D's exact bounds & floor clearance check (sub_001442A0:27585-27680)
+    if (std::fabs(dpitch) > 1e-6f) {
+        const float old_pitch = read_f32(cam + 0xA4u, 0.25f);
+        float pitch = old_pitch + dpitch;
+
+        const float max_pitch = std::min(read_f32(0x004549FCu, 1.2f), read_f32(0x00459D50u, 1.2f));
+        const float min_pitch = (cam_mode == 6u || cam_mode == 7u) ? 0.0f : read_f32(0x00459D54u, 0.02f);
+        if (max_pitch >= min_pitch) {
+            pitch = std::clamp(pitch, min_pitch, max_pitch);
+        }
+
+        const float dist = read_f32(cam + 0x9Cu, 4.0f);
+        const uint32_t car_idx = game::safe_mem::Read32(garage + 0x72Cu, 0u);
+        if (cam_mode < 20u && car_idx < 4u) {
+            const float base_y = read_f32(garage + cam_mode * 12u + 0x5F0u, 0.0f);
+            const uint32_t car = game::safe_mem::Read32(garage + car_idx * 4u + 0x714u, 0u);
+            const uint32_t node = car ? game::safe_mem::Read32(car + 0x1Cu, 0u) : 0u;
+            if (node != 0u) {
+                const float floor_y = read_f32(node + 0x38u, 0.0f) + read_f32(0x00459D4Cu, 0.25f);
+                if (std::sin(pitch) * dist + base_y <= floor_y) {
+                    pitch = old_pitch;
+                }
+            }
+        }
+        const float min_guard = read_f32(0x00459D48u, 0.01f);
+        if (pitch < min_guard) {
+            pitch = read_f32(0x0045537Cu, min_guard);
+        }
+        write_f32(cam + 0xA4u, pitch);
+    }
+
+    // 3. Direct 2-finger pinch-to-zoom ([garage + 0x92C] -> [cam + 0x84])
+    if (std::fabs(dzoom) > 1e-6f && game::safe_mem::CanAccess(garage + 0x924u, 0x0Cu)) {
+        const float cur_fov = read_f32(garage + 0x92Cu, 45.0f);
+        const float min_fov = std::min(read_f32(0x0044A7F0u, 22.0f), read_f32(0x00448E0Cu, 22.0f));
+        const float max_fov = read_f32(0x0044CE8Cu, 65.0f);
+        if (max_fov > min_fov) {
+            const float next_fov = std::clamp(cur_fov - dzoom, min_fov, max_fov);
+            write_f32(garage + 0x92Cu, next_fov);
+            const float base_fov = read_f32(garage + 0x924u, next_fov);
+            const float blend = read_f32(0x0044AAECu, 0.0f);
+            write_f32(cam + 0x84u, next_fov + (base_fov - next_fov) * blend);
+        }
+    }
+}
