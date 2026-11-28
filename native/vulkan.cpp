@@ -239,12 +239,14 @@ float3 ApplyGamma(float3 c) {
     if (use_hdr) {
         s += R"(
 float3 Tone(float3 c) {
-    float l = dot(c, float3(0.2126, 0.7152, 0.0722));
-    float shadow = 1.0 - smoothstep(0.0, 0.8, l);
-    c = lerp(l, c, 1.0 + shadow);
-    float3 mapped = pow(max(c / (c + 1.0), 1e-6), 1.0 / 2.2);
-    c = lerp(c, mapped, 0.8);
-    return saturate(c * (1.0 - shadow * 0.5));
+    float3 lin = pow(max(c, 1e-5), 2.2);
+    float3 x = lin * 0.68;
+    float3 aces = (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14);
+    float lum = dot(lin, float3(0.2126, 0.7152, 0.0722));
+    float3 mapped = lerp(aces, min(lin, 1.0), smoothstep(0.50, 1.00, lum) * 0.72);
+    float3 out_c = pow(max(saturate(mapped), 1e-5), 1.0 / 2.2);
+    float out_l = dot(out_c, float3(0.2126, 0.7152, 0.0722));
+    return saturate(lerp(float3(out_l, out_l, out_l), out_c, 1.12));
 }
 )";
     } else {
@@ -1427,13 +1429,38 @@ void KeyRasterizer(const State& s, const Assembled& a, PsoKey& k) {
 
 constexpr float kAlphaTestAlways = 7.0f;
 
-// FOG off leaves the constants as fog disabled: the shaders' fog factor is then 1, the colour as drawn
-void FillFogConstants(const State& s, DrawConstants& c) {
+// FOG off leaves the constants as fog disabled: the shaders' fog factor is then 1, the colour as drawn.
+// Under a vertex program with table mode NONE, oFog is already a [0, 1] blend factor (1 = clear, 0 = full fog).
+void FillFogConstants(const State& s, bool vertex_program, bool writes_ofog, DrawConstants& c) {
+    constexpr uint32_t kFogTableNone = 0;
+    constexpr uint32_t kFogTableExp = 1;
+    constexpr uint32_t kFogTableExp2 = 2;
+    constexpr uint32_t kFogTableLinear = 3;
     if (!s.rs[kRsFogEnable] || !game::Opt().fog) return;
-    c.fog[0] = Bits(s.rs[kRsFogStart]);
-    c.fog[1] = Bits(s.rs[kRsFogEnd]);
-    c.fog[2] = Bits(s.rs[kRsFogDensity]);
-    c.fog[3] = float(s.rs[kRsFogTableMode]);
+    const uint32_t mode = s.rs[kRsFogTableMode];
+    if (vertex_program && mode == kFogTableNone) {
+        if (!writes_ofog) return;
+        c.fog[0] = 1.0f;
+        c.fog[1] = 0.0f;
+        c.fog[2] = 0.0f;
+        c.fog[3] = float(kFogTableLinear);
+        return;
+    }
+    if (mode == kFogTableNone) return;
+    const float start = Bits(s.rs[kRsFogStart]);
+    const float end = Bits(s.rs[kRsFogEnd]);
+    const float density = Bits(s.rs[kRsFogDensity]);
+    if (mode == kFogTableLinear) {
+        if (!std::isfinite(start) || !std::isfinite(end) || std::fabs(end - start) < 1e-6f) return;
+    } else if (mode == kFogTableExp || mode == kFogTableExp2) {
+        if (!std::isfinite(density) || density <= 0.0f) return;
+    } else {
+        return;
+    }
+    c.fog[0] = start;
+    c.fog[1] = end;
+    c.fog[2] = density;
+    c.fog[3] = float(mode);
 }
 
 void FillSurfaceConstants(const State& s, GuestExtent size, DrawConstants& c) {
@@ -1638,6 +1665,7 @@ bool IsFixedDrawOutsideFrustum(const Assembled& a, const float full[16],
 struct VsMeta {
     uint16_t max_vsc_regs = 192;
     int16_t mvp_cbase = -1;  // >= 0 when direct screen-space 4x4 DP4 MVP on v0 + rcp(w) + c[59] detected
+    bool writes_ofog = false;
 };
 
 VsMeta AnalyzeVertexProgram(const std::vector<uint32_t>& prog) {
@@ -1685,6 +1713,13 @@ VsMeta AnalyzeVertexProgram(const std::vector<uint32_t>& prog) {
         if (mac == 13u) {
             has_relative = true;
             max_c = 192;
+        }
+        {
+            const uint32_t omask = fld(t, 3, 12, 4);
+            const bool use_ilu = fld(t, 3, 2, 1) == 1u;
+            if (omask && fld(t, 3, 11, 1) != 0u && ((use_ilu && ilu) || (!use_ilu && mac && mac != 13u))) {
+                if ((fld(t, 3, 3, 8) & 0xFu) == 5u) m.writes_ofog = true;
+            }
         }
 
         if (!has_relative) {
@@ -4675,7 +4710,7 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
     if (need < kUploadSize / 4 && CurrentFrame().used + need > kUploadSize) Submit(true, false);
     DrawConstants c{};
     FillSurfaceConstants(s, size, c);
-    FillFogConstants(s, c);
+    FillFogConstants(s, sh.prog, vs_meta.writes_ofog, c);
     FillCombinerConstants(s, c);
     FillTextureConstants(s, stages, c);
     if (sh.fixed_transform) {

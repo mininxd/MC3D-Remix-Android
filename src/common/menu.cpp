@@ -159,7 +159,7 @@ enum RowId { kRenderResolution, kMaxFps, kVsync, kFpsCounter, kAniso, kReloadBlu
              kFmvScale, kGyro, kGyroSensitivity, kTouchLayout, kTouchOpacity, kTouchSize, kTouchEdit,
              kCheckUpdates, kTouchSensitivity, kLeftDeadzone, kRightDeadzone, kLeftSensitivity, kRightSensitivity,
              kScreenFilter, kGyroInvertX, kGyroInvertY, kTouchSkin, kCredit, kBloom,
-             kFog, kAntiAliasing, kMotionBlur, kReflections, kVolumetric, kDof, kTouchStick, kDynamicRes, kDynamicTarget, kDynamicMin,
+             kFog, kHdr, kAntiAliasing, kMotionBlur, kReflections, kVolumetric, kDof, kTouchStick, kDynamicRes, kDynamicTarget, kDynamicMin,
              kDynamicMax, kDynamicHold, kAutoUpdate, kTouchReset, kAutoBurnout, kDisplayLogs, kResetHints };
 
 using rows::Kind;
@@ -184,6 +184,8 @@ constexpr Row kQualityRows[] = {
     {Kind::Value, kAniso, "Anisotropic Filtering"},
     {Kind::Value, kVolumetric, "Volumetric Lighting"},
     {Kind::Value, kDof, "Depth of Field"},
+    {Kind::Value, kHdr, "HDR"},
+    {Kind::Value, kFog, "Fog"},
 };
 
 // native Touchscreen Options rows (visibility is dynamic: 200ms auto fade-out on controller / fade-in on touch)
@@ -281,6 +283,7 @@ bool* ToggleFlag(Settings& s, int id) {
         case kReloadBlur: return &o.reload_blur;
         case kBloom: return &o.bloom;
         case kFog: return &o.fog;
+        case kHdr: return &o.hdr;
         case kInvertMouse: return &o.invert_mouse;
         case kHoldAim: return &o.hold_aim;
         case kDynamicRes: return &o.dynamic_resolution;
