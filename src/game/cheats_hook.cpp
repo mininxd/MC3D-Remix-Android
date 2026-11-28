@@ -440,6 +440,7 @@ void RecordCollectedBit(CollectBit bit) {
 }
 
 std::atomic<bool> g_back_delete_hold[2] = {false, false};
+std::atomic<uint64_t> g_back_delete_cooldown_ms{0};
 thread_local bool t_back_forced_backspace = false;
 
 uint32_t FindActiveKeyboardVa(bool* out_has_text) {
@@ -1304,22 +1305,26 @@ X86_FUNC(sub_001923B0) {
 }
 
 // UI button-to-event lookup: __stdcall uint32_t sub_00206400(uint32_t btn_idx) [ret 0x04].
+// Button indices: 1=B (0xC0000BB9), 3=Back (0xC0000BCD), 7=DPadRight (0xC0000BBD), 9=X (0xC0000BEB).
 // While typing in uiKeyboard (Cheat Codes or Name Entry), pressing Back/B deletes text via X
-// (0xC0000BEB) until empty, and only triggers Back after release on an empty field.
+// (0xC0000BEB) until empty, and only triggers Back after release + brief cooldown on an empty field.
 X86_FUNC(sub_00206400) {
     const uint32_t btn_idx = game::safe_mem::Read32(ctx.esp + 4u, 0xFFFFFFFFu);
-    if (btn_idx == 1u || btn_idx == 7u) {
+    if (btn_idx == 1u || btn_idx == 3u) {
         const size_t slot = (btn_idx == 1u) ? 0u : 1u;
         bool has_text = false;
         if (game::cheats::FindActiveKeyboardVa(&has_text) != 0u) {
+            const uint64_t now_ms = game::cheats::SteadyNowMs();
             if (has_text) {
                 game::cheats::g_back_delete_hold[slot].store(true, std::memory_order_relaxed);
+                game::cheats::g_back_delete_cooldown_ms.store(now_ms + 350ull, std::memory_order_relaxed);
                 game::cheats::t_back_forced_backspace = true;
                 ctx.eax = 0xC0000BEBu;
                 ctx.esp += 8u;
                 return;
             }
-            if (game::cheats::g_back_delete_hold[slot].load(std::memory_order_relaxed)) {
+            if (game::cheats::g_back_delete_hold[slot].load(std::memory_order_relaxed) ||
+                now_ms < game::cheats::g_back_delete_cooldown_ms.load(std::memory_order_relaxed)) {
                 ctx.eax = 0u;
                 ctx.esp += 8u;
                 return;
@@ -1332,7 +1337,7 @@ X86_FUNC(sub_00206400) {
 }
 
 // UI input poller: __thiscall void sub_002071C0() [ret 0].
-// Clears the Back-delete hold latch once the button is released.
+// Clears the Back-delete hold latch only once an active uiInput sees B (0xC5) or Back (0xC7) released.
 X86_FUNC(sub_002071C0) {
     const uint32_t ui_input_va = ctx.ecx;
     __imp__sub_002071C0(ctx, base);
@@ -1340,11 +1345,13 @@ X86_FUNC(sub_002071C0) {
     if (game::cheats::FindActiveKeyboardVa(nullptr) == 0u) {
         game::cheats::g_back_delete_hold[0].store(false, std::memory_order_relaxed);
         game::cheats::g_back_delete_hold[1].store(false, std::memory_order_relaxed);
-    } else if (ui_input_va != 0u && game::safe_mem::CanAccess(ui_input_va + 0xCCu, 1u)) {
-        if (game::safe_mem::Read8(ui_input_va + 0xC5u, 0u) == 0u) {
+        game::cheats::g_back_delete_cooldown_ms.store(0ull, std::memory_order_relaxed);
+    } else if (ui_input_va != 0u && game::safe_mem::CanAccess(ui_input_va + 0xD0u, 1u) &&
+               (game::safe_mem::Read8(ui_input_va + 0x44u, 0u) & 0x01u) != 0u) {
+        if (game::safe_mem::Read8(ui_input_va + 0xC4u + 1u, 0u) == 0u) {
             game::cheats::g_back_delete_hold[0].store(false, std::memory_order_relaxed);
         }
-        if (game::safe_mem::Read8(ui_input_va + 0xCBu, 0u) == 0u) {
+        if (game::safe_mem::Read8(ui_input_va + 0xC4u + 3u, 0u) == 0u) {
             game::cheats::g_back_delete_hold[1].store(false, std::memory_order_relaxed);
         }
     }
