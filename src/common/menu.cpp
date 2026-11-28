@@ -21,6 +21,7 @@
 #include "common/mouse_keyboard.h"
 #include "common/options.h"
 #include "common/translations.h"
+#include "game/cheats_hook.h"
 #include "game/touch_context.h"
 
 // native/gyro.cpp: aiming by turning the phone
@@ -636,6 +637,9 @@ const rows::Row* rows::Page(int page, size_t* count) {
         *count = CreditRows().size();
         return CreditRows().data();
     }
+    if (page == rows::kCheatCollectionsPage) {
+        return game::cheats::CollectionRows(count);
+    }
     if (page == rows::kTouchPage) {
         if (game::Opt().tutorial_seen != 0u) {
             *count = std::size(kTouchRowsWithHints);
@@ -662,6 +666,9 @@ const rows::Row* rows::Controller(size_t* count) {
 }
 
 std::string rows::Value(const Row& row, int step) {
+    if (game::cheats::IsCollectionRow(row.id)) {
+        return game::cheats::FormatCollectionRowValue(row.id, step);
+    }
     if (row.kind == Kind::Bind) return KeyText(input::Binding(size_t(row.id)));
     if (row.id == kCredit) {
         const Credit* c = CreditOf(row);

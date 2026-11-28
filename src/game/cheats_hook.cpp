@@ -64,6 +64,11 @@ constexpr uint32_t kUnlockAllCitiesFlag1 = 0x0053F2ECu;
 constexpr uint32_t kUnlockAllCitiesFlag2 = 0x0053F2EDu;
 constexpr uint32_t kTrafficGlobal1 = 0x004B36C8u;
 constexpr uint32_t kTrafficGlobal2 = 0x004B36CCu;
+constexpr uint32_t kNativeSpecialAddr = 0x004B361Cu;
+constexpr uint32_t kNativeHeadAddr = 0x004B39D8u;
+constexpr uint32_t kNativeNoDamageAddr = 0x00509F80u;
+constexpr uint32_t kNativeSpecialsUpgradesAddr = 0x00557F08u;
+constexpr uint32_t kNativeHyperAgroAddr = 0x00558818u;
 constexpr uint32_t kVehicleListPtrAddr = 0x00557EB0u;
 constexpr uint32_t kVehicleListCountAddr = 0x00557EB4u;
 
@@ -119,6 +124,58 @@ enum class CheatId : int {
     Count = 7,
 };
 
+enum class CollectBit : int {
+    Cash5000 = 0,
+    FullThrottle = 1,
+    SecretDealer = 2,
+    NoTraffic = 3,
+    ZeroCost = 4,
+    Arcade = 5,
+    Delivery = 6,
+    Roadtrip = 7,
+    NoDamage = 8,
+    SpecialsUpgrades = 9,
+    HyperAgro = 10,
+    CashPlus1 = 11,
+    CashMinus1 = 12,
+    SpecialZone = 13,
+    SpecialAgro = 14,
+    SpecialRoar = 15,
+    HeadSmiley = 16,
+    HeadPumpkin = 17,
+    HeadBunny = 18,
+    HeadSnowman = 19,
+    Count = 20,
+};
+
+struct CollectEntryDef {
+    CollectBit bit;
+    const char* code;
+};
+
+constexpr CollectEntryDef kCollectEntries[] = {
+    {CollectBit::Cash5000, "amssrblhgshark"},
+    {CollectBit::FullThrottle, "fullthrottle"},
+    {CollectBit::SecretDealer, "secretdealer"},
+    {CollectBit::NoTraffic, "ghosttown"},
+    {CollectBit::ZeroCost, "zerocost"},
+    {CollectBit::Arcade, "arcade"},
+    {CollectBit::Delivery, "delivery"},
+    {CollectBit::Roadtrip, "roadtrip"},
+    {CollectBit::NoDamage, "ontheroad"},
+    {CollectBit::SpecialsUpgrades, "trythisathome"},
+    {CollectBit::HyperAgro, "hyperagro"},
+    {CollectBit::CashPlus1, "kubmir"},
+    {CollectBit::CashMinus1, "rimbuk"},
+    {CollectBit::SpecialZone, "allin"},
+    {CollectBit::SpecialAgro, "dfens"},
+    {CollectBit::SpecialRoar, "Rjnr"},
+    {CollectBit::HeadSmiley, "getheadj"},
+    {CollectBit::HeadPumpkin, "getheadk"},
+    {CollectBit::HeadBunny, "getheadl"},
+    {CollectBit::HeadSnowman, "getheadm"},
+};
+
 struct CheatState {
     std::atomic<bool> full_throttle{false};
     std::atomic<bool> secret_dealer{false};
@@ -126,8 +183,12 @@ struct CheatState {
     std::atomic<bool> zero_cost{false};
     std::atomic<bool> arcade_powerups{false};
     std::atomic<bool> delivery{false};
+    std::atomic<bool> native_roadtrip{false};
 
     bool powerup_hud_loaded_by_cheat = false;
+    bool saved_traffic_valid = false;
+    uint32_t saved_traffic_1 = 4u;
+    uint32_t saved_traffic_2 = 4u;
 };
 
 CheatState g_state;
@@ -136,6 +197,50 @@ thread_local int g_zero_cost_depth = 0;
 std::mutex g_save_mutex;
 std::string g_synced_save_name;
 std::atomic<bool> g_legacy_db_cleaned{false};
+
+std::mutex g_collection_mutex;
+std::atomic<bool> g_collection_loaded{false};
+std::atomic<uint32_t> g_collected_mask{0u};
+
+constexpr int kRowIdBase = 1000;
+enum CollectionRowId : int {
+    kRowEmpty = kRowIdBase,
+    kRowCash5000,
+    kRowCashPlus1,
+    kRowCashMinus1,
+    kRowFullThrottle,
+    kRowSecretDealer,
+    kRowNoTraffic,
+    kRowZeroCost,
+    kRowArcade,
+    kRowDelivery,
+    kRowRoadtrip,
+    kRowNoDamage,
+    kRowSpecialsUpgrades,
+    kRowHyperAgro,
+    kRowSpecialSingle,
+    kRowSpecialGroup,
+    kRowHeadSingle,
+    kRowHeadGroup,
+    kRowIdEnd,
+};
+
+constexpr uint32_t BitMask(CollectBit b) {
+    return 1u << static_cast<int>(b);
+}
+
+void WriteByteFlag(uint32_t addr, uint8_t value) {
+    if (safe_mem::CanAccess(addr, 1u)) {
+        *static_cast<uint8_t*>(kernel::HostPtr(addr)) = value;
+    }
+}
+
+void SyncUnlockAllCitiesFlags() {
+    const uint8_t flag = (g_state.delivery.load(std::memory_order_relaxed) ||
+                          g_state.native_roadtrip.load(std::memory_order_relaxed)) ? 1u : 0u;
+    WriteByteFlag(kUnlockAllCitiesFlag1, flag);
+    WriteByteFlag(kUnlockAllCitiesFlag2, flag);
+}
 
 const char* GetCheatCodeName(CheatId id) {
     switch (id) {
@@ -147,6 +252,19 @@ const char* GetCheatCodeName(CheatId id) {
         case CheatId::Arcade:       return "ARCADE";
         case CheatId::Delivery:     return "DELIVERY";
         default:                    return "UNKNOWN";
+    }
+}
+
+CollectBit BitForCustomCheat(CheatId id) {
+    switch (id) {
+        case CheatId::Cash5000:     return CollectBit::Cash5000;
+        case CheatId::FullThrottle: return CollectBit::FullThrottle;
+        case CheatId::SecretDealer: return CollectBit::SecretDealer;
+        case CheatId::NoTraffic:    return CollectBit::NoTraffic;
+        case CheatId::ZeroCost:     return CollectBit::ZeroCost;
+        case CheatId::Arcade:       return CollectBit::Arcade;
+        case CheatId::Delivery:     return CollectBit::Delivery;
+        default:                    return CollectBit::Cash5000;
     }
 }
 
@@ -165,6 +283,131 @@ std::string TrimString(const std::string& s) {
     size_t b = s.size();
     while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
     return s.substr(a, b - a);
+}
+
+// Mirrors native sub_00192350 cipher: c_enc = ((c + esi - 0x41) % 0x3A) + 0x41, esi = 0x45 + idx.
+std::string ObfuscateNativeCheat(const std::string& raw) {
+    const std::string s = TrimString(raw);
+    std::string out;
+    out.reserve(s.size());
+    uint32_t esi = 0x45u;
+    for (unsigned char uc : s) {
+        const uint32_t val = static_cast<uint32_t>(uc) + esi - 0x41u;
+        const char ch = static_cast<char>((val % 0x3Au) + 0x41u);
+        out.push_back(ch);
+        ++esi;
+    }
+    return out;
+}
+
+bool ParseNativeCheatCode(const std::string& raw, CollectBit* out_bit) {
+    struct NativeEncEntry {
+        const char* enc;
+        CollectBit bit;
+    };
+    static constexpr NativeEncEntry kTable[] = {
+        {"CAnrIHzH", CollectBit::Roadtrip},               // roadtrip
+        {"nDBGHsFMGNMU", CollectBit::Roadtrip},           // crosscountry
+        {"FDooCIGJtQG", CollectBit::Roadtrip},            // urbansprawl
+        {"sKCsGqxJH", CollectBit::HyperAgro},             // hyperagro
+        {"orrBH", CollectBit::SpecialAgro},               // dfens
+        {"lxywC", CollectBit::SpecialZone},               // allin
+        {"]vAF", CollectBit::SpecialRoar},                // Rjnr
+        {"zzGvtHFsw", CollectBit::NoDamage},              // ontheroad
+        {"CuzpJA", CollectBit::CashMinus1},               // rimbuk
+        {"vGoAxH", CollectBit::CashPlus1},                // kubmir
+        {"EDLHwyJsMBJIB", CollectBit::SpecialsUpgrades},  // trythisathome
+        {"rqGvtquB", CollectBit::HeadSmiley},             // getheadj / gethead0
+        {"rqGvtquC", CollectBit::HeadPumpkin},            // getheadk / gethead1
+        {"rqGvtquD", CollectBit::HeadBunny},              // getheadl / gethead2
+        {"rqGvtquE", CollectBit::HeadSnowman},            // getheadm / gethead3
+    };
+    const std::string enc = ObfuscateNativeCheat(raw);
+    for (const auto& entry : kTable) {
+        if (enc == entry.enc) {
+            *out_bit = entry.bit;
+            return true;
+        }
+    }
+    return false;
+}
+
+uint32_t ReadCollectionFromDiskLocked() {
+    uint32_t mask = 0u;
+    std::ifstream in(app::ExeDir() / "cheat_collection.db");
+    if (!in.is_open()) return 0u;
+    std::string line;
+    while (std::getline(in, line)) {
+        const std::string code = TrimString(line);
+        if (code.empty() || code[0] == '#') continue;
+        for (const auto& e : kCollectEntries) {
+            if (code == e.code) {
+                mask |= BitMask(e.bit);
+                break;
+            }
+        }
+    }
+    return mask;
+}
+
+uint32_t EnsureCollectionLoaded() {
+    if (g_collection_loaded.load(std::memory_order_acquire)) {
+        return g_collected_mask.load(std::memory_order_relaxed);
+    }
+    std::lock_guard<std::mutex> lock(g_collection_mutex);
+    if (!g_collection_loaded.load(std::memory_order_relaxed)) {
+        g_collected_mask.store(ReadCollectionFromDiskLocked(), std::memory_order_relaxed);
+        g_collection_loaded.store(true, std::memory_order_release);
+    }
+    return g_collected_mask.load(std::memory_order_relaxed);
+}
+
+void SaveCollectionLocked(uint32_t mask) {
+    const auto db_path = app::ExeDir() / "cheat_collection.db";
+    auto tmp_path = db_path;
+    tmp_path += ".tmp";
+    {
+        std::ofstream out(tmp_path, std::ios::trunc);
+        if (!out.is_open()) {
+            LOGE("[ERR] cheats: failed to open %s for writing", tmp_path.c_str());
+            return;
+        }
+        for (const auto& e : kCollectEntries) {
+            if ((mask & BitMask(e.bit)) != 0u) {
+                out << e.code << '\n';
+            }
+        }
+        out.flush();
+        if (!out.good()) {
+            LOGE("[ERR] cheats: failed writing %s", tmp_path.c_str());
+            return;
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp_path, db_path, ec);
+    if (ec) {
+        std::error_code ec2;
+        std::filesystem::remove(db_path, ec2);
+        ec.clear();
+        std::filesystem::rename(tmp_path, db_path, ec);
+    }
+}
+
+void RecordCollectedBit(CollectBit bit) {
+    const uint32_t add = BitMask(bit);
+    std::lock_guard<std::mutex> lock(g_collection_mutex);
+    if (!g_collection_loaded.load(std::memory_order_relaxed)) {
+        g_collected_mask.store(ReadCollectionFromDiskLocked(), std::memory_order_relaxed);
+        g_collection_loaded.store(true, std::memory_order_release);
+    }
+    const uint32_t prev = g_collected_mask.load(std::memory_order_relaxed);
+    const uint32_t next = prev | add;
+    if (next != prev) {
+        g_collected_mask.store(next, std::memory_order_relaxed);
+        SaveCollectionLocked(next);
+        LOGI("[OK] cheats: collected cheat bit %d -> cheat_collection.db (mask=0x%X)",
+             static_cast<int>(bit), next);
+    }
 }
 
 bool ParseCheatName(const std::string& raw, CheatId* out_id) {
@@ -199,6 +442,14 @@ void ClearAllSessionCheats() {
     g_state.zero_cost.store(false, std::memory_order_relaxed);
     g_state.arcade_powerups.store(false, std::memory_order_relaxed);
     g_state.delivery.store(false, std::memory_order_relaxed);
+    g_state.native_roadtrip.store(false, std::memory_order_relaxed);
+    if (safe_mem::CanAccess(kNativeSpecialAddr, 4u)) kernel::W32(kNativeSpecialAddr, 0xFFFFFFFFu);
+    if (safe_mem::CanAccess(kNativeHeadAddr, 4u)) kernel::W32(kNativeHeadAddr, 0xFFFFFFFFu);
+    WriteByteFlag(kNativeNoDamageAddr, 0u);
+    WriteByteFlag(kNativeSpecialsUpgradesAddr, 0u);
+    WriteByteFlag(kNativeHyperAgroAddr, 0u);
+    WriteByteFlag(kUnlockAllCitiesFlag1, 0u);
+    WriteByteFlag(kUnlockAllCitiesFlag2, 0u);
 }
 
 std::string ReadGuestActiveSaveName() {
@@ -252,6 +503,13 @@ bool IsSpecialEditionVehicle(uint32_t veh_id) {
 
 void ApplyTrafficSettings() {
     if (!g_state.no_traffic.load(std::memory_order_relaxed)) return;
+    if (!g_state.saved_traffic_valid) {
+        const uint32_t t1 = safe_mem::Read32(kTrafficGlobal1, 4u);
+        const uint32_t t2 = safe_mem::Read32(kTrafficGlobal2, 4u);
+        g_state.saved_traffic_1 = t1 ? t1 : 4u;
+        g_state.saved_traffic_2 = t2 ? t2 : 4u;
+        g_state.saved_traffic_valid = true;
+    }
     if (safe_mem::CanAccess(kTrafficGlobal1, 4u)) kernel::W32(kTrafficGlobal1, 0u);
     if (safe_mem::CanAccess(kTrafficGlobal2, 4u)) kernel::W32(kTrafficGlobal2, 0u);
     for (uint32_t ptr_va : {kRaceSettingsPtrAddr, kRaceSettingsShadowPtrAddr}) {
@@ -261,6 +519,13 @@ void ApplyTrafficSettings() {
             kernel::W32(rs + 0x10u, 0u);
         }
     }
+}
+
+void RestoreTrafficSettings() {
+    const uint32_t t1 = g_state.saved_traffic_valid ? g_state.saved_traffic_1 : 4u;
+    const uint32_t t2 = g_state.saved_traffic_valid ? g_state.saved_traffic_2 : 4u;
+    if (safe_mem::CanAccess(kTrafficGlobal1, 4u)) kernel::W32(kTrafficGlobal1, t1);
+    if (safe_mem::CanAccess(kTrafficGlobal2, 4u)) kernel::W32(kTrafficGlobal2, t2);
 }
 
 void ApplyArcadeSettings() {
@@ -373,13 +638,9 @@ void SpawnRandomArcadePowerupsForRaceMgr(X86Context& ctx, uint8_t* base, uint32_
 }
 
 void ApplyUnlockFlags() {
-    if (g_state.delivery.load(std::memory_order_relaxed)) {
-        if (safe_mem::CanAccess(kUnlockAllCitiesFlag1, 1u)) {
-            *static_cast<uint8_t*>(kernel::HostPtr(kUnlockAllCitiesFlag1)) = 1u;
-        }
-        if (safe_mem::CanAccess(kUnlockAllCitiesFlag2, 1u)) {
-            *static_cast<uint8_t*>(kernel::HostPtr(kUnlockAllCitiesFlag2)) = 1u;
-        }
+    if (g_state.delivery.load(std::memory_order_relaxed) ||
+        g_state.native_roadtrip.load(std::memory_order_relaxed)) {
+        SyncUnlockAllCitiesFlags();
     }
 }
 
@@ -420,6 +681,8 @@ bool TryHandleCheatCode(const std::string& raw) {
     CheatId id;
     if (!ParseCheatName(raw, &id)) return false;
 
+    RecordCollectedBit(BitForCustomCheat(id));
+
     if (id == CheatId::Cash5000) {
         const bool ok = AddCash(5000);
         LOGI("[OK] cheats: AMSSRBLHGSHARK -> +5000 cash (%s)", ok ? "applied" : "no-profile");
@@ -434,6 +697,9 @@ bool TryHandleCheatCode(const std::string& raw) {
         if (id == CheatId::NoTraffic) ApplyTrafficSettings();
         else if (id == CheatId::Arcade) ApplyArcadeSettings();
         else if (id == CheatId::Delivery) ApplyUnlockFlags();
+    } else {
+        if (id == CheatId::NoTraffic) RestoreTrafficSettings();
+        else if (id == CheatId::Delivery) SyncUnlockAllCitiesFlags();
     }
     LOGI("[OK] cheats: %s -> %s (session-only)", GetCheatCodeName(id), on ? "ON" : "OFF");
     return true;
@@ -462,7 +728,224 @@ void RunWithZeroCost(X86Context& ctx, uint8_t* base, Fn orig_fn) {
     --g_zero_cost_depth;
 }
 
+struct SimpleRowDef {
+    CollectBit bit;
+    app::rows::Kind kind;
+    int row_id;
+    const char* label;
+};
+
+constexpr SimpleRowDef kSimpleRowDefs[] = {
+    {CollectBit::Cash5000, app::rows::Kind::Action, kRowCash5000, "+$5,000 Cash"},
+    {CollectBit::CashPlus1, app::rows::Kind::Action, kRowCashPlus1, "+$1 Cash"},
+    {CollectBit::CashMinus1, app::rows::Kind::Action, kRowCashMinus1, "-$1 Cash"},
+    {CollectBit::FullThrottle, app::rows::Kind::Value, kRowFullThrottle, "NOS Auto Refill"},
+    {CollectBit::SecretDealer, app::rows::Kind::Value, kRowSecretDealer, "Unlock REMIX Cars"},
+    {CollectBit::NoTraffic, app::rows::Kind::Value, kRowNoTraffic, "No Traffic"},
+    {CollectBit::ZeroCost, app::rows::Kind::Value, kRowZeroCost, "Free Shop"},
+    {CollectBit::Arcade, app::rows::Kind::Value, kRowArcade, "Career Powerups"},
+    {CollectBit::Delivery, app::rows::Kind::Value, kRowDelivery, "Unlock All Cities"},
+    {CollectBit::Roadtrip, app::rows::Kind::Value, kRowRoadtrip, "Unlock All Cities & Events"},
+    {CollectBit::NoDamage, app::rows::Kind::Value, kRowNoDamage, "No Damage"},
+    {CollectBit::SpecialsUpgrades, app::rows::Kind::Value, kRowSpecialsUpgrades, "Unlock Specials & Upgrades"},
+    {CollectBit::HyperAgro, app::rows::Kind::Value, kRowHyperAgro, "Hyper Agro Physics"},
+};
+
+struct GroupOptionDef {
+    CollectBit bit;
+    uint32_t hw_val;
+    const char* single_label;
+    const char* short_name;
+};
+
+constexpr GroupOptionDef kSpecialOptions[] = {
+    {CollectBit::SpecialZone, 0u, "Force Use Zone", "Zone"},
+    {CollectBit::SpecialAgro, 1u, "Force Use Agro", "Agro"},
+    {CollectBit::SpecialRoar, 2u, "Force Use Roar", "Roar"},
+};
+
+constexpr GroupOptionDef kHeadOptions[] = {
+    {CollectBit::HeadSmiley, 0u, "Biker Head as Smiley", "Smiley"},
+    {CollectBit::HeadPumpkin, 1u, "Biker Head as Pumpkin", "Pumpkin"},
+    {CollectBit::HeadBunny, 2u, "Biker Head as Bunny", "Bunny"},
+    {CollectBit::HeadSnowman, 3u, "Biker Head as Snowman", "Snowman"},
+};
+
+template <size_t N>
+void AppendGroupRow(std::vector<app::rows::Row>& out, uint32_t mask, const GroupOptionDef (&opts)[N],
+                    int single_row_id, int group_row_id, const char* group_label) {
+    size_t collected = 0;
+    const GroupOptionDef* first = nullptr;
+    for (size_t i = 0; i < N; ++i) {
+        if ((mask & BitMask(opts[i].bit)) != 0u) {
+            if (!first) first = &opts[i];
+            ++collected;
+        }
+    }
+    if (collected == 0u) return;
+    if (collected == 1u) {
+        out.push_back({app::rows::Kind::Value, single_row_id, first->single_label});
+    } else {
+        out.push_back({app::rows::Kind::Value, group_row_id, group_label});
+    }
+}
+
+template <size_t N>
+std::string StepGroupValue(uint32_t addr, const GroupOptionDef (&opts)[N], uint32_t mask,
+                           bool single_mode, int step) {
+    struct Choice {
+        uint32_t hw_val;
+        const char* label;
+    };
+    Choice choices[N + 1u]{};
+    size_t count = 0;
+    choices[count++] = {0xFFFFFFFFu, "Off"};
+    for (size_t i = 0; i < N; ++i) {
+        if ((mask & BitMask(opts[i].bit)) != 0u) {
+            choices[count++] = {opts[i].hw_val, single_mode ? "On" : opts[i].short_name};
+        }
+    }
+    const uint32_t cur = safe_mem::Read32(addr, 0xFFFFFFFFu);
+    int idx = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (choices[i].hw_val == cur) {
+            idx = static_cast<int>(i);
+            break;
+        }
+    }
+    if (step != 0 && count > 1u) {
+        const int n = static_cast<int>(count);
+        idx = ((idx + step) % n + n) % n;
+        if (safe_mem::CanAccess(addr, 4u)) {
+            kernel::W32(addr, choices[idx].hw_val);
+        }
+    }
+    return choices[idx].label;
+}
+
+const char* StepByteToggle(uint32_t addr, int step) {
+    bool on = safe_mem::Read8(addr, 0u) != 0u;
+    if (step != 0) {
+        on = !on;
+        WriteByteFlag(addr, on ? 1u : 0u);
+    }
+    return on ? "On" : "Off";
+}
+
+const char* StepAtomicToggle(std::atomic<bool>& flag, int step) {
+    bool on = flag.load(std::memory_order_relaxed);
+    if (step != 0) {
+        on = !on;
+        flag.store(on, std::memory_order_relaxed);
+    }
+    return on ? "On" : "Off";
+}
+
 }  // namespace
+
+bool IsCollectionRow(int row_id) {
+    return row_id >= kRowIdBase && row_id < kRowIdEnd;
+}
+
+const app::rows::Row* CollectionRows(size_t* count) {
+    static std::vector<app::rows::Row> s_rows;
+    s_rows.clear();
+    const uint32_t mask = EnsureCollectionLoaded();
+    for (const auto& def : kSimpleRowDefs) {
+        if ((mask & BitMask(def.bit)) != 0u) {
+            s_rows.push_back({def.kind, def.row_id, def.label});
+        }
+    }
+    AppendGroupRow(s_rows, mask, kSpecialOptions, kRowSpecialSingle, kRowSpecialGroup, "Special Mode");
+    AppendGroupRow(s_rows, mask, kHeadOptions, kRowHeadSingle, kRowHeadGroup, "Biker Head");
+    if (s_rows.empty()) {
+        s_rows.push_back({app::rows::Kind::Action, kRowEmpty, "No Cheats Collected Yet"});
+    }
+    if (count) *count = s_rows.size();
+    return s_rows.data();
+}
+
+std::string FormatCollectionRowValue(int row_id, int step) {
+    const uint32_t mask = EnsureCollectionLoaded();
+    switch (row_id) {
+        case kRowEmpty:
+            return "";
+        case kRowCash5000:
+            if (step != 0) AddCash(5000);
+            return "";
+        case kRowCashPlus1:
+            if (step != 0) {
+                const uint32_t prof = GetProfilePtr();
+                if (prof && safe_mem::CanAccess(prof + kProfileCashOffset, 4u)) {
+                    const uint32_t cur = kernel::R32(prof + kProfileCashOffset);
+                    if (cur < 0x186A0u) kernel::W32(prof + kProfileCashOffset, cur + 1u);
+                }
+            }
+            return "";
+        case kRowCashMinus1:
+            if (step != 0) {
+                const uint32_t prof = GetProfilePtr();
+                if (prof && safe_mem::CanAccess(prof + kProfileCashOffset, 4u)) {
+                    const uint32_t cur = kernel::R32(prof + kProfileCashOffset);
+                    if (cur > 0u) kernel::W32(prof + kProfileCashOffset, cur - 1u);
+                }
+            }
+            return "";
+        case kRowFullThrottle:
+            return StepAtomicToggle(g_state.full_throttle, step);
+        case kRowSecretDealer:
+            return StepAtomicToggle(g_state.secret_dealer, step);
+        case kRowNoTraffic: {
+            const char* res = StepAtomicToggle(g_state.no_traffic, step);
+            if (step != 0) {
+                if (g_state.no_traffic.load(std::memory_order_relaxed)) ApplyTrafficSettings();
+                else RestoreTrafficSettings();
+            }
+            return res;
+        }
+        case kRowZeroCost:
+            return StepAtomicToggle(g_state.zero_cost, step);
+        case kRowArcade: {
+            const char* res = StepAtomicToggle(g_state.arcade_powerups, step);
+            if (step != 0 && g_state.arcade_powerups.load(std::memory_order_relaxed)) {
+                ApplyArcadeSettings();
+            }
+            return res;
+        }
+        case kRowDelivery: {
+            const char* res = StepAtomicToggle(g_state.delivery, step);
+            if (step != 0) SyncUnlockAllCitiesFlags();
+            return res;
+        }
+        case kRowRoadtrip: {
+            bool on = g_state.native_roadtrip.load(std::memory_order_relaxed) ||
+                      (safe_mem::Read8(kUnlockAllCitiesFlag1, 0u) != 0u &&
+                       !g_state.delivery.load(std::memory_order_relaxed));
+            if (step != 0) {
+                on = !on;
+                g_state.native_roadtrip.store(on, std::memory_order_relaxed);
+                SyncUnlockAllCitiesFlags();
+            }
+            return on ? "On" : "Off";
+        }
+        case kRowNoDamage:
+            return StepByteToggle(kNativeNoDamageAddr, step);
+        case kRowSpecialsUpgrades:
+            return StepByteToggle(kNativeSpecialsUpgradesAddr, step);
+        case kRowHyperAgro:
+            return StepByteToggle(kNativeHyperAgroAddr, step);
+        case kRowSpecialSingle:
+            return StepGroupValue(kNativeSpecialAddr, kSpecialOptions, mask, true, step);
+        case kRowSpecialGroup:
+            return StepGroupValue(kNativeSpecialAddr, kSpecialOptions, mask, false, step);
+        case kRowHeadSingle:
+            return StepGroupValue(kNativeHeadAddr, kHeadOptions, mask, true, step);
+        case kRowHeadGroup:
+            return StepGroupValue(kNativeHeadAddr, kHeadOptions, mask, false, step);
+        default:
+            return "";
+    }
+}
 
 uint64_t SteadyNowMs() {
     auto since = std::chrono::steady_clock::now().time_since_epoch();
@@ -751,8 +1234,9 @@ X86_FUNC(sub_000197C0) {
 // Cheat code input dispatcher: __stdcall int sub_001923B0(const char* input) [ret 0x04].
 X86_FUNC(sub_001923B0) {
     const uint32_t input_va = X86_MEM32(ctx.esp + 4u);
+    std::string input;
     if (input_va) {
-        const std::string input = game::safe_mem::ReadSanitizedCString(input_va, 64);
+        input = game::safe_mem::ReadSanitizedCString(input_va, 64);
         if (!input.empty() && game::cheats::TryHandleCheatCode(input)) {
             ctx.eax = 0xFFFFFFFFu;
             ctx.esp += 8u;
@@ -760,6 +1244,15 @@ X86_FUNC(sub_001923B0) {
         }
     }
     __imp__sub_001923B0(ctx, base);
+    if (ctx.eax == 0xFFFFFFFFu && !input.empty()) {
+        game::cheats::CollectBit bit{};
+        if (game::cheats::ParseNativeCheatCode(input, &bit)) {
+            game::cheats::RecordCollectedBit(bit);
+            if (bit == game::cheats::CollectBit::Roadtrip) {
+                game::cheats::g_state.native_roadtrip.store(true, std::memory_order_relaxed);
+            }
+        }
+    }
 }
 
 // Unlock check: __thiscall bool sub_00292CD0(uint32_t type, uint32_t id, uint32_t def) [ret 0x0C].

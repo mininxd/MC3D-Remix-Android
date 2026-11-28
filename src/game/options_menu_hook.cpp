@@ -39,9 +39,11 @@ constexpr uint32_t kFlashVarSectionName = 0x0045772Cu;  // "sectionName"
 constexpr uint32_t kActionAudioOptions = 0x09u;
 constexpr uint32_t kActionControllerOptions = 0x0Cu;
 constexpr uint32_t kActionGameOptions = 0x41u;
+constexpr uint32_t kActionCredits = 0x42u;
 constexpr uint32_t kActionDisplayOptions = 0x7F4Bu;
 constexpr uint32_t kActionQualityOptions = 0x7F4Cu;
 constexpr uint32_t kActionTouchOptions = 0x7F4Eu;
+constexpr uint32_t kActionCheatCollections = 0x7F4Fu;
 constexpr uint32_t kFnMenuAction = 0x00163830u;
 constexpr uint32_t kFnMainMenuNetworking = 0x0018C5A0u;
 constexpr uint32_t kFnSettingCallback = 0x0018DB10u;
@@ -55,6 +57,7 @@ enum class NativePage : int {
     Display = 1,
     Quality = 2,
     Touch = 4,
+    CheatCollections = 5,
 };
 
 std::atomic<int> g_native_page{static_cast<int>(NativePage::None)};
@@ -68,6 +71,7 @@ thread_local bool g_in_options_populate = false;
 thread_local bool g_skipped_controller = false;
 thread_local uint32_t g_options_shift = 0u;
 thread_local bool g_inserted_audio_subitems = false;
+thread_local bool g_inserted_cheat_collections = false;
 thread_local uint32_t g_audio_handle = 0u;
 thread_local uint32_t g_audio_list_va = 0u;
 thread_local uint32_t g_audio_owner_va = 0u;
@@ -90,6 +94,7 @@ struct ScopedOptionsMenuPopulate {
         g_skipped_controller = false;
         g_options_shift = 0u;
         g_inserted_audio_subitems = false;
+        g_inserted_cheat_collections = false;
         g_audio_handle = 0u;
         g_audio_list_va = 0u;
         g_audio_owner_va = 0u;
@@ -97,6 +102,7 @@ struct ScopedOptionsMenuPopulate {
     ~ScopedOptionsMenuPopulate() {
         g_in_options_populate = false;
         g_skipped_controller = false;
+        g_inserted_cheat_collections = false;
         g_audio_handle = 0u;
         g_audio_list_va = 0u;
         g_audio_owner_va = 0u;
@@ -254,6 +260,16 @@ void AppendCustomOptionsFallback(X86Context& ctx, uint8_t* base) {
         AppendRootOptionItem(ctx, base, list_va, owner_va, kActionQualityOptions, "Quality Options");
         AppendRootOptionItem(ctx, base, list_va, owner_va, kActionTouchOptions, "Touchscreen Options");
     }
+    if (!g_inserted_cheat_collections) {
+        AppendRootOptionItem(ctx, base, list_va, owner_va, kActionCheatCollections, "Cheat Collections");
+    }
+}
+
+int ToAppPage(NativePage page) {
+    if (page == NativePage::Quality) return app::rows::kQualityPage;
+    if (page == NativePage::Touch) return app::rows::kTouchPage;
+    if (page == NativePage::CheatCollections) return app::rows::kCheatCollectionsPage;
+    return app::rows::kDisplayPage;
 }
 
 void PopulateNativeOptionsList(X86Context& ctx, uint8_t* base, uint32_t screen_va, NativePage page) {
@@ -280,11 +296,8 @@ void PopulateNativeOptionsList(X86Context& ctx, uint8_t* base, uint32_t screen_v
         kMaxListItems, std::max<uint32_t>(1u, game::safe_mem::Read32(list_va + 0x230u, kMaxListItems)));
 
     g_entry_count = 0u;
-    int app_page = app::rows::kDisplayPage;
-    if (page == NativePage::Quality) app_page = app::rows::kQualityPage;
-    else if (page == NativePage::Touch) app_page = app::rows::kTouchPage;
     size_t total = 0;
-    const app::rows::Row* rows = app::rows::Page(app_page, &total);
+    const app::rows::Row* rows = app::rows::Page(ToAppPage(page), &total);
     for (size_t i = 0; i < total && g_entry_count < list_cap; ++i) {
         if (rows[i].kind == app::rows::Kind::Value || rows[i].kind == app::rows::Kind::Action) {
             NativeEntry entry{};
@@ -360,10 +373,12 @@ void ApplyNativeScreenTitle(X86Context& ctx, uint8_t* base, NativePage page) {
     if (flash_root_va) {
         if (page == NativePage::Display) title = "Display";
         else if (page == NativePage::Quality) title = "Quality";
+        else if (page == NativePage::CheatCollections) title = "Cheats";
         else title = "Touch";
     } else {
         if (page == NativePage::Display) title = "Display Options";
         else if (page == NativePage::Quality) title = "Quality Options";
+        else if (page == NativePage::CheatCollections) title = "Cheat Collections";
         else title = "Touchscreen Options";
     }
 
@@ -447,6 +462,12 @@ extern "C" void sub_00348BE0(X86Context& ctx, uint8_t* base) {
                 return;
             }
         }
+        if (cb_fn == kFnMenuAction && stored_param == kActionCredits &&
+            !g_inserted_cheat_collections && list_va != 0u && cb_obj != 0u) {
+            AppendRootOptionItem(ctx, base, list_va, cb_obj, kActionCheatCollections, "Cheat Collections");
+            g_inserted_cheat_collections = true;
+            ++g_options_shift;
+        }
         if (game::safe_mem::CanAccess(ctx.esp + 4u, 4u)) {
             const int32_t idx = static_cast<int32_t>(X86_MEM32(ctx.esp + 4u));
             const int32_t net_shift = static_cast<int32_t>(g_options_shift) - (g_skipped_controller ? 1 : 0);
@@ -507,14 +528,18 @@ extern "C" void sub_0018D610(X86Context& ctx, uint8_t* base) {
     g_native_page.store(static_cast<int>(NativePage::None));
     g_options_populated_touch_active.store(input::TouchActive(), std::memory_order_relaxed);
     bool inserted_audio = false;
+    bool inserted_cheats = false;
     {
         ScopedOptionsMenuPopulate guard;
         __imp__sub_0018D610(ctx, base);
         inserted_audio = g_inserted_audio_subitems;
+        inserted_cheats = g_inserted_cheat_collections;
     }
     g_inserted_audio_subitems = inserted_audio;
+    g_inserted_cheat_collections = inserted_cheats;
     AppendCustomOptionsFallback(ctx, base);
     g_inserted_audio_subitems = false;
+    g_inserted_cheat_collections = false;
 }
 
 // Live-rebuild root Options list when switching between touchscreen and external controller while Options is open.
@@ -585,6 +610,10 @@ extern "C" void sub_00163830(X86Context& ctx, uint8_t* base) {
         g_native_page.store(static_cast<int>(NativePage::Touch));
         if (game::safe_mem::CanAccess(ctx.esp + 4u, 4u)) X86_MEM32(ctx.esp + 4u) = kActionGameOptions;
         LOGI("[OK] options_menu: entering native Touchscreen Options screen");
+    } else if (action == kActionCheatCollections) {
+        g_native_page.store(static_cast<int>(NativePage::CheatCollections));
+        if (game::safe_mem::CanAccess(ctx.esp + 4u, 4u)) X86_MEM32(ctx.esp + 4u) = kActionGameOptions;
+        LOGI("[OK] options_menu: entering native Cheat Collections screen");
     } else if (action == kActionGameOptions) {
         g_native_page.store(static_cast<int>(NativePage::None));
     }
@@ -629,11 +658,8 @@ extern "C" void sub_0018DB10(X86Context& ctx, uint8_t* base) {
             (void)app::rows::Value(entry.row, step);
 
             // Rebuild native rows immediately if an action added/removed a dynamic row (e.g. "Reset hint").
-            int app_page = app::rows::kDisplayPage;
-            if (page == NativePage::Quality) app_page = app::rows::kQualityPage;
-            else if (page == NativePage::Touch) app_page = app::rows::kTouchPage;
             size_t new_total = 0;
-            const app::rows::Row* new_rows = app::rows::Page(app_page, &new_total);
+            const app::rows::Row* new_rows = app::rows::Page(ToAppPage(page), &new_total);
             uint32_t new_visible = 0;
             for (size_t i = 0; i < new_total; ++i) {
                 if (new_rows[i].kind == app::rows::Kind::Value || new_rows[i].kind == app::rows::Kind::Action) {
