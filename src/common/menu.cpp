@@ -82,6 +82,8 @@ constexpr uint32_t kDisplayLogsValues[] = {0, 1, 2, 3};
 const char* const kDisplayLogsNames[] = {"Off", "Minimal", "Full", "Debug"};
 constexpr uint32_t kReflectionValues[] = {0, 1};
 const char* const kReflectionNames[] = {"Off", "On"};
+constexpr uint32_t kQualityLevelValues[] = {0, 1, 2};
+const char* const kQualityLevelNames[] = {"Off", "Low", "High"};
 constexpr uint32_t kFmvScales[] = {0, 1};
 const char* const kFmvScaleNames[] = {"Fill", "4:3"};
 constexpr uint32_t kScreenFilters[] = {0, 1, 2, 3, 4, 5, 6, 7, 8};
@@ -157,7 +159,7 @@ enum RowId { kRenderResolution, kMaxFps, kVsync, kFpsCounter, kAniso, kReloadBlu
              kFmvScale, kGyro, kGyroSensitivity, kTouchLayout, kTouchOpacity, kTouchSize, kTouchEdit,
              kCheckUpdates, kTouchSensitivity, kLeftDeadzone, kRightDeadzone, kLeftSensitivity, kRightSensitivity,
              kScreenFilter, kGyroInvertX, kGyroInvertY, kTouchSkin, kCredit, kBloom,
-             kFog, kAntiAliasing, kMotionBlur, kReflections, kTouchStick, kDynamicRes, kDynamicTarget, kDynamicMin,
+             kFog, kAntiAliasing, kMotionBlur, kReflections, kVolumetric, kDof, kTouchStick, kDynamicRes, kDynamicTarget, kDynamicMin,
              kDynamicMax, kDynamicHold, kAutoUpdate, kTouchReset, kAutoBurnout, kDisplayLogs, kResetHints };
 
 using rows::Kind;
@@ -180,6 +182,8 @@ constexpr Row kQualityRows[] = {
     {Kind::Value, kMotionBlur, "Motion Blur"},
     {Kind::Value, kReflections, "Reflections"},
     {Kind::Value, kAniso, "Anisotropic Filtering"},
+    {Kind::Value, kVolumetric, "Volumetric Lighting"},
+    {Kind::Value, kDof, "Depth of Field"},
 };
 
 // native Touchscreen Options rows (visibility is dynamic: 200ms auto fade-out on controller / fade-in on touch)
@@ -389,6 +393,14 @@ bool StepGraphicsRow(int id, int step, Settings& s, char (&text)[64]) {
             return true;
         case kReflections:
             std::snprintf(text, sizeof(text), "%s", kReflectionNames[StepTable(kReflectionValues, o.reflections, step)]);
+            return true;
+        case kVolumetric:
+            std::snprintf(text, sizeof(text), "%s",
+                          kQualityLevelNames[StepTable(kQualityLevelValues, o.volumetric, step)]);
+            return true;
+        case kDof:
+            std::snprintf(text, sizeof(text), "%s",
+                          kQualityLevelNames[StepTable(kQualityLevelValues, o.dof, step)]);
             return true;
         case kDrawDistance:
             std::snprintf(text, sizeof(text), "%s", kDistanceNames[StepTable(kDistances, o.draw_distance, step)]);

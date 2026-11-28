@@ -99,6 +99,8 @@ const app::GameInfo app::kGame = {
                 {"motion_blur", nullptr, &game::Opt().motion_blur},
                 {"reflections", nullptr, &game::Opt().reflections},
                 {"anti_aliasing", nullptr, &game::Opt().anti_aliasing},
+                {"volumetric", nullptr, &game::Opt().volumetric},
+                {"dof", nullptr, &game::Opt().dof},
                 {"hdr", &game::Opt().hdr, nullptr},
                 {"screen_filter", nullptr, &game::Opt().screen_filter},
                 {"left_stick_deadzone", nullptr, &game::Opt().left_deadzone},

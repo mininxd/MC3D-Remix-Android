@@ -30,6 +30,7 @@
 #include "common/options.h"
 #include "core/log.h"
 #include "d3d/gpu_frame.h"
+#include "game/touch_context.h"
 #include "gpu/backend.h"
 #include "gpu/shaders.h"
 #include "gpu/texture.h"
@@ -379,6 +380,238 @@ O vs(uint id : SV_VertexID) {
     return o;
 }
 float psmain(O i) : SV_Depth { return img.SampleLevel(ps, i.uv, 0); }
+)";
+
+const char* kPostPrepare1xHlsl = R"(
+cbuffer B : register(b1) { float4 uvrect; float4 opts; };
+Texture2D img : register(t0);
+Texture2D<float> ztex : register(t1);
+SamplerState ls : register(s0);
+SamplerState ps : register(s1);
+struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };
+O vs(uint id : SV_VertexID) {
+    O o;
+    float2 t = float2((id << 1) & 2, id & 2);
+    o.p = float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
+    o.uv = uvrect.xy + t * uvrect.zw;
+    return o;
+}
+float4 psmain(O i) : SV_Target {
+    float3 c = img.SampleLevel(ls, i.uv, 0).rgb;
+    float z = ztex.SampleLevel(ps, i.uv, 0);
+    return float4(c, z);
+}
+)";
+
+const char* kPostPrepareMsaaHlsl = R"(
+cbuffer B : register(b1) { float4 uvrect; float4 opts; };
+Texture2D img : register(t0);
+Texture2DMS<float> ztex : register(t1);
+SamplerState ls : register(s0);
+struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };
+O vs(uint id : SV_VertexID) {
+    O o;
+    float2 t = float2((id << 1) & 2, id & 2);
+    o.p = float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
+    o.uv = uvrect.xy + t * uvrect.zw;
+    return o;
+}
+float4 psmain(O i) : SV_Target {
+    float3 c = img.SampleLevel(ls, i.uv, 0).rgb;
+    int2 px = int2(clamp(i.uv * opts.xy, float2(0.0, 0.0), opts.xy - 1.0));
+    float z = ztex.Load(px, 0);
+    return float4(c, z);
+}
+)";
+
+const std::string& VolumetricHlsl(bool high) {
+    static std::unordered_map<uint32_t, std::string> cache;
+    const uint32_t key = high ? 1u : 0u;
+    if (auto it = cache.find(key); it != cache.end()) return it->second;
+
+    std::string s = R"(
+cbuffer B : register(b1) { float4 uvrect; float4 opts; };
+Texture2D half_a : register(t0);
+SamplerState ls : register(s0);
+struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };
+O vs(uint id : SV_VertexID) {
+    O o;
+    float2 t = float2((id << 1) & 2, id & 2);
+    o.p = float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
+    o.uv = uvrect.xy + t * uvrect.zw;
+    return o;
+}
+float Luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
+float Noise(float2 p) {
+    float3 q = frac(float3(p.xyx) * 0.1031);
+    q += dot(q, q.yzx + 33.33);
+    return frac((q.x + q.y) * q.z);
+}
+)";
+    s += high ? "#define VOL_STEPS 12\n#define VOL_DECAY 0.90\n"
+              : "#define VOL_STEPS 6\n#define VOL_DECAY 0.82\n";
+    s += R"(
+float4 psmain(O i) : SV_Target {
+    float2 uv = i.uv;
+    float4 cur = half_a.SampleLevel(ls, uv, 0);
+
+    float4 p0 = half_a.SampleLevel(ls, float2(0.22, 0.16), 0);
+    float4 p1 = half_a.SampleLevel(ls, float2(0.50, 0.13), 0);
+    float4 p2 = half_a.SampleLevel(ls, float2(0.78, 0.16), 0);
+    float w0 = max(Luma(p0.rgb) - 0.18, 0.0) * smoothstep(0.94, 0.995, p0.a) + 0.04;
+    float w1 = max(Luma(p1.rgb) - 0.18, 0.0) * smoothstep(0.94, 0.995, p1.a) + 0.06;
+    float w2 = max(Luma(p2.rgb) - 0.18, 0.0) * smoothstep(0.94, 0.995, p2.a) + 0.04;
+    float2 light_uv = (float2(0.22, 0.16) * w0 + float2(0.50, 0.13) * w1 + float2(0.78, 0.16) * w2) / (w0 + w1 + w2);
+
+    float2 delta = (light_uv - uv) * (0.72 / float(VOL_STEPS));
+    float2 suv = uv + delta * Noise(i.p.xy + frac(opts.w) * 19.0);
+    float3 shafts = float3(0.0, 0.0, 0.0);
+    float decay = 1.0;
+    for (int k = 0; k < VOL_STEPS; ++k) {
+        float4 sp = half_a.SampleLevel(ls, saturate(suv), 0);
+        float lum = Luma(sp.rgb);
+        float sky_mask = smoothstep(0.955, 0.997, sp.a);
+        float emissive = sky_mask * max(lum - 0.20, 0.0) + max(lum - 0.42, 0.0) * 0.55;
+        shafts += sp.rgb * emissive * decay;
+        decay *= VOL_DECAY;
+        suv += delta;
+    }
+    shafts *= (opts.z / float(VOL_STEPS)) * 0.46;
+
+    float2 off = opts.xy * 3.0;
+    float3 b0 = half_a.SampleLevel(ls, uv + float2(-off.x, -off.y), 0).rgb;
+    float3 b1 = half_a.SampleLevel(ls, uv + float2( off.x, -off.y), 0).rgb;
+    float3 b2 = half_a.SampleLevel(ls, uv + float2(-off.x,  off.y), 0).rgb;
+    float3 b3 = half_a.SampleLevel(ls, uv + float2( off.x,  off.y), 0).rgb;
+    float3 bloom_src = max((b0 + b1 + b2 + b3) * 0.25 - 0.52, 0.0);
+    float lin_d = 1.0 / max(1.0 - cur.a, 0.0005);
+    float haze_w = smoothstep(8.0, 65.0, lin_d) * 0.24 * opts.z;
+
+    return float4(min(shafts + bloom_src * haze_w, 0.62), 1.0);
+}
+)";
+    return cache.emplace(key, std::move(s)).first->second;
+}
+
+const char* kVolCompositeHlsl = R"(
+cbuffer B : register(b1) { float4 uvrect; float4 opts; };
+Texture2D voltex : register(t0);
+SamplerState ls : register(s0);
+struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };
+O vs(uint id : SV_VertexID) {
+    O o;
+    float2 t = float2((id << 1) & 2, id & 2);
+    o.p = float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
+    o.uv = uvrect.xy + t * uvrect.zw;
+    return o;
+}
+float4 psmain(O i) : SV_Target {
+    float2 d = opts.xy * 0.75;
+    float3 c = voltex.SampleLevel(ls, i.uv + float2(-d.x, -d.y), 0).rgb
+             + voltex.SampleLevel(ls, i.uv + float2( d.x, -d.y), 0).rgb
+             + voltex.SampleLevel(ls, i.uv + float2(-d.x,  d.y), 0).rgb
+             + voltex.SampleLevel(ls, i.uv + float2( d.x,  d.y), 0).rgb;
+    return float4(c * 0.25, 1.0);
+}
+)";
+
+const std::string& DofBokehHlsl(bool high) {
+    static std::unordered_map<uint32_t, std::string> cache;
+    const uint32_t key = high ? 1u : 0u;
+    if (auto it = cache.find(key); it != cache.end()) return it->second;
+
+    std::string s = R"(
+cbuffer B : register(b1) { float4 uvrect; float4 opts; };
+Texture2D half_a : register(t0);
+SamplerState ls : register(s0);
+struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };
+O vs(uint id : SV_VertexID) {
+    O o;
+    float2 t = float2((id << 1) & 2, id & 2);
+    o.p = float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
+    o.uv = uvrect.xy + t * uvrect.zw;
+    return o;
+}
+float LinD(float z) { return 1.0 / max(1.0 - z, 0.0005); }
+float Coc(float d, float focus_d) {
+    float far_c = smoothstep(focus_d * 2.8, focus_d * 13.0, d);
+    float near_c = smoothstep(focus_d * 0.45, focus_d * 0.14, d) * 0.30;
+    return saturate(max(far_c, near_c));
+}
+)";
+    if (high) {
+        s += R"(
+#define DOF_TAPS 12
+#define DOF_RAD 5.2
+)";
+    } else {
+        s += R"(
+#define DOF_TAPS 6
+#define DOF_RAD 3.2
+)";
+    }
+    s += R"(
+float4 psmain(O i) : SV_Target {
+    float4 c0 = half_a.SampleLevel(ls, i.uv, 0);
+    float d0 = LinD(half_a.SampleLevel(ls, float2(0.50, 0.56), 0).a);
+    float d1 = LinD(half_a.SampleLevel(ls, float2(0.50, 0.48), 0).a);
+    float d2 = LinD(half_a.SampleLevel(ls, float2(0.44, 0.56), 0).a);
+    float d3 = LinD(half_a.SampleLevel(ls, float2(0.56, 0.56), 0).a);
+    float focus_d = clamp(min(min(d0, d1), min(d2, d3)), 3.0, 38.0);
+
+    float coc = Coc(LinD(c0.a), focus_d);
+    if (coc <= 0.01) return float4(c0.rgb, 0.0);
+
+)";
+    if (high) {
+        s += R"(
+    const float2 offs[12] = {
+        float2( 0.289,  0.000), float2(-0.299,  0.273), float2( 0.044, -0.498),
+        float2( 0.371,  0.464), float2(-0.671, -0.059), float2( 0.507, -0.533),
+        float2( 0.088,  0.785), float2(-0.742, -0.415), float2( 0.908, -0.056),
+        float2(-0.491,  0.818), float2(-0.273, -0.962), float2( 0.720,  0.694)
+    };
+)";
+    } else {
+        s += R"(
+    const float2 offs[6] = {
+        float2( 1.000,  0.000), float2( 0.500,  0.866), float2(-0.500,  0.866),
+        float2(-1.000,  0.000), float2(-0.500, -0.866), float2( 0.500, -0.866)
+    };
+)";
+    }
+    s += R"(
+    float2 rad = opts.xy * (DOF_RAD * (0.35 + 0.65 * coc));
+    float3 acc = c0.rgb * 0.25;
+    float wsum = 0.25;
+    for (int k = 0; k < DOF_TAPS; ++k) {
+        float4 sp = half_a.SampleLevel(ls, saturate(i.uv + offs[k] * rad), 0);
+        float scoc = Coc(LinD(sp.a), focus_d);
+        float w = lerp(0.15, 1.0, scoc);
+        float lum = dot(sp.rgb, float3(0.299, 0.587, 0.114));
+        w *= 1.0 + max(lum - 0.72, 0.0) * 1.4;
+        acc += sp.rgb * w;
+        wsum += w;
+    }
+    return float4(acc / wsum, coc * opts.z);
+}
+)";
+    return cache.emplace(key, std::move(s)).first->second;
+}
+
+const char* kDofCompositeHlsl = R"(
+cbuffer B : register(b1) { float4 uvrect; };
+Texture2D doftex : register(t0);
+SamplerState ls : register(s0);
+struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };
+O vs(uint id : SV_VertexID) {
+    O o;
+    float2 t = float2((id << 1) & 2, id & 2);
+    o.p = float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
+    o.uv = uvrect.xy + t * uvrect.zw;
+    return o;
+}
+float4 psmain(O i) : SV_Target { return doftex.SampleLevel(ls, i.uv, 0); }
 )";
 
 // ---- the console's values as Vulkan's
@@ -1851,8 +2084,9 @@ private:
 
     // shaders and pipelines
     VkShaderModule Module(const std::string& src, const char* entry, vkshader::Stage stage, uint64_t& hash);
-    VkPipeline FullScreenPipeline(const char* hlsl, const char* ps_entry, VkFormat color, VkFormat depth, bool over,
-                                  uint8_t wmask = 0xF);
+    VkPipeline FullScreenPipeline(const char* hlsl, const char* ps_entry, VkFormat color, VkFormat depth,
+                                  uint32_t blend_mode, uint8_t wmask = 0xF,
+                                  VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT, bool has_resolve = false);
     VkPipeline OverlayPipeline(bool sdf, VkFormat color);
     VkPipeline EnsurePipeline(const PsoKey& k, VkShaderModule vs, VkShaderModule ps);
     VkSampler Sampler(const VkSamplerCreateInfo& ci);
@@ -1900,6 +2134,8 @@ private:
     void ReleaseOldTextures();
     void ApplySettings();
     void SavePipelineCache();
+    bool EnsurePostFxTargets(uint32_t w, uint32_t h, bool need_dof, bool need_vol);
+    void ApplyScenePostFx();
 
     VkInstance instance_ = VK_NULL_HANDLE;
     VkSurfaceKHR surface_ = VK_NULL_HANDLE;
@@ -1914,8 +2150,10 @@ private:
     std::vector<const char*> dev_exts_;
     bool bc_ = false;
     VkSampleCountFlags msaa_caps_ = VK_SAMPLE_COUNT_1_BIT;
+    VkSampleCountFlags depth_msaa_sample_caps_ = 0;
     VkSampleCountFlagBits msaa_samples_ = VK_SAMPLE_COUNT_1_BIT;
     VkFormat depth_fmt_ = VK_FORMAT_D24_UNORM_S8_UINT;
+    VkFormat postfx_fmt_ = VK_FORMAT_R16G16B16A16_SFLOAT;
     bool depth_linear_ = false;
     bool r32f_linear_ = false;
     Allocator alloc_;
@@ -2041,6 +2279,13 @@ private:
     VkPipeline present_pipe_ = VK_NULL_HANDLE;
     Target* draw_rt_ = nullptr;
     Target* draw_ds_ = nullptr;
+    Target* scene_rt_ = nullptr;
+    Target* scene_ds_ = nullptr;
+    uint32_t scene_3d_draws_ = 0;
+    bool scene_postfx_done_ = false;
+    Image fx_half_a_;
+    Image fx_half_b_;
+    Image fx_vol_;
     uint32_t guest_w_ = 640, guest_h_ = 480;
     float scale_ = 1.0f;
     Assembled asm_;
@@ -2258,7 +2503,27 @@ bool VulkanBackend::CreateDevice() {
     depth_linear_ = fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
     vkGetPhysicalDeviceFormatProperties(pd_, VK_FORMAT_R32_SFLOAT, &fp);
     r32f_linear_ = fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    vkGetPhysicalDeviceFormatProperties(pd_, VK_FORMAT_R16G16B16A16_SFLOAT, &fp);
+    constexpr VkFormatFeatureFlags kFxNeed = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                                             VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                             VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    postfx_fmt_ = ((fp.optimalTilingFeatures & kFxNeed) == kFxNeed) ? VK_FORMAT_R16G16B16A16_SFLOAT : kBgra;
     msaa_caps_ = props_.limits.framebufferColorSampleCounts & props_.limits.framebufferDepthSampleCounts;
+    VkImageFormatProperties ifp{};
+    if (vkGetPhysicalDeviceImageFormatProperties(pd_, depth_fmt_, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+                                               VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, 0, &ifp) == VK_SUCCESS) {
+        msaa_caps_ &= ifp.sampleCounts;
+    }
+    if (vkGetPhysicalDeviceImageFormatProperties(pd_, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_TYPE_2D,
+                                               VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                                               0, &ifp) == VK_SUCCESS) {
+        msaa_caps_ &= ifp.sampleCounts;
+    }
+    if (vkGetPhysicalDeviceImageFormatProperties(pd_, depth_fmt_, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+                                               VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                               0, &ifp) == VK_SUCCESS) {
+        depth_msaa_sample_caps_ = ifp.sampleCounts;
+    }
     msaa_samples_ = DesiredMsaaSamples();
     LOGI("vulkan: depth %s, BC textures %s, MSAA caps 0x%x (active %ux)",
          depth_fmt_ == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8",
@@ -2518,7 +2783,7 @@ bool VulkanBackend::CreateImage(Image& im, VkFormat fmt, uint32_t w, uint32_t h,
     vi.format = fmt;
     vi.subresourceRange = {VkImageAspectFlags(im.depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), 0,
                            levels, 0, layers};
-    if ((usage & VK_IMAGE_USAGE_SAMPLED_BIT) && samples == VK_SAMPLE_COUNT_1_BIT)
+    if ((usage & VK_IMAGE_USAGE_SAMPLED_BIT) && (samples == VK_SAMPLE_COUNT_1_BIT || im.depth))
         vkCreateImageView(dev_, &vi, nullptr, &im.view);
     if (usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
         vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -3306,10 +3571,14 @@ VkShaderModule VulkanBackend::Module(const std::string& src, const char* entry, 
 }
 
 // a full screen pass: the triangle from SV_VertexID, solid, no culling; depth set: writes depth only
+// blend_mode: 0=replace, 1=premultiplied over, 2=straight SRC_ALPHA, 3=additive ONE+ONE
 VkPipeline VulkanBackend::FullScreenPipeline(const char* hlsl, const char* ps_entry, VkFormat color, VkFormat depth,
-                                             bool over, uint8_t wmask) {
-    uint64_t key = Hash(hlsl, std::strlen(hlsl),
-                        uint64_t(color) << 32 | uint64_t(depth) << 5 | uint64_t(wmask & 0xF) << 1 | (over ? 1 : 0));
+                                             uint32_t blend_mode, uint8_t wmask, VkSampleCountFlagBits samples,
+                                             bool has_resolve) {
+    const uint64_t fflags = uint64_t(blend_mode & 0x3u) | (uint64_t(wmask & 0xFu) << 2) |
+                            (has_resolve ? (1ull << 6) : 0ull) | (uint64_t(samples) << 8) |
+                            (uint64_t(depth) << 16) | (uint64_t(color) << 32);
+    uint64_t key = Hash(hlsl, std::strlen(hlsl), fflags);
     key = Hash(ps_entry, std::strlen(ps_entry), key);
     if (auto it = pipelines_.find(key); it != pipelines_.end()) return it->second;
     uint64_t hv, hp;
@@ -3335,16 +3604,16 @@ VkPipeline VulkanBackend::FullScreenPipeline(const char* hlsl, const char* ps_en
         rs.cullMode = VK_CULL_MODE_NONE;
         rs.lineWidth = 1;
         VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        ms.rasterizationSamples = samples;
         VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
         ds.depthTestEnable = ds.depthWriteEnable = depth != VK_FORMAT_UNDEFINED;
         ds.depthCompareOp = VK_COMPARE_OP_ALWAYS;
         VkPipelineColorBlendAttachmentState ba{};
         ba.colorWriteMask = wmask & 0xF;
-        if (over) {
+        if (blend_mode != 0u) {
             ba.blendEnable = VK_TRUE;
-            ba.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
-            ba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            ba.srcColorBlendFactor = (blend_mode == 2u) ? VK_BLEND_FACTOR_SRC_ALPHA : VK_BLEND_FACTOR_ONE;
+            ba.dstColorBlendFactor = (blend_mode == 3u) ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
             ba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
             ba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
         }
@@ -3361,7 +3630,7 @@ VkPipeline VulkanBackend::FullScreenPipeline(const char* hlsl, const char* ps_en
         rinfo.depthAttachmentFormat = depth;
         rinfo.stencilAttachmentFormat = HasStencil(depth) ? depth : VK_FORMAT_UNDEFINED;
         VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, dynamic_ ? &rinfo : nullptr};
-        if (!dynamic_) pi.renderPass = Pass(color, depth);
+        if (!dynamic_) pi.renderPass = Pass(color, depth, false, false, samples, has_resolve);
         pi.stageCount = 2;
         pi.pStages = st;
         pi.pVertexInputState = &vi;
@@ -3697,6 +3966,8 @@ Target* VulkanBackend::FindTarget(const Surface& s, bool depth) {
 void VulkanBackend::ReleaseTarget(std::unordered_map<uint64_t, Target>::iterator it) {
     if (draw_rt_ == &it->second) draw_rt_ = nullptr;
     if (draw_ds_ == &it->second) draw_ds_ = nullptr;
+    if (scene_rt_ == &it->second) scene_rt_ = nullptr;
+    if (scene_ds_ == &it->second) scene_ds_ = nullptr;
     Retire(it->second.img);
     Retire(it->second.msaa);
     Retire(it->second.fb);
@@ -3736,8 +4007,10 @@ Target* VulkanBackend::EnsureTarget(const Surface& s, bool depth) {
     }
     // Companion hardware MSAA 2x/4x attachment for full-size 3D scene color & depth targets
     if (msaa_samples_ > VK_SAMPLE_COUNT_1_BIT && gw >= guest_w_ && gh >= guest_h_) {
-        VkImageUsageFlags ms_usage = depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
-                                           : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        VkImageUsageFlags ms_usage = depth
+            ? (VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+               ((depth_msaa_sample_caps_ & msaa_samples_) ? VK_IMAGE_USAGE_SAMPLED_BIT : 0u))
+            : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         if (CreateImage(t.msaa, depth ? depth_fmt_ : kBgra, t.w, t.h, 1, 1, 1, ms_usage,
                         VK_IMAGE_VIEW_TYPE_2D, false, msaa_samples_)) {
             const float zero[4] = {0, 0, 0, 0};
@@ -3793,7 +4066,29 @@ void VulkanBackend::UpgradeTargetSigned(Target& t) {
         if (CreateImage(t.msaa, kSignedFmt, t.w, t.h, 1, 1, 1, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
                         VK_IMAGE_VIEW_TYPE_2D, false, msaa_samples_)) {
             const float zero[4] = {0, 0, 0, 0};
-            BeginRenderClear(&t.msaa, nullptr, true, zero, false, 1.0f, false, 0u, nullptr);
+            if (t.drawn) {
+                float c[8] = {0, 0, 1, 1, 0, 1, 1, 1};
+                Alloc cb = Constants(c, sizeof(c));
+                VkPipeline pipe = FullScreenPipeline(kBlitHlsl, "psmain", kSignedFmt, VK_FORMAT_UNDEFINED, 0u, 0xF,
+                                                     msaa_samples_, false);
+                if (pipe) {
+                    Transition(t.img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                    Transition(lut_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                    const VkImageView views[4] = {t.img.view, lut_.view, VK_NULL_HANDLE, VK_NULL_HANDLE};
+                    const VkSampler samplers[4] = {linear_, point_, point_, point_};
+                    VkDescriptorSet set = Set(views, samplers);
+                    BeginRender(&t.msaa, nullptr);
+                    BindPipeline(pipe);
+                    BindSet(set, cb.off, cb.off);
+                    SetViewport(0, 0, float(t.w), float(t.h));
+                    SetScissor(0, 0, int32_t(t.w), int32_t(t.h));
+                    vkCmdDraw(Cb(), 3, 1, 0, 0);
+                } else {
+                    BeginRenderClear(&t.msaa, nullptr, true, zero, false, 1.0f, false, 0u, nullptr);
+                }
+            } else {
+                BeginRenderClear(&t.msaa, nullptr, true, zero, false, 1.0f, false, 0u, nullptr);
+            }
             EndRender();
         }
     }
@@ -3843,7 +4138,7 @@ void VulkanBackend::Blit(Image& dst, const VkRect2D& to, Image& src, const float
     float c[8] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3], o.gamma ? 1.0f : 0.0f, o.alpha ? 1.0f : 0.0f,
                   float(o.taps), o.mul};
     Alloc cb = Constants(c, sizeof(c));
-    VkPipeline pipe = FullScreenPipeline(kBlitHlsl, "psmain", dst.fmt, VK_FORMAT_UNDEFINED, o.over);
+    VkPipeline pipe = FullScreenPipeline(kBlitHlsl, "psmain", dst.fmt, VK_FORMAT_UNDEFINED, o.over ? 1u : 0u);
     if (!pipe) return;
     Transition(src, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     Transition(lut_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -3885,7 +4180,7 @@ bool VulkanBackend::DepthCopy(const State& s) {
     Target& dst = di->second;
     Target& src = si->second;
     Alloc cb = Constants(nullptr, 0);
-    VkPipeline pipe = FullScreenPipeline(kDepthHlsl, "psmain", VK_FORMAT_UNDEFINED, depth_fmt_, false);
+    VkPipeline pipe = FullScreenPipeline(kDepthHlsl, "psmain", VK_FORMAT_UNDEFINED, depth_fmt_, 0u);
     if (!pipe) return false;
     Transition(src.img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     const VkImageView views[4] = {src.img.view, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
@@ -4356,6 +4651,13 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
     DrawTextures stages;
     if (!BindStageTextures(s, stages) || (!draw_rt_ && !draw_ds_)) return;
     if (!game::Opt().bloom && GlowComposite(s, stages)) return;
+    if ((game::Opt().volumetric > 0u || game::Opt().dof > 0u) && !scene_postfx_done_ && scene_rt_ &&
+        rt == scene_rt_ && scene_3d_draws_ >= 8u) {
+        const bool has_rt_stage = stages.rt[0] || stages.rt[1] || stages.rt[2] || stages.rt[3];
+        if (!has_rt_stage && (ds == nullptr || a.pretransformed)) {
+            ApplyScenePostFx();
+        }
+    }
     PixelKey pk = MakePixelKey(s, stages.info);
     sh.pkey = Hash(&pk, sizeof(pk));
     EnsurePixelShader(pk, sh, signed_src);
@@ -4448,6 +4750,13 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
     BeginRender(rt_att, ds_att, rt_res);
     if (draw_rt_) draw_rt_->drawn = true;
     if (draw_ds_) draw_ds_->drawn = true;
+    if (!scene_postfx_done_ && !a.pretransformed && draw_rt_ && draw_ds_ &&
+        draw_rt_->gw >= guest_w_ && draw_rt_->gh >= guest_h_ &&
+        draw_rt_->w == draw_ds_->w && draw_rt_->h == draw_ds_->h && s.rs[kRsZEnable] != 0) {
+        scene_rt_ = draw_rt_;
+        scene_ds_ = draw_ds_;
+        ++scene_3d_draws_;
+    }
     BindPipeline(pipe);
     BindSet(set, vc.off, dc.off);
     Target& bt = draw_rt_ ? *draw_rt_ : *draw_ds_;
@@ -4536,15 +4845,21 @@ void VulkanBackend::ClearTarget(Target& t, const State& s, uint32_t count, const
         uint8_t wmask = uint8_t((flags >> 4) & 0xF);
         if (!wmask) return;
         if (wmask != 0xF) {
+            if (&t == scene_rt_ && !scene_postfx_done_ && scene_3d_draws_ >= 8u &&
+                (game::Opt().volumetric > 0u || game::Opt().dof > 0u)) {
+                ApplyScenePostFx();
+            }
             float c[4];
             Color(color, c);
             Alloc cb = Constants(c, sizeof(c));
-            VkPipeline pipe = FullScreenPipeline(kClearHlsl, "psmain", t.img.fmt, VK_FORMAT_UNDEFINED, false, wmask);
+            const bool use_msaa = bool(t.msaa);
+            VkPipeline pipe = FullScreenPipeline(kClearHlsl, "psmain", t.img.fmt, VK_FORMAT_UNDEFINED, 0u, wmask,
+                                                 use_msaa ? t.msaa.samples : VK_SAMPLE_COUNT_1_BIT, use_msaa);
             if (!pipe) return;
             const VkImageView views[4] = {};
             const VkSampler samplers[4] = {};
             VkDescriptorSet set = Set(views, samplers);
-            BeginRender(&t.img, nullptr);
+            BeginRender(use_msaa ? &t.msaa : &t.img, nullptr, use_msaa ? &t.img : nullptr);
             BindPipeline(pipe);
             BindSet(set, cb.off, cb.off);
             SetViewport(0, 0, float(t.w), float(t.h));
@@ -4554,6 +4869,12 @@ void VulkanBackend::ClearTarget(Target& t, const State& s, uint32_t count, const
                 vkCmdDraw(Cb(), 3, 1, 0, 0);
             }
             return;
+        }
+        if (&t == scene_rt_ && t.gw >= guest_w_ && t.gh >= guest_h_ && count == 0 && !rects) {
+            scene_rt_ = nullptr;
+            scene_ds_ = nullptr;
+            scene_3d_draws_ = 0;
+            scene_postfx_done_ = false;
         }
         ca.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         Color(color, ca.clearValue.color.float32);
@@ -4593,6 +4914,12 @@ void VulkanBackend::Clear(const State& s, uint32_t count, const uint8_t* rects, 
                 rt->epoch = DirtyEpoch(rt->data);
                 rt->read.clear();
                 rt->drawn = true;
+                if (rt->gw >= guest_w_ && rt->gh >= guest_h_) {
+                    scene_rt_ = nullptr;
+                    scene_ds_ = nullptr;
+                    scene_3d_draws_ = 0;
+                    scene_postfx_done_ = false;
+                }
             }
             if (clear_z || clear_s) ds->drawn = true;
             float cc[4] = {};
@@ -4803,7 +5130,164 @@ bool VulkanBackend::AcquireImage(uint32_t& index) {
     return false;
 }
 
+bool VulkanBackend::EnsurePostFxTargets(uint32_t w, uint32_t h, bool need_dof, bool need_vol) {
+    const uint32_t hw = std::max(1u, w / 2u);
+    const uint32_t hh = std::max(1u, h / 2u);
+    const VkImageUsageFlags fx_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (!fx_half_a_ || fx_half_a_.w != hw || fx_half_a_.h != hh || fx_half_a_.fmt != postfx_fmt_) {
+        Retire(fx_half_a_);
+        if (!CreateImage(fx_half_a_, postfx_fmt_, hw, hh, 1, 1, 1, fx_usage, VK_IMAGE_VIEW_TYPE_2D)) return false;
+    }
+    if (need_dof) {
+        if (!fx_half_b_ || fx_half_b_.w != hw || fx_half_b_.h != hh || fx_half_b_.fmt != postfx_fmt_) {
+            Retire(fx_half_b_);
+            if (!CreateImage(fx_half_b_, postfx_fmt_, hw, hh, 1, 1, 1, fx_usage, VK_IMAGE_VIEW_TYPE_2D)) return false;
+        }
+    }
+    if (need_vol) {
+        const uint32_t qw = std::max(1u, hw / 2u);
+        const uint32_t qh = std::max(1u, hh / 2u);
+        if (!fx_vol_ || fx_vol_.w != qw || fx_vol_.h != qh || fx_vol_.fmt != postfx_fmt_) {
+            Retire(fx_vol_);
+            if (!CreateImage(fx_vol_, postfx_fmt_, qw, qh, 1, 1, 1, fx_usage, VK_IMAGE_VIEW_TYPE_2D)) return false;
+        }
+    }
+    return true;
+}
+
+void VulkanBackend::ApplyScenePostFx() {
+    if (!scene_rt_ || !scene_ds_ || scene_3d_draws_ < 8u || scene_postfx_done_) return;
+    scene_postfx_done_ = true;
+
+    const auto ctx = static_cast<game::UiContext>(game::Telemetry().ui_context.load(std::memory_order_relaxed));
+    if (ctx == game::UiContext::Loading || ctx == game::UiContext::FmvUnskippable ||
+        ctx == game::UiContext::FmvSkippable) {
+        return;
+    }
+
+    const uint32_t vol = std::min(game::Opt().volumetric, 2u);
+    const uint32_t dof = std::min(game::Opt().dof, 2u);
+    if (vol == 0u && dof == 0u) return;
+
+    Image& depth_src = (scene_ds_->msaa && scene_ds_->msaa.view) ? scene_ds_->msaa : scene_ds_->img;
+    if (!scene_rt_->img.view || !depth_src.view) return;
+    const bool msaa_depth = (depth_src.samples > VK_SAMPLE_COUNT_1_BIT);
+
+    if (!EnsurePostFxTargets(scene_rt_->w, scene_rt_->h, dof != 0u, vol != 0u)) return;
+
+    EndRender();
+    Transition(scene_rt_->img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    Transition(depth_src, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    // 1. Shared half-res scene + depth capture pass
+    {
+        float pc[8] = {0, 0, 1, 1, float(depth_src.w), float(depth_src.h), 0, 0};
+        Alloc cb = Constants(pc, sizeof(pc));
+        VkPipeline prep = FullScreenPipeline(msaa_depth ? kPostPrepareMsaaHlsl : kPostPrepare1xHlsl, "psmain",
+                                             fx_half_a_.fmt, VK_FORMAT_UNDEFINED, 0u);
+        if (!prep) return;
+        const VkImageView views[4] = {scene_rt_->img.view, depth_src.view, VK_NULL_HANDLE, VK_NULL_HANDLE};
+        const VkSampler samplers[4] = {linear_, point_, point_, point_};
+        VkDescriptorSet set = Set(views, samplers);
+        BeginRender(&fx_half_a_, nullptr);
+        BindPipeline(prep);
+        BindSet(set, cb.off, cb.off);
+        SetViewport(0, 0, float(fx_half_a_.w), float(fx_half_a_.h));
+        SetScissor(0, 0, int32_t(fx_half_a_.w), int32_t(fx_half_a_.h));
+        vkCmdDraw(Cb(), 3, 1, 0, 0);
+    }
+
+    const bool rt_msaa = bool(scene_rt_->msaa);
+    Image* rt_att = rt_msaa ? &scene_rt_->msaa : &scene_rt_->img;
+    Image* rt_res = rt_msaa ? &scene_rt_->img : nullptr;
+    const VkSampleCountFlagBits rt_samples = rt_msaa ? scene_rt_->msaa.samples : VK_SAMPLE_COUNT_1_BIT;
+
+    // 2. Depth of Field (half-res edge-aware bokeh -> straight-alpha composite over background only)
+    if (dof != 0u) {
+        const bool high_dof = (dof >= 2u);
+        Transition(fx_half_a_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        float dc[8] = {0, 0, 1, 1, 1.0f / float(fx_half_a_.w), 1.0f / float(fx_half_a_.h),
+                       high_dof ? 0.92f : 0.68f, float(fx_half_a_.w) / float(fx_half_a_.h)};
+        Alloc cb = Constants(dc, sizeof(dc));
+        const std::string& bsrc = DofBokehHlsl(high_dof);
+        VkPipeline bpipe = FullScreenPipeline(bsrc.c_str(), "psmain", fx_half_b_.fmt, VK_FORMAT_UNDEFINED, 0u);
+        if (bpipe) {
+            const VkImageView views[4] = {fx_half_a_.view, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+            const VkSampler samplers[4] = {linear_, point_, point_, point_};
+            VkDescriptorSet set = Set(views, samplers);
+            BeginRender(&fx_half_b_, nullptr);
+            BindPipeline(bpipe);
+            BindSet(set, cb.off, cb.off);
+            SetViewport(0, 0, float(fx_half_b_.w), float(fx_half_b_.h));
+            SetScissor(0, 0, int32_t(fx_half_b_.w), int32_t(fx_half_b_.h));
+            vkCmdDraw(Cb(), 3, 1, 0, 0);
+
+            Transition(fx_half_b_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            float cc[4] = {0, 0, 1, 1};
+            Alloc ccb = Constants(cc, sizeof(cc));
+            VkPipeline cpipe = FullScreenPipeline(kDofCompositeHlsl, "psmain", scene_rt_->img.fmt,
+                                                  VK_FORMAT_UNDEFINED, 2u, 0xF, rt_samples, rt_msaa);
+            if (cpipe) {
+                const VkImageView cviews[4] = {fx_half_b_.view, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+                VkDescriptorSet cset = Set(cviews, samplers);
+                BeginRender(rt_att, nullptr, rt_res);
+                BindPipeline(cpipe);
+                BindSet(cset, ccb.off, ccb.off);
+                SetViewport(0, 0, float(scene_rt_->w), float(scene_rt_->h));
+                SetScissor(0, 0, int32_t(scene_rt_->w), int32_t(scene_rt_->h));
+                vkCmdDraw(Cb(), 3, 1, 0, 0);
+            }
+        }
+    }
+
+    // 3. Volumetric Lighting (quarter-res depth-occluded crepuscular shafts + night haze -> additive composite)
+    if (vol != 0u) {
+        const bool high_vol = (vol >= 2u);
+        Transition(fx_half_a_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        const float secs = std::fmod(
+            std::chrono::duration<float>(std::chrono::steady_clock::now().time_since_epoch()).count(), 1000.0f);
+        float vc[8] = {0, 0, 1, 1, 1.0f / float(fx_half_a_.w), 1.0f / float(fx_half_a_.h),
+                       high_vol ? 1.00f : 0.72f, secs};
+        Alloc cb = Constants(vc, sizeof(vc));
+        const std::string& vsrc = VolumetricHlsl(high_vol);
+        VkPipeline vpipe = FullScreenPipeline(vsrc.c_str(), "psmain", fx_vol_.fmt, VK_FORMAT_UNDEFINED, 0u);
+        if (vpipe) {
+            const VkImageView views[4] = {fx_half_a_.view, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+            const VkSampler samplers[4] = {linear_, point_, point_, point_};
+            VkDescriptorSet set = Set(views, samplers);
+            BeginRender(&fx_vol_, nullptr);
+            BindPipeline(vpipe);
+            BindSet(set, cb.off, cb.off);
+            SetViewport(0, 0, float(fx_vol_.w), float(fx_vol_.h));
+            SetScissor(0, 0, int32_t(fx_vol_.w), int32_t(fx_vol_.h));
+            vkCmdDraw(Cb(), 3, 1, 0, 0);
+
+            Transition(fx_vol_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            float cc[8] = {0, 0, 1, 1, 1.0f / float(fx_vol_.w), 1.0f / float(fx_vol_.h), 0, 0};
+            Alloc ccb = Constants(cc, sizeof(cc));
+            VkPipeline cpipe = FullScreenPipeline(kVolCompositeHlsl, "psmain", scene_rt_->img.fmt,
+                                                  VK_FORMAT_UNDEFINED, 3u, 0xF, rt_samples, rt_msaa);
+            if (cpipe) {
+                const VkImageView cviews[4] = {fx_vol_.view, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+                VkDescriptorSet cset = Set(cviews, samplers);
+                BeginRender(rt_att, nullptr, rt_res);
+                BindPipeline(cpipe);
+                BindSet(cset, ccb.off, ccb.off);
+                SetViewport(0, 0, float(scene_rt_->w), float(scene_rt_->h));
+                SetScissor(0, 0, int32_t(scene_rt_->w), int32_t(scene_rt_->h));
+                vkCmdDraw(Cb(), 3, 1, 0, 0);
+            }
+        }
+    }
+
+    EndRender();
+}
+
 void VulkanBackend::DrawFrame(Target* t, uint32_t index) {
+    if (t && t == scene_rt_ && !scene_postfx_done_ && scene_3d_draws_ >= 8u &&
+        (game::Opt().volumetric > 0u || game::Opt().dof > 0u)) {
+        ApplyScenePostFx();
+    }
     EndRender();
     // Build & upload batched 2D touch overlay vertex buffers BEFORE swapchain barrier & render pass!
     PrepareUi(float(swap_extent_.width), float(swap_extent_.height));
@@ -4864,9 +5348,9 @@ void VulkanBackend::DrawFrame(Target* t, uint32_t index) {
         } else {
             if (use_filter) {
                 const std::string& fsrc = FilterHlsl(kind, mode, gamma_, game::Opt().hdr, fxaa);
-                pipe = FullScreenPipeline(fsrc.c_str(), "psmain", swap_fmt_, VK_FORMAT_UNDEFINED, false);
+                pipe = FullScreenPipeline(fsrc.c_str(), "psmain", swap_fmt_, VK_FORMAT_UNDEFINED, 0u);
             } else {
-                pipe = FullScreenPipeline(kBlitHlsl, "psmain", swap_fmt_, VK_FORMAT_UNDEFINED, false);
+                pipe = FullScreenPipeline(kBlitHlsl, "psmain", swap_fmt_, VK_FORMAT_UNDEFINED, 0u);
             }
             present_pipe_key_ = fkey;
             present_pipe_ = pipe;
@@ -5107,7 +5591,12 @@ void VulkanBackend::ApplySettings() {
         Retire(t.fb);
     }
     targets_.clear();
-    draw_rt_ = draw_ds_ = nullptr;
+    Retire(fx_half_a_);
+    Retire(fx_half_b_);
+    Retire(fx_vol_);
+    draw_rt_ = draw_ds_ = scene_rt_ = scene_ds_ = nullptr;
+    scene_3d_draws_ = 0;
+    scene_postfx_done_ = false;
     scale_ = want;
     msaa_samples_ = want_msaa;
     LOGI("vulkan: render scale %.3f, MSAA %ux", scale_, uint32_t(msaa_samples_));
@@ -5146,6 +5635,9 @@ void VulkanBackend::Present(const Surface& front) {
         present_index_ = index;
         DrawFrame(t, index);
     }
+    scene_rt_ = scene_ds_ = nullptr;
+    scene_3d_draws_ = 0;
+    scene_postfx_done_ = false;
     Submit(false, shown);
     present_value_[presents_ % (kFrames + 1)].store(value_);
     if (shown) {
