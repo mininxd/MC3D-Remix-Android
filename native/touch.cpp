@@ -3187,24 +3187,29 @@ void BuildOverlay(std::vector<Quad>& out) {
                 }
             }
 
-            // Bold rounded Auto-Gas circle with centered 3-bar hamburger icon (respects layout opacity)
-            const float fill_a = (active_highlight ? 0.28f : 0.16f) * vis_a;
+            // Bold rounded Auto-Gas circle with centered 3-bar hamburger icon (solid fill when active)
+            const bool solid_active = !show_editor && (gas_armed || g_auto_gas);
+            const float fill_a = solid_active ? std::min(1.0f, vis_a * 0.98f)
+                                              : ((active_highlight ? 0.28f : 0.16f) * vis_a);
             const float rim_a = (active_highlight ? 0.98f : 0.88f) * vis_a;
             const float ring_th = std::max(3.2f, th * (active_highlight ? 2.15f : 1.75f));
             EmitPanel(out, ag.cx - ag.r, ag.cy - ag.r, ag.cx + ag.r, ag.cy + ag.r,
-                      active_highlight ? cr * 0.25f : 0.04f,
-                      active_highlight ? cg * 0.25f : 0.05f,
-                      active_highlight ? cb * 0.25f : 0.08f,
+                      solid_active ? cr : (active_highlight ? cr * 0.25f : 0.04f),
+                      solid_active ? cg : (active_highlight ? cg * 0.25f : 0.05f),
+                      solid_active ? cb : (active_highlight ? cb * 0.25f : 0.08f),
                       fill_a, ag.r, ring_th, cr, cg, cb, rim_a);
 
             const float bar_hw = ag.r * 0.44f;
             const float bar_hh = std::max(1.8f, ag.r * 0.085f);
             const float bar_sp = ag.r * 0.28f;
             const float bar_a = std::min(1.0f, rim_a);
+            const float bar_r = solid_active ? 0.06f : cr;
+            const float bar_g = solid_active ? 0.09f : cg;
+            const float bar_b = solid_active ? 0.04f : cb;
             for (int k = -1; k <= 1; ++k) {
                 const float ly = ag.cy + float(k) * bar_sp;
                 EmitPanel(out, ag.cx - bar_hw, ly - bar_hh, ag.cx + bar_hw, ly + bar_hh,
-                          cr, cg, cb, bar_a, bar_hh);
+                          bar_r, bar_g, bar_b, bar_a, bar_hh);
             }
 
             // In Layout Editor, show crisp "AUTO GAS" drag-range label above the circle
@@ -3354,38 +3359,46 @@ void BuildOverlay(std::vector<Quad>& out) {
         }
     }
 
-    // 4c. First-time Garage drag-to-rotate & pinch-to-zoom non-blocking visual cue
+    // 4c. First-time Garage drag-to-rotate non-blocking visual cue: solid circle sweeping left/right with traces
     if (!editing && g_garage_hint_alpha > 0.005f && ctx == game::UiContext::Garage) {
         const float a = g_garage_hint_alpha * g_garage_hint_alpha * (3.0f - 2.0f * g_garage_hint_alpha);
         const float s = UiScale(w, h);
-        const float sweep = std::sin(float(now % 2400u) / 2400.0f * 6.2831853f);
-        const char* gtxt = "Drag to Rotate  -  Pinch to Zoom";
-        const float th_txt = std::clamp(12.0f * s, 14.0f, h * 0.027f);
-        const float pad_x = 18.0f * s;
-        const float pad_y = 10.0f * s;
-        const float track_h = 16.0f * s;
-        const float pw = std::max(MeasureTextWidth(th_txt, gtxt) + pad_x * 2.0f, 190.0f * s);
-        const float ph = track_h + th_txt + pad_y * 2.0f + 6.0f * s;
+        const float phase = float(now % 2200u) / 2200.0f * 6.2831853f;
+        const float sweep = std::sin(phase);
+        const float vel = std::cos(phase);
         const float px = w * 0.50f;
-        const float py = h * 0.78f;
+        const float py = h * 0.76f;
+        const float half_span = 64.0f * s;
+        const float dot_r = 10.5f * s;
+        const float dot_x = px + sweep * half_span;
 
-        EmitPanel(out, px - pw * 0.5f, py - ph * 0.5f, px + pw * 0.5f, py + ph * 0.5f,
-                  0.055f, 0.075f, 0.115f, 0.86f * a, 14.0f * s,
-                  std::max(1.4f, 1.5f * s), 0.28f, 0.88f, 1.00f, 0.85f * a);
+        // Horizontal segmented trace dashes along the swipe path
+        const float dash_hh = std::max(1.5f, 1.8f * s);
+        const float x_start = px - half_span;
+        const float x_end = px + half_span;
+        const float step = std::max(12.0f * s, (x_end - x_start) / 7.0f);
+        const float dash_len = step * 0.52f;
+        for (float x = x_start; x + 2.0f * s < x_end; x += step) {
+            const float x2 = std::min(x + dash_len, x_end);
+            EmitPanel(out, x, py - dash_hh, x2, py + dash_hh,
+                      1.00f, 1.00f, 1.00f, 0.32f * a, dash_hh);
+        }
 
-        // Animated horizontal drag track + glowing finger dot
-        const float track_w = 88.0f * s;
-        const float track_y = py - ph * 0.5f + pad_y + track_h * 0.5f;
-        const float bar_h = std::max(2.5f, 3.0f * s);
-        EmitPanel(out, px - track_w * 0.5f, track_y - bar_h * 0.5f, px + track_w * 0.5f, track_y + bar_h * 0.5f,
-                  0.28f, 0.88f, 1.00f, 0.28f * a, bar_h * 0.5f);
-        const float dot_x = px + sweep * (track_w * 0.42f);
-        const float dot_r = 6.0f * s;
-        EmitPanel(out, dot_x - dot_r, track_y - dot_r, dot_x + dot_r, track_y + dot_r,
-                  0.28f, 0.92f, 1.00f, 0.96f * a, dot_r);
+        // Dynamic trailing ghost trace circles behind the moving direction
+        const float speed_factor = std::fabs(vel);
+        for (int t = 4; t >= 1; --t) {
+            const float lag_x = dot_x - vel * float(t) * (10.5f * s);
+            const float lag_r = dot_r * (1.0f - 0.16f * float(t));
+            const float lag_a = (0.44f - 0.085f * float(t)) * speed_factor * a;
+            if (lag_a > 0.01f && lag_r > 1.0f) {
+                EmitPanel(out, lag_x - lag_r, py - lag_r, lag_x + lag_r, py + lag_r,
+                          1.00f, 1.00f, 1.00f, lag_a, lag_r);
+            }
+        }
 
-        EmitTextCentered(out, px, py + ph * 0.5f - pad_y - th_txt * 0.5f, th_txt,
-                         0.94f, 0.97f, 1.00f, 0.96f * a, gtxt);
+        // Solid white circle gliding left <-> right
+        EmitPanel(out, dot_x - dot_r, py - dot_r, dot_x + dot_r, py + dot_r,
+                  1.00f, 1.00f, 1.00f, 0.96f * a, dot_r);
     }
 
     // 4d. First-time Full City Map top-left < > Switch City arrow glow + callout pill
