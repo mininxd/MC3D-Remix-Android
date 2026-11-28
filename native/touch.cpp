@@ -2219,8 +2219,8 @@ void EmitDisplayLogsOverlay(std::vector<Quad>& out, float w, float h, bool touch
                       "%s, %s, %s", dev_name, cpu_name, gpu_name);
     } else {
         // Debug: Full + 1% Low, Res/AA, Draws/Verts/Cull, RAM/Tex/Obj, Temp, Build/Vulkan/Android
-        static constexpr const char* kAaNames[] = {"Off", "FXAA", "MSAA 2x", "MSAA 4x", "SSAA 2x"};
-        const char* aa_name = kAaNames[std::min<uint32_t>(game::Opt().anti_aliasing, 4u)];
+        const uint32_t aa = game::Opt().anti_aliasing;
+        const char* aa_name = (aa == 4u) ? "SSAA" : (aa == 2u || aa == 3u) ? "MSAA" : (aa == 1u) ? "FXAA" : "Off";
         const char* commit = (snap.build_commit && snap.build_commit[0]) ? snap.build_commit : "dev";
         const char* vk_api = (snap.vulkan_api && snap.vulkan_api[0]) ? snap.vulkan_api : "Vulkan";
         const char* and_ver = (snap.android_ver && snap.android_ver[0]) ? snap.android_ver : "Android";
@@ -3187,25 +3187,24 @@ void BuildOverlay(std::vector<Quad>& out) {
                 }
             }
 
-            // Rounded Auto-Gas circle with outline + centered Gas glyph (respects layout opacity)
+            // Bold rounded Auto-Gas circle with centered 3-bar hamburger icon (respects layout opacity)
             const float fill_a = (active_highlight ? 0.28f : 0.16f) * vis_a;
             const float rim_a = (active_highlight ? 0.98f : 0.88f) * vis_a;
-            const float ring_th = th * (active_highlight ? 1.10f : 0.85f);
+            const float ring_th = std::max(3.2f, th * (active_highlight ? 2.15f : 1.75f));
             EmitPanel(out, ag.cx - ag.r, ag.cy - ag.r, ag.cx + ag.r, ag.cy + ag.r,
                       active_highlight ? cr * 0.25f : 0.04f,
                       active_highlight ? cg * 0.25f : 0.05f,
                       active_highlight ? cb * 0.25f : 0.08f,
                       fill_a, ag.r, ring_th, cr, cg, cb, rim_a);
 
-            const AtlasUv& guv = g_atlas_uv[skin][static_cast<size_t>(SvgIcon::Gas)];
-            if (atlas_ok && guv.valid) {
-                const float ih = ag.r * 1.18f;
-                const float iw = ih * (84.0f / 156.0f);
-                out.push_back(Quad{ag.cx - iw * 0.5f, ag.cy - ih * 0.5f, ag.cx + iw * 0.5f, ag.cy + ih * 0.5f,
-                                   guv.u0, guv.v0, guv.u1, guv.v1,
-                                   cr, cg, cb, std::min(1.0f, rim_a), 0, 0, 0, 0, 0, 0, 0u});
-            } else {
-                EmitTextCentered(out, ag.cx, ag.cy, ag.r * 0.85f, cr, cg, cb, std::min(1.0f, rim_a), "^");
+            const float bar_hw = ag.r * 0.44f;
+            const float bar_hh = std::max(1.8f, ag.r * 0.085f);
+            const float bar_sp = ag.r * 0.28f;
+            const float bar_a = std::min(1.0f, rim_a);
+            for (int k = -1; k <= 1; ++k) {
+                const float ly = ag.cy + float(k) * bar_sp;
+                EmitPanel(out, ag.cx - bar_hw, ly - bar_hh, ag.cx + bar_hw, ly + bar_hh,
+                          cr, cg, cb, bar_a, bar_hh);
             }
 
             // In Layout Editor, show crisp "AUTO GAS" drag-range label above the circle

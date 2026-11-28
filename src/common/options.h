@@ -23,11 +23,8 @@ struct Options {
     uint32_t motion_blur = 1;   // 0 Off, 1 On (Low reduced native blur, default On)
     uint32_t reflections = 1;   // 0 Off, 1 On (full dynamic cubemap)
     bool debug_logging = false; // object_logs.txt telemetry (off by default for best CPU performance)
-    uint32_t anti_aliasing = 0;  // 0 Off, 1 FXAA, 2 MSAA 2x, 3 MSAA 4x, 4 SSAA 2x
+    uint32_t anti_aliasing = 0;  // 0 Off, 1 FXAA, 2 MSAA, 4 SSAA
     uint32_t volumetric = 0;     // 0 Off, 1 Low, 2 High
-    uint32_t dof = 0;            // 0 Off, 1 Low, 2 High
-    uint32_t texture_sharpness = 0;  // 0 Default, 1 Sharp (-0.35), 2 Crisp (-0.70)
-    uint32_t shadow_filter = 1;      // 0 Sharp (Nearest), 1 Smooth (Linear)
     uint32_t draw_distance = 1;
     bool dynamic_resolution = true;
     uint32_t dynamic_target_fps = 60;

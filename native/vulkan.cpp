@@ -501,105 +501,6 @@ float4 psmain(O i) : SV_Target {
 }
 )";
 
-const std::string& DofBokehHlsl(bool high) {
-    static std::unordered_map<uint32_t, std::string> cache;
-    const uint32_t key = high ? 1u : 0u;
-    if (auto it = cache.find(key); it != cache.end()) return it->second;
-
-    std::string s = R"(
-cbuffer B : register(b1) { float4 uvrect; float4 opts; };
-Texture2D half_a : register(t0);
-SamplerState ls : register(s0);
-struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };
-O vs(uint id : SV_VertexID) {
-    O o;
-    float2 t = float2((id << 1) & 2, id & 2);
-    o.p = float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
-    o.uv = uvrect.xy + t * uvrect.zw;
-    return o;
-}
-float LinD(float z) { return 1.0 / max(1.0 - z, 0.0005); }
-float Coc(float d, float focus_d) {
-    float far_c = smoothstep(focus_d * 2.8, focus_d * 13.0, d);
-    float near_c = smoothstep(focus_d * 0.45, focus_d * 0.14, d) * 0.30;
-    return saturate(max(far_c, near_c));
-}
-)";
-    if (high) {
-        s += R"(
-#define DOF_TAPS 12
-#define DOF_RAD 5.2
-)";
-    } else {
-        s += R"(
-#define DOF_TAPS 6
-#define DOF_RAD 3.2
-)";
-    }
-    s += R"(
-float4 psmain(O i) : SV_Target {
-    float4 c0 = half_a.SampleLevel(ls, i.uv, 0);
-    float d0 = LinD(half_a.SampleLevel(ls, float2(0.50, 0.56), 0).a);
-    float d1 = LinD(half_a.SampleLevel(ls, float2(0.50, 0.48), 0).a);
-    float d2 = LinD(half_a.SampleLevel(ls, float2(0.44, 0.56), 0).a);
-    float d3 = LinD(half_a.SampleLevel(ls, float2(0.56, 0.56), 0).a);
-    float focus_d = clamp(min(min(d0, d1), min(d2, d3)), 3.0, 38.0);
-
-    float coc = Coc(LinD(c0.a), focus_d);
-    if (coc <= 0.01) return float4(c0.rgb, 0.0);
-
-)";
-    if (high) {
-        s += R"(
-    const float2 offs[12] = {
-        float2( 0.289,  0.000), float2(-0.299,  0.273), float2( 0.044, -0.498),
-        float2( 0.371,  0.464), float2(-0.671, -0.059), float2( 0.507, -0.533),
-        float2( 0.088,  0.785), float2(-0.742, -0.415), float2( 0.908, -0.056),
-        float2(-0.491,  0.818), float2(-0.273, -0.962), float2( 0.720,  0.694)
-    };
-)";
-    } else {
-        s += R"(
-    const float2 offs[6] = {
-        float2( 1.000,  0.000), float2( 0.500,  0.866), float2(-0.500,  0.866),
-        float2(-1.000,  0.000), float2(-0.500, -0.866), float2( 0.500, -0.866)
-    };
-)";
-    }
-    s += R"(
-    float2 rad = opts.xy * (DOF_RAD * (0.35 + 0.65 * coc));
-    float3 acc = c0.rgb * 0.25;
-    float wsum = 0.25;
-    for (int k = 0; k < DOF_TAPS; ++k) {
-        float4 sp = half_a.SampleLevel(ls, saturate(i.uv + offs[k] * rad), 0);
-        float scoc = Coc(LinD(sp.a), focus_d);
-        float w = lerp(0.15, 1.0, scoc);
-        float lum = dot(sp.rgb, float3(0.299, 0.587, 0.114));
-        w *= 1.0 + max(lum - 0.72, 0.0) * 1.4;
-        acc += sp.rgb * w;
-        wsum += w;
-    }
-    return float4(acc / wsum, coc * opts.z);
-}
-)";
-    return cache.emplace(key, std::move(s)).first->second;
-}
-
-const char* kDofCompositeHlsl = R"(
-cbuffer B : register(b1) { float4 uvrect; };
-Texture2D doftex : register(t0);
-SamplerState ls : register(s0);
-struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };
-O vs(uint id : SV_VertexID) {
-    O o;
-    float2 t = float2((id << 1) & 2, id & 2);
-    o.p = float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
-    o.uv = uvrect.xy + t * uvrect.zw;
-    return o;
-}
-float4 psmain(O i) : SV_Target { return doftex.SampleLevel(ls, i.uv, 0); }
-)";
-
 // ---- the console's values as Vulkan's
 
 float Bits(uint32_t v) {
@@ -2120,7 +2021,7 @@ private:
     void ReleaseOldTextures();
     void ApplySettings();
     void SavePipelineCache();
-    bool EnsurePostFxTargets(uint32_t w, uint32_t h, bool need_dof, bool need_vol);
+    bool EnsurePostFxTargets(uint32_t w, uint32_t h);
     void ApplyScenePostFx();
 
     VkInstance instance_ = VK_NULL_HANDLE;
@@ -2270,7 +2171,6 @@ private:
     uint32_t scene_3d_draws_ = 0;
     bool scene_postfx_done_ = false;
     Image fx_half_a_;
-    Image fx_half_b_;
     Image fx_vol_;
     uint32_t guest_w_ = 640, guest_h_ = 480;
     float scale_ = 1.0f;
@@ -2519,7 +2419,6 @@ bool VulkanBackend::CreateDevice() {
 
 VkSampleCountFlagBits VulkanBackend::DesiredMsaaSamples() const {
     const uint32_t aa = game::Opt().anti_aliasing;
-    if (aa == 3 && (msaa_caps_ & VK_SAMPLE_COUNT_4_BIT)) return VK_SAMPLE_COUNT_4_BIT;
     if ((aa == 2 || aa == 3) && (msaa_caps_ & VK_SAMPLE_COUNT_2_BIT)) return VK_SAMPLE_COUNT_2_BIT;
     return VK_SAMPLE_COUNT_1_BIT;
 }
@@ -3867,14 +3766,11 @@ VkBorderColor Border(uint32_t argb) {
 VkSampler VulkanBackend::StageSampler(const State& s, int i, const DrawTextures& stages, bool clamp) {
     const auto& t = s.tss[size_t(i)];
     const uint32_t user_aniso = app::Get().aniso;
-    const uint32_t tex_sharp = std::min(game::Opt().texture_sharpness, 2u);
-    const uint32_t shadow_filt = std::min(game::Opt().shadow_filter, 1u);
     const uint32_t shadow_func = stages.info[i].shadow ? CmpIndex(s.rs[kRsShadowFunc]) : 0u;
     const bool filterable = stages.fmt[i] != VK_FORMAT_R32_SFLOAT || r32f_linear_;
     const uint32_t flags = (clamp ? 1u : 0u) | (filterable ? 2u : 0u) | (stages.rt[i] ? 4u : 0u) |
                            (stages.info[i].shadow ? 8u : 0u) | (stages.info[i].rect ? 16u : 0u) |
-                           (uint32_t(stages.info[i].kind & 3u) << 5) | (shadow_func << 8) |
-                           (tex_sharp << 11) | (shadow_filt << 13);
+                           (uint32_t(stages.info[i].kind & 3u) << 5) | (shadow_func << 8);
     const uint32_t sk[12] = {
         t[kTssMagFilter], t[kTssMinFilter], t[kTssMipFilter], t[kTssMaxAnisotropy],
         t[kTssAddressU], t[kTssAddressV], t[kTssAddressW], t[kTssMipLodBias],
@@ -3920,10 +3816,6 @@ VkSampler VulkanBackend::StageSampler(const State& s, int i, const DrawTextures&
     const float limit = props_.limits.maxSamplerLodBias;
     float bias = mipped ? std::clamp(Bits(t[kTssMipLodBias]), -limit, limit) : 0.0f;
     if (sd.anisotropyEnable) bias = std::clamp(bias, -0.5f, 0.5f);
-    if (eligible_af && tex_sharp > 0u) {
-        constexpr float kSharpOffsets[3] = {0.0f, -0.35f, -0.70f};
-        bias = std::clamp(bias + kSharpOffsets[tex_sharp], -limit, limit);
-    }
     sd.mipLodBias = bias;
     sd.minLod = std::min(float(t[kTssMaxMipLevel]), float(stages.levels[i] - 1));
     sd.maxLod = mip ? VK_LOD_CLAMP_NONE : sd.minLod;
@@ -3931,7 +3823,7 @@ VkSampler VulkanBackend::StageSampler(const State& s, int i, const DrawTextures&
     if (stages.info[i].shadow) {
         // the console tests texel OP r, Vulkan r OP texel
         static const uint8_t swap[8] = {0, 4, 2, 6, 1, 5, 3, 7};
-        const bool linear = (shadow_filt != 0u) && depth_linear_;
+        bool linear = (lin(min) || lin(mag)) && depth_linear_;
         sd.minFilter = sd.magFilter = linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
         sd.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
         sd.compareEnable = VK_TRUE;
@@ -4644,7 +4536,7 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
     DrawTextures stages;
     if (!BindStageTextures(s, stages) || (!draw_rt_ && !draw_ds_)) return;
     if (!game::Opt().bloom && GlowComposite(s, stages)) return;
-    if ((game::Opt().volumetric > 0u || game::Opt().dof > 0u) && !scene_postfx_done_ && scene_rt_ &&
+    if (game::Opt().volumetric > 0u && !scene_postfx_done_ && scene_rt_ &&
         rt == scene_rt_ && scene_3d_draws_ >= 8u) {
         const bool has_rt_stage = stages.rt[0] || stages.rt[1] || stages.rt[2] || stages.rt[3];
         if (!has_rt_stage && (ds == nullptr || a.pretransformed)) {
@@ -4839,7 +4731,7 @@ void VulkanBackend::ClearTarget(Target& t, const State& s, uint32_t count, const
         if (!wmask) return;
         if (wmask != 0xF) {
             if (&t == scene_rt_ && !scene_postfx_done_ && scene_3d_draws_ >= 8u &&
-                (game::Opt().volumetric > 0u || game::Opt().dof > 0u)) {
+                game::Opt().volumetric > 0u) {
                 ApplyScenePostFx();
             }
             float c[4];
@@ -5123,7 +5015,7 @@ bool VulkanBackend::AcquireImage(uint32_t& index) {
     return false;
 }
 
-bool VulkanBackend::EnsurePostFxTargets(uint32_t w, uint32_t h, bool need_dof, bool need_vol) {
+bool VulkanBackend::EnsurePostFxTargets(uint32_t w, uint32_t h) {
     const uint32_t hw = std::max(1u, w / 2u);
     const uint32_t hh = std::max(1u, h / 2u);
     const VkImageUsageFlags fx_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -5131,19 +5023,11 @@ bool VulkanBackend::EnsurePostFxTargets(uint32_t w, uint32_t h, bool need_dof, b
         Retire(fx_half_a_);
         if (!CreateImage(fx_half_a_, postfx_fmt_, hw, hh, 1, 1, 1, fx_usage, VK_IMAGE_VIEW_TYPE_2D)) return false;
     }
-    if (need_dof) {
-        if (!fx_half_b_ || fx_half_b_.w != hw || fx_half_b_.h != hh || fx_half_b_.fmt != postfx_fmt_) {
-            Retire(fx_half_b_);
-            if (!CreateImage(fx_half_b_, postfx_fmt_, hw, hh, 1, 1, 1, fx_usage, VK_IMAGE_VIEW_TYPE_2D)) return false;
-        }
-    }
-    if (need_vol) {
-        const uint32_t qw = std::max(1u, hw / 2u);
-        const uint32_t qh = std::max(1u, hh / 2u);
-        if (!fx_vol_ || fx_vol_.w != qw || fx_vol_.h != qh || fx_vol_.fmt != postfx_fmt_) {
-            Retire(fx_vol_);
-            if (!CreateImage(fx_vol_, postfx_fmt_, qw, qh, 1, 1, 1, fx_usage, VK_IMAGE_VIEW_TYPE_2D)) return false;
-        }
+    const uint32_t qw = std::max(1u, hw / 2u);
+    const uint32_t qh = std::max(1u, hh / 2u);
+    if (!fx_vol_ || fx_vol_.w != qw || fx_vol_.h != qh || fx_vol_.fmt != postfx_fmt_) {
+        Retire(fx_vol_);
+        if (!CreateImage(fx_vol_, postfx_fmt_, qw, qh, 1, 1, 1, fx_usage, VK_IMAGE_VIEW_TYPE_2D)) return false;
     }
     return true;
 }
@@ -5159,14 +5043,13 @@ void VulkanBackend::ApplyScenePostFx() {
     }
 
     const uint32_t vol = std::min(game::Opt().volumetric, 2u);
-    const uint32_t dof = std::min(game::Opt().dof, 2u);
-    if (vol == 0u && dof == 0u) return;
+    if (vol == 0u) return;
 
     Image& depth_src = (scene_ds_->msaa && scene_ds_->msaa.view) ? scene_ds_->msaa : scene_ds_->img;
     if (!scene_rt_->img.view || !depth_src.view) return;
     const bool msaa_depth = (depth_src.samples > VK_SAMPLE_COUNT_1_BIT);
 
-    if (!EnsurePostFxTargets(scene_rt_->w, scene_rt_->h, dof != 0u, vol != 0u)) return;
+    if (!EnsurePostFxTargets(scene_rt_->w, scene_rt_->h)) return;
 
     EndRender();
     Transition(scene_rt_->img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -5195,46 +5078,8 @@ void VulkanBackend::ApplyScenePostFx() {
     Image* rt_res = rt_msaa ? &scene_rt_->img : nullptr;
     const VkSampleCountFlagBits rt_samples = rt_msaa ? scene_rt_->msaa.samples : VK_SAMPLE_COUNT_1_BIT;
 
-    // 2. Depth of Field (half-res edge-aware bokeh -> straight-alpha composite over background only)
-    if (dof != 0u) {
-        const bool high_dof = (dof >= 2u);
-        Transition(fx_half_a_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        float dc[8] = {0, 0, 1, 1, 1.0f / float(fx_half_a_.w), 1.0f / float(fx_half_a_.h),
-                       high_dof ? 0.92f : 0.68f, float(fx_half_a_.w) / float(fx_half_a_.h)};
-        Alloc cb = Constants(dc, sizeof(dc));
-        const std::string& bsrc = DofBokehHlsl(high_dof);
-        VkPipeline bpipe = FullScreenPipeline(bsrc.c_str(), "psmain", fx_half_b_.fmt, VK_FORMAT_UNDEFINED, 0u);
-        if (bpipe) {
-            const VkImageView views[4] = {fx_half_a_.view, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
-            const VkSampler samplers[4] = {linear_, point_, point_, point_};
-            VkDescriptorSet set = Set(views, samplers);
-            BeginRender(&fx_half_b_, nullptr);
-            BindPipeline(bpipe);
-            BindSet(set, cb.off, cb.off);
-            SetViewport(0, 0, float(fx_half_b_.w), float(fx_half_b_.h));
-            SetScissor(0, 0, int32_t(fx_half_b_.w), int32_t(fx_half_b_.h));
-            vkCmdDraw(Cb(), 3, 1, 0, 0);
-
-            Transition(fx_half_b_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            float cc[4] = {0, 0, 1, 1};
-            Alloc ccb = Constants(cc, sizeof(cc));
-            VkPipeline cpipe = FullScreenPipeline(kDofCompositeHlsl, "psmain", scene_rt_->img.fmt,
-                                                  VK_FORMAT_UNDEFINED, 2u, 0xF, rt_samples, rt_msaa);
-            if (cpipe) {
-                const VkImageView cviews[4] = {fx_half_b_.view, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
-                VkDescriptorSet cset = Set(cviews, samplers);
-                BeginRender(rt_att, nullptr, rt_res);
-                BindPipeline(cpipe);
-                BindSet(cset, ccb.off, ccb.off);
-                SetViewport(0, 0, float(scene_rt_->w), float(scene_rt_->h));
-                SetScissor(0, 0, int32_t(scene_rt_->w), int32_t(scene_rt_->h));
-                vkCmdDraw(Cb(), 3, 1, 0, 0);
-            }
-        }
-    }
-
-    // 3. Volumetric Lighting (quarter-res depth-occluded crepuscular shafts + night haze -> additive composite)
-    if (vol != 0u) {
+    // 2. Volumetric Lighting (quarter-res depth-occluded crepuscular shafts + night haze -> additive composite)
+    {
         const bool high_vol = (vol >= 2u);
         Transition(fx_half_a_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         const float secs = std::fmod(
@@ -5278,7 +5123,7 @@ void VulkanBackend::ApplyScenePostFx() {
 
 void VulkanBackend::DrawFrame(Target* t, uint32_t index) {
     if (t && t == scene_rt_ && !scene_postfx_done_ && scene_3d_draws_ >= 8u &&
-        (game::Opt().volumetric > 0u || game::Opt().dof > 0u)) {
+        game::Opt().volumetric > 0u) {
         ApplyScenePostFx();
     }
     EndRender();
@@ -5584,7 +5429,6 @@ void VulkanBackend::ApplySettings() {
     }
     targets_.clear();
     Retire(fx_half_a_);
-    Retire(fx_half_b_);
     Retire(fx_vol_);
     draw_rt_ = draw_ds_ = scene_rt_ = scene_ds_ = nullptr;
     scene_3d_draws_ = 0;
