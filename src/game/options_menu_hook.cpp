@@ -250,6 +250,11 @@ void AppendRootOptionItem(X86Context& ctx, uint8_t* base, uint32_t list_va, uint
     saved.Restore(ctx);
 }
 
+bool IsFrontendOptionsMenu() {
+    const uint32_t state_mgr_va = game::safe_mem::Read32(0x00557ED0u, 0u);
+    return state_mgr_va != 0u && game::safe_mem::Read32(state_mgr_va + 0x04u, 0u) == 7u;
+}
+
 void AppendCustomOptionsFallback(X86Context& ctx, uint8_t* base) {
     uint32_t owner_va = 0u;
     const uint32_t list_va = GetOptionScreenList(&owner_va);
@@ -260,7 +265,7 @@ void AppendCustomOptionsFallback(X86Context& ctx, uint8_t* base) {
         AppendRootOptionItem(ctx, base, list_va, owner_va, kActionQualityOptions, "Quality Options");
         AppendRootOptionItem(ctx, base, list_va, owner_va, kActionTouchOptions, "Touchscreen Options");
     }
-    if (!g_inserted_cheat_collections) {
+    if (!g_inserted_cheat_collections && IsFrontendOptionsMenu()) {
         AppendRootOptionItem(ctx, base, list_va, owner_va, kActionCheatCollections, "Cheat Collections");
     }
 }
@@ -463,7 +468,8 @@ extern "C" void sub_00348BE0(X86Context& ctx, uint8_t* base) {
             }
         }
         if (cb_fn == kFnMenuAction && stored_param == kActionCredits &&
-            !g_inserted_cheat_collections && list_va != 0u && cb_obj != 0u) {
+            IsFrontendOptionsMenu() && !g_inserted_cheat_collections &&
+            list_va != 0u && cb_obj != 0u) {
             AppendRootOptionItem(ctx, base, list_va, cb_obj, kActionCheatCollections, "Cheat Collections");
             g_inserted_cheat_collections = true;
             ++g_options_shift;

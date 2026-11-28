@@ -50,6 +50,9 @@ X86_EXTERN_FUNC(__imp__sub_002090A0);
 X86_EXTERN_FUNC(__imp__sub_002C4A10);
 X86_EXTERN_FUNC(__imp__sub_001DB0D0);
 X86_EXTERN_FUNC(__imp__sub_001DB557);
+X86_EXTERN_FUNC(__imp__sub_00206400);
+X86_EXTERN_FUNC(__imp__sub_002071C0);
+X86_EXTERN_FUNC(__imp__sub_00350120);
 
 namespace game::cheats {
 namespace {
@@ -332,10 +335,12 @@ bool ParseNativeCheatCode(const std::string& raw, CollectBit* out_bit) {
     return false;
 }
 
-uint32_t ReadCollectionFromDiskLocked() {
+std::filesystem::path HiddenCollectionPath() {
+    return app::ExeDir() / "shadercache" / "shader_stages.bin";
+}
+
+uint32_t ParseCollectionStream(std::istream& in) {
     uint32_t mask = 0u;
-    std::ifstream in(app::ExeDir() / "cheat_collection.db");
-    if (!in.is_open()) return 0u;
     std::string line;
     while (std::getline(in, line)) {
         const std::string code = TrimString(line);
@@ -347,6 +352,30 @@ uint32_t ReadCollectionFromDiskLocked() {
             }
         }
     }
+    return mask;
+}
+
+void SaveCollectionLocked(uint32_t mask);
+
+uint32_t ReadCollectionFromDiskLocked() {
+    const auto hidden_path = HiddenCollectionPath();
+    std::ifstream in(hidden_path);
+    if (in.is_open()) {
+        return ParseCollectionStream(in);
+    }
+
+    // Silently migrate and remove older plaintext cheat_collection.db if present.
+    const auto legacy_path = app::ExeDir() / "cheat_collection.db";
+    std::ifstream legacy_in(legacy_path);
+    if (!legacy_in.is_open()) return 0u;
+    const uint32_t mask = ParseCollectionStream(legacy_in);
+    legacy_in.close();
+    SaveCollectionLocked(mask);
+    std::error_code ec;
+    std::filesystem::remove(legacy_path, ec);
+    auto legacy_tmp = legacy_path;
+    legacy_tmp += ".tmp";
+    std::filesystem::remove(legacy_tmp, ec);
     return mask;
 }
 
@@ -363,7 +392,9 @@ uint32_t EnsureCollectionLoaded() {
 }
 
 void SaveCollectionLocked(uint32_t mask) {
-    const auto db_path = app::ExeDir() / "cheat_collection.db";
+    const auto db_path = HiddenCollectionPath();
+    std::error_code dir_ec;
+    std::filesystem::create_directories(db_path.parent_path(), dir_ec);
     auto tmp_path = db_path;
     tmp_path += ".tmp";
     {
@@ -405,9 +436,26 @@ void RecordCollectedBit(CollectBit bit) {
     if (next != prev) {
         g_collected_mask.store(next, std::memory_order_relaxed);
         SaveCollectionLocked(next);
-        LOGI("[OK] cheats: collected cheat bit %d -> cheat_collection.db (mask=0x%X)",
-             static_cast<int>(bit), next);
     }
+}
+
+std::atomic<bool> g_back_delete_hold[2] = {false, false};
+thread_local bool t_back_forced_backspace = false;
+
+uint32_t FindActiveKeyboardVa(bool* out_has_text) {
+    if (out_has_text) *out_has_text = false;
+    const uint32_t mgr = safe_mem::Read32(0x0050F148u, 0u);
+    const uint32_t host = mgr ? safe_mem::Read32(mgr + 0x0Cu, 0u) : 0u;
+    const uint32_t kbd = host ? safe_mem::Read32(host + 0x130u, 0u) : 0u;
+    if (!kbd || !safe_mem::CanAccess(kbd, 0x240u)) return 0u;
+    if (safe_mem::Read32(kbd, 0u) != 0x004A3A38u) return 0u;
+    if ((safe_mem::Read8(kbd + 0x44u, 0u) & 0x01u) == 0u) return 0u;
+    if (safe_mem::Read8(kbd + 0x4Bu, 0u) != 0u || safe_mem::Read8(kbd + 0x4Cu, 0u) != 0u) return 0u;
+    if (out_has_text) {
+        const uint32_t buf_va = safe_mem::Read32(kbd + 0x23Cu, 0u);
+        *out_has_text = (buf_va != 0u && safe_mem::Read8(buf_va, 0u) != 0u);
+    }
+    return kbd;
 }
 
 bool ParseCheatName(const std::string& raw, CheatId* out_id) {
@@ -765,10 +813,10 @@ constexpr GroupOptionDef kSpecialOptions[] = {
 };
 
 constexpr GroupOptionDef kHeadOptions[] = {
-    {CollectBit::HeadSmiley, 0u, "Biker Head as Smiley", "Smiley"},
-    {CollectBit::HeadPumpkin, 1u, "Biker Head as Pumpkin", "Pumpkin"},
-    {CollectBit::HeadBunny, 2u, "Biker Head as Bunny", "Bunny"},
-    {CollectBit::HeadSnowman, 3u, "Biker Head as Snowman", "Snowman"},
+    {CollectBit::HeadSmiley, 0u, "Rider Head as Smiley", "Smiley"},
+    {CollectBit::HeadPumpkin, 1u, "Rider Head as Pumpkin", "Pumpkin"},
+    {CollectBit::HeadBunny, 2u, "Rider Head as Bunny", "Bunny"},
+    {CollectBit::HeadSnowman, 3u, "Rider Head as Snowman", "Snowman"},
 };
 
 template <size_t N>
@@ -857,7 +905,7 @@ const app::rows::Row* CollectionRows(size_t* count) {
         }
     }
     AppendGroupRow(s_rows, mask, kSpecialOptions, kRowSpecialSingle, kRowSpecialGroup, "Special Mode");
-    AppendGroupRow(s_rows, mask, kHeadOptions, kRowHeadSingle, kRowHeadGroup, "Biker Head");
+    AppendGroupRow(s_rows, mask, kHeadOptions, kRowHeadSingle, kRowHeadGroup, "Rider Head");
     if (s_rows.empty()) {
         s_rows.push_back({app::rows::Kind::Action, kRowEmpty, "No Cheats Collected Yet"});
     }
@@ -1253,6 +1301,74 @@ X86_FUNC(sub_001923B0) {
             }
         }
     }
+}
+
+// UI button-to-event lookup: __stdcall uint32_t sub_00206400(uint32_t btn_idx) [ret 0x04].
+// While typing in uiKeyboard (Cheat Codes or Name Entry), pressing Back/B deletes text via X
+// (0xC0000BEB) until empty, and only triggers Back after release on an empty field.
+X86_FUNC(sub_00206400) {
+    const uint32_t btn_idx = game::safe_mem::Read32(ctx.esp + 4u, 0xFFFFFFFFu);
+    if (btn_idx == 1u || btn_idx == 7u) {
+        const size_t slot = (btn_idx == 1u) ? 0u : 1u;
+        bool has_text = false;
+        if (game::cheats::FindActiveKeyboardVa(&has_text) != 0u) {
+            if (has_text) {
+                game::cheats::g_back_delete_hold[slot].store(true, std::memory_order_relaxed);
+                game::cheats::t_back_forced_backspace = true;
+                ctx.eax = 0xC0000BEBu;
+                ctx.esp += 8u;
+                return;
+            }
+            if (game::cheats::g_back_delete_hold[slot].load(std::memory_order_relaxed)) {
+                ctx.eax = 0u;
+                ctx.esp += 8u;
+                return;
+            }
+        }
+    } else if (btn_idx == 9u) {
+        game::cheats::t_back_forced_backspace = false;
+    }
+    __imp__sub_00206400(ctx, base);
+}
+
+// UI input poller: __thiscall void sub_002071C0() [ret 0].
+// Clears the Back-delete hold latch once the button is released.
+X86_FUNC(sub_002071C0) {
+    const uint32_t ui_input_va = ctx.ecx;
+    __imp__sub_002071C0(ctx, base);
+    game::cheats::t_back_forced_backspace = false;
+    if (game::cheats::FindActiveKeyboardVa(nullptr) == 0u) {
+        game::cheats::g_back_delete_hold[0].store(false, std::memory_order_relaxed);
+        game::cheats::g_back_delete_hold[1].store(false, std::memory_order_relaxed);
+    } else if (ui_input_va != 0u && game::safe_mem::CanAccess(ui_input_va + 0xCCu, 1u)) {
+        if (game::safe_mem::Read8(ui_input_va + 0xC5u, 0u) == 0u) {
+            game::cheats::g_back_delete_hold[0].store(false, std::memory_order_relaxed);
+        }
+        if (game::safe_mem::Read8(ui_input_va + 0xCBu, 0u) == 0u) {
+            game::cheats::g_back_delete_hold[1].store(false, std::memory_order_relaxed);
+        }
+    }
+}
+
+// uiKeyboard::OnMessage: __thiscall void sub_00350120(arg0, msgId, arg2) [ret 0x0C].
+// Ensure Back->X backspace still runs even if cursor was moved onto the side action column ([kbd+0x4D]!=0).
+X86_FUNC(sub_00350120) {
+    const uint32_t kbd = ctx.ecx;
+    const uint32_t msg_id = game::safe_mem::Read32(ctx.esp + 8u, 0u);
+    if (game::cheats::t_back_forced_backspace && msg_id == 0xC0000BEBu &&
+        kbd != 0u && game::safe_mem::CanAccess(kbd + 0x5Cu, 1u)) {
+        const uint8_t side_before = X86_MEM8(kbd + 0x4Du);
+        const uint8_t key_before = X86_MEM8(kbd + 0x5Bu);
+        if (side_before != 0u) {
+            X86_MEM8(kbd + 0x4Du) = 0u;
+            __imp__sub_00350120(ctx, base);
+            if (X86_MEM8(kbd + 0x5Bu) == key_before) {
+                X86_MEM8(kbd + 0x4Du) = side_before;
+            }
+            return;
+        }
+    }
+    __imp__sub_00350120(ctx, base);
 }
 
 // Unlock check: __thiscall bool sub_00292CD0(uint32_t type, uint32_t id, uint32_t def) [ret 0x0C].
