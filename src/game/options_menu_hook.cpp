@@ -6,6 +6,7 @@
 #include <string>
 
 #include "common/menu.h"
+#include "common/mouse_keyboard.h"
 #include "core/log.h"
 #include "cpu/x86_context.h"
 #include "cpu/x86_ops.h"
@@ -15,6 +16,7 @@
 extern "C" void __imp__sub_00154E40(X86Context& ctx, uint8_t* base);
 extern "C" void __imp__sub_0018C770(X86Context& ctx, uint8_t* base);
 extern "C" void __imp__sub_0018CAD0(X86Context& ctx, uint8_t* base);
+extern "C" void __imp__sub_0018D590(X86Context& ctx, uint8_t* base);
 extern "C" void __imp__sub_0018D610(X86Context& ctx, uint8_t* base);
 extern "C" void __imp__sub_00163830(X86Context& ctx, uint8_t* base);
 extern "C" void __imp__sub_00163C40(X86Context& ctx, uint8_t* base);
@@ -25,6 +27,8 @@ extern "C" void __imp__sub_00348D70(X86Context& ctx, uint8_t* base);
 
 extern "C" void sub_001395E0(X86Context& ctx, uint8_t* base);
 extern "C" void sub_00348950(X86Context& ctx, uint8_t* base);
+extern "C" void sub_00348AF0(X86Context& ctx, uint8_t* base);
+extern "C" void sub_0018D610(X86Context& ctx, uint8_t* base);
 
 namespace {
 
@@ -33,6 +37,7 @@ constexpr uint32_t kFlashRootGlobalPtr = 0x0050F15Cu;
 constexpr uint32_t kFlashVarTitle = 0x0045B9F8u;        // "title"
 constexpr uint32_t kFlashVarSectionName = 0x0045772Cu;  // "sectionName"
 constexpr uint32_t kActionAudioOptions = 0x09u;
+constexpr uint32_t kActionControllerOptions = 0x0Cu;
 constexpr uint32_t kActionGameOptions = 0x41u;
 constexpr uint32_t kActionDisplayOptions = 0x7F4Bu;
 constexpr uint32_t kActionQualityOptions = 0x7F4Cu;
@@ -53,16 +58,20 @@ enum class NativePage : int {
 };
 
 std::atomic<int> g_native_page{static_cast<int>(NativePage::None)};
+std::atomic<bool> g_options_populated_touch_active{false};
+std::atomic<int32_t> g_options_controller_idx{-1};
 
 thread_local bool g_in_main_menu_populate = false;
 thread_local bool g_skipped_networking = false;
 
 thread_local bool g_in_options_populate = false;
+thread_local bool g_skipped_controller = false;
 thread_local uint32_t g_options_shift = 0u;
 thread_local bool g_inserted_audio_subitems = false;
 thread_local uint32_t g_audio_handle = 0u;
 thread_local uint32_t g_audio_list_va = 0u;
 thread_local uint32_t g_audio_owner_va = 0u;
+thread_local bool g_rebuilding_options = false;
 
 struct ScopedMainMenuPopulate {
     ScopedMainMenuPopulate() {
@@ -78,6 +87,7 @@ struct ScopedMainMenuPopulate {
 struct ScopedOptionsMenuPopulate {
     ScopedOptionsMenuPopulate() {
         g_in_options_populate = true;
+        g_skipped_controller = false;
         g_options_shift = 0u;
         g_inserted_audio_subitems = false;
         g_audio_handle = 0u;
@@ -86,6 +96,7 @@ struct ScopedOptionsMenuPopulate {
     }
     ~ScopedOptionsMenuPopulate() {
         g_in_options_populate = false;
+        g_skipped_controller = false;
         g_audio_handle = 0u;
         g_audio_list_va = 0u;
         g_audio_owner_va = 0u;
@@ -420,13 +431,30 @@ extern "C" void sub_00348BE0(X86Context& ctx, uint8_t* base) {
             }
         }
     } else if (g_in_options_populate) {
-        if (g_options_shift > 0u && game::safe_mem::CanAccess(ctx.esp + 4u, 4u)) {
-            X86_MEM32(ctx.esp + 4u) = X86_MEM32(ctx.esp + 4u) + g_options_shift;
-        }
         const uint32_t cb_obj = game::safe_mem::Read32(ctx.esp + 16u, 0u);
         const uint32_t cb_fn = game::safe_mem::Read32(ctx.esp + 20u, 0u);
         const uint32_t stored_param = game::safe_mem::Read32(ctx.esp + 24u, 0u);
         const uint32_t list_va = ctx.ecx;
+        if (cb_fn == kFnMenuAction && stored_param == kActionControllerOptions) {
+            const int32_t orig_idx = game::safe_mem::CanAccess(ctx.esp + 4u, 4u)
+                ? static_cast<int32_t>(X86_MEM32(ctx.esp + 4u))
+                : 0;
+            g_options_controller_idx.store(orig_idx, std::memory_order_relaxed);
+            if (g_options_populated_touch_active.load(std::memory_order_relaxed)) {
+                g_skipped_controller = true;
+                ctx.eax = 0u;
+                ctx.esp += 32u;  // return address + 0x1C args
+                return;
+            }
+        }
+        if (game::safe_mem::CanAccess(ctx.esp + 4u, 4u)) {
+            const int32_t idx = static_cast<int32_t>(X86_MEM32(ctx.esp + 4u));
+            const int32_t net_shift = static_cast<int32_t>(g_options_shift) - (g_skipped_controller ? 1 : 0);
+            const int32_t shifted = idx + net_shift;
+            if (shifted >= 0) {
+                X86_MEM32(ctx.esp + 4u) = static_cast<uint32_t>(shifted);
+            }
+        }
         __imp__sub_00348BE0(ctx, base);
         if (cb_fn == kFnMenuAction && ctx.eax != 0u && stored_param == kActionAudioOptions) {
             g_audio_handle = ctx.eax;
@@ -440,10 +468,11 @@ extern "C" void sub_00348BE0(X86Context& ctx, uint8_t* base) {
 
 // Intercept CMenuList::SetItemText (sub_00348D70: __thiscall ret 0x0C):
 //  - Main Menu: skip label assignment for filtered Networking handle.
-//  - Options Menu: right after Audio Options -> insert Display Options, Quality Options, Touchscreen Options.
+//  - Options Menu: skip filtered Control Options handle when touchscreen active; right after Audio Options
+//    insert Display Options, Quality Options, Touchscreen Options.
 extern "C" void sub_00348D70(X86Context& ctx, uint8_t* base) {
     const uint32_t handle = game::safe_mem::Read32(ctx.esp + 4u, 0u);
-    if (g_in_main_menu_populate && handle == 0u) {
+    if ((g_in_main_menu_populate || g_in_options_populate) && handle == 0u) {
         ctx.esp += 16u;  // return address + 0x0C args
         return;
     }
@@ -472,9 +501,11 @@ extern "C" void sub_0018CAD0(X86Context& ctx, uint8_t* base) {
     ctx.esp += 4u;  // __thiscall ret 0
 }
 
-// Override Options menu populate: insert Display/Quality/Touchscreen Options underneath Audio Options.
+// Override Options menu populate: hide Control Options on touchscreen, show on external controller,
+// and insert Display/Quality/Touchscreen Options underneath Audio Options.
 extern "C" void sub_0018D610(X86Context& ctx, uint8_t* base) {
     g_native_page.store(static_cast<int>(NativePage::None));
+    g_options_populated_touch_active.store(input::TouchActive(), std::memory_order_relaxed);
     bool inserted_audio = false;
     {
         ScopedOptionsMenuPopulate guard;
@@ -484,6 +515,59 @@ extern "C" void sub_0018D610(X86Context& ctx, uint8_t* base) {
     g_inserted_audio_subitems = inserted_audio;
     AppendCustomOptionsFallback(ctx, base);
     g_inserted_audio_subitems = false;
+}
+
+// Live-rebuild root Options list when switching between touchscreen and external controller while Options is open.
+extern "C" void sub_0018D590(X86Context& ctx, uint8_t* base) {
+    if (!g_rebuilding_options &&
+        g_native_page.load(std::memory_order_relaxed) == static_cast<int>(NativePage::None) &&
+        ctx.ecx != 0u && (game::safe_mem::Read8(ctx.ecx + 0x44u, 0u) & 0x01u) != 0u) {
+        uint32_t active_owner = 0u;
+        const uint32_t list_va = GetOptionScreenList(&active_owner);
+        const bool cur_touch = input::TouchActive();
+        if (list_va != 0u && active_owner == ctx.ecx &&
+            cur_touch != g_options_populated_touch_active.load(std::memory_order_relaxed) &&
+            ctx.esp > kScratchBytes + 128u) {
+            g_rebuilding_options = true;
+            const SavedRegs saved = SavedRegs::Save(ctx);
+            const uint32_t active_list = game::safe_mem::Read32(list_va + 0x258u, 0u);
+            const uint32_t col = game::safe_mem::Read32(list_va + 0x25Cu, 0u);
+            const uint32_t old_sel = (col < 4u) ? game::safe_mem::Read32(list_va + (col << 4) + 0x268u, 0u) : 0u;
+            const int32_t ctrl_idx = g_options_controller_idx.load(std::memory_order_relaxed);
+
+            ctx.ecx = list_va;
+            X86_PUSH32(1u);
+            X86_PUSH32(0u);
+            sub_00348950(ctx, base);
+
+            X86_PUSH32(0u);
+            sub_0018D610(ctx, base);
+
+            const uint32_t new_count = (active_list < 4u)
+                ? game::safe_mem::Read32(list_va + active_list * 4u + 0x238u, 0u)
+                : 0u;
+            uint32_t new_sel = old_sel;
+            if (ctrl_idx >= 0) {
+                const uint32_t u_ctrl = static_cast<uint32_t>(ctrl_idx);
+                if (cur_touch && old_sel > u_ctrl) --new_sel;
+                else if (!cur_touch && old_sel >= u_ctrl) ++new_sel;
+            }
+            if (new_count > 0u) {
+                if (new_sel >= new_count) new_sel = new_count - 1u;
+                ctx.ecx = list_va;
+                X86_PUSH32(0xFFFFFFFFu);
+                X86_PUSH32(new_sel);
+                X86_PUSH32(0u);
+                sub_00348AF0(ctx, base);
+            }
+            if (game::safe_mem::CanAccess(list_va + 0x331u, 1u)) {
+                X86_MEM8(list_va + 0x331u) = 1u;
+            }
+            saved.Restore(ctx);
+            g_rebuilding_options = false;
+        }
+    }
+    __imp__sub_0018D590(ctx, base);
 }
 
 // Route custom Options pages through mcMenuGameOptions host screen (0x41).
