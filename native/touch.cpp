@@ -504,6 +504,7 @@ enum class Role : uint8_t {
     FmvHold,
     Drag,
     Pinch,
+    AutoGasRange,
     ToolbarDrag,
     OpacitySlider,
 };
@@ -755,6 +756,9 @@ struct Finger {
     uint64_t down_ms = 0;
     uint64_t last_move_ms = 0;
     bool swipe_fired = false;
+    bool from_gas = false;
+    bool gas_drag_up = false;
+    bool gas_armed = false;
     float notch_x = 0;
     float notch_y = 0;
 };
@@ -839,6 +843,13 @@ bool TutUsesSlowMo(TutKind k) {
 bool g_analog_stick = false;
 bool g_controls_hidden = false;
 bool g_edit_moved = false;
+bool g_auto_gas = false;
+bool g_auto_gas_editing_drag = false;
+constexpr float kMinAutoGasDist = 0.06f;
+constexpr float kMaxAutoGasDist = 0.45f;
+constexpr float kDefaultAutoGasDist = 0.13f;
+float g_auto_gas_dist = kDefaultAutoGasDist;
+float g_before_auto_gas_dist = kDefaultAutoGasDist;
 char g_mode_toast[64] = {};
 uint64_t g_mode_toast_until = 0;
 float g_stick_raw_x = 0.0f;
@@ -910,6 +921,7 @@ float CurrentFadeAlphaLocked(uint64_t now) {
 }
 
 void StartFadeLocked(float target, uint64_t now) {
+    if (target <= 0.0f) g_auto_gas = false;
     if (std::fabs(g_fade_target - target) < 0.01f) return;
     g_fade_from = CurrentFadeAlphaLocked(now);
     g_fade_target = target;
@@ -961,6 +973,8 @@ bool ParseAdjustableCfg(const std::filesystem::path& path) {
                 g_analog_stick = ParseBoolCfg(val);
             } else if (key == "controls_hidden") {
                 g_controls_hidden = ParseBoolCfg(val);
+            } else if (key == "auto_gas_dist") {
+                g_auto_gas_dist = std::clamp(std::stof(val), kMinAutoGasDist, kMaxAutoGasDist);
             } else if (key.rfind("control.", 0) == 0 && version >= 6) {
                 const std::string id = key.substr(8);
                 for (size_t i = 0; i < kButtonCount; ++i) {
@@ -1009,10 +1023,12 @@ void SaveLayout() {
                   "opacity = %.2f\n"
                   "scale = %.2f\n"
                   "analog_stick = %d\n"
-                  "controls_hidden = %d\n\n",
+                  "controls_hidden = %d\n"
+                  "auto_gas_dist = %.3f\n\n",
                   int(std::lround(Width())), int(std::lround(Height())),
                   double(g_opacity), double(g_scale),
-                  g_analog_stick ? 1 : 0, g_controls_hidden ? 1 : 0);
+                  g_analog_stick ? 1 : 0, g_controls_hidden ? 1 : 0,
+                  double(g_auto_gas_dist));
     out << buf;
 
     out << "# Touch Controls\n";
@@ -1152,6 +1168,24 @@ void ButtonRect(size_t i, float& x0, float& y0, float& x1, float& y1) {
     y1 = cy + half_h;
 }
 
+struct AutoGasTarget {
+    float gx0, gy0, gx1, gy1;
+    float cx, cy, r;
+};
+
+AutoGasTarget ComputeAutoGasTarget() {
+    AutoGasTarget t{};
+    ButtonRect(kIdxGas, t.gx0, t.gy0, t.gx1, t.gy1);
+    const float h = Height();
+    const float s = UiScale(Width(), h);
+    t.r = std::clamp(0.042f * g_scale * h, 18.0f * s, 56.0f * s);
+    t.cx = (t.gx0 + t.gx1) * 0.5f;
+    const float min_cy = t.r + 8.0f * s;
+    const float max_cy = std::max(min_cy, t.gy0 - t.r * 1.15f);
+    t.cy = std::clamp(t.gy0 - g_auto_gas_dist * h, min_cy, max_cy);
+    return t;
+}
+
 size_t HitButton(float x, float y) {
     // Exact NFSU2 RacingControlsView.hit() closest-center selection so adjacent buttons slide cleanly!
     size_t best = kButtonCount;
@@ -1277,6 +1311,9 @@ void UpdateOpacityFromSliderLocked(float x, const EditorCard& c) {
 void OpenEditor() {
     g_before = g_layout;
     g_before_opacity = g_opacity;
+    g_before_auto_gas_dist = g_auto_gas_dist;
+    g_auto_gas = false;
+    g_auto_gas_editing_drag = false;
     g_selected = -1;
     g_edit_moved = false;
     g_edit_menu_tab = IsMenuLike(CurrentUiContext());
@@ -1293,11 +1330,13 @@ void CloseEditor(bool keep) {
     } else {
         g_layout = g_before;
         g_opacity = g_before_opacity;
+        g_auto_gas_dist = g_before_auto_gas_dist;
     }
     g_selected = -1;
     g_edit_moved = false;
     g_bar_dragging = false;
     g_opacity_dragging = false;
+    g_auto_gas_editing_drag = false;
     g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
     g_editing = false;
 }
@@ -1371,6 +1410,7 @@ void EditDown(Finger& f, float x, float y) {
                 case kEdReset:
                     g_layout = ComputeDefaultLayout(Width(), Height());
                     g_opacity = kDefaultOpacity;
+                    g_auto_gas_dist = kDefaultAutoGasDist;
                     g_selected = -1;
                     g_edit_moved = true;
                     g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
@@ -1429,6 +1469,20 @@ void EditDown(Finger& f, float x, float y) {
         f.y0 = g_layout[d.button].r;
         g_edit_moved = true;
         return;
+    }
+    if (!g_edit_menu_tab && g_selected == int(kIdxGas) && !g_layout[kIdxGas].hidden) {
+        const AutoGasTarget ag = ComputeAutoGasTarget();
+        const float dx = x - ag.cx;
+        const float dy = y - ag.cy;
+        const float hit_r = ag.r * 1.45f;
+        if (dx * dx + dy * dy <= hit_r * hit_r) {
+            f.role = Role::AutoGasRange;
+            f.button = kIdxGas;
+            f.y0 = y - ag.cy;
+            g_auto_gas_editing_drag = true;
+            g_edit_moved = true;
+            return;
+        }
     }
     size_t b = HitButton(x, y);
     // Exact NFSU2 behavior: tapping the top-right Settings button again closes editor if nothing was moved
@@ -1557,11 +1611,35 @@ void FingerDown(SDL_FingerID id, float x, float y) {
         f.button = kIdxSteerStick;
         UpdateAnalogStickLocked(x, y);
     } else if (b < kButtonCount) {
+        if (ctx == game::UiContext::Gameplay && b == kIdxGas && g_auto_gas) {
+            g_auto_gas = false;  // Press Gas again to cancel Auto-Gas
+        }
         f.role = Role::Button;
         f.button = b;
+        f.from_gas = (ctx == game::UiContext::Gameplay && b == kIdxGas);
         if ((b == kIdxCityLeft || b == kIdxCityRight) && !(game::Opt().tutorial_seen & kTutBitCityMap)) {
             game::Opt().tutorial_seen |= kTutBitCityMap;
             g_tut_save_pending.store(true, std::memory_order_relaxed);
+        }
+    } else if (ctx == game::UiContext::Gameplay && g_auto_gas && ButtonShown(kIdxGas)) {
+        const AutoGasTarget ag = ComputeAutoGasTarget();
+        const float dx = x - ag.cx;
+        const float dy = y - ag.cy;
+        const float hit_r = ag.r * 1.45f;
+        if (dx * dx + dy * dy <= hit_r * hit_r) {
+            g_auto_gas = false;
+            f.role = Role::None;
+            g_fingers.push_back(f);
+            Recount();
+            return;
+        }
+        const float w = Width();
+        const float h = Height();
+        if (x >= w * 0.30f && x <= w * 0.70f && y >= h * 0.80f) {
+            f.role = Role::RadioSwipe;
+        } else {
+            f.role = Role::Button;
+            f.button = kButtonCount;
         }
     } else {
         const float w = Width();
@@ -1620,6 +1698,14 @@ void FingerMove(SDL_FingerID id, float x, float y) {
         if (f.role == Role::OpacitySlider) {
             const EditorCard c = ComputeEditorCard();
             UpdateOpacityFromSliderLocked(x, c);
+            continue;
+        }
+        if (f.role == Role::AutoGasRange) {
+            float gx0, gy0, gx1, gy1;
+            ButtonRect(kIdxGas, gx0, gy0, gx1, gy1);
+            const float new_cy = y - f.y0;
+            g_auto_gas_dist = std::clamp((gy0 - new_cy) / std::max(h, 1.0f), kMinAutoGasDist, kMaxAutoGasDist);
+            g_edit_moved = true;
             continue;
         }
         if (f.role == Role::Drag) {
@@ -1698,6 +1784,21 @@ void FingerMove(SDL_FingerID id, float x, float y) {
             }
             f.last_x = x;
             f.last_y = y;
+
+            if (f.from_gas && !g_editing && CurrentUiContext() == game::UiContext::Gameplay && ButtonShown(kIdxGas)) {
+                const AutoGasTarget ag = ComputeAutoGasTarget();
+                const float margin_x = std::max(ag.r * 1.6f, (ag.gx1 - ag.gx0) * 0.35f);
+                const bool in_corridor = (x >= ag.gx0 - margin_x) && (x <= ag.gx1 + margin_x);
+                const bool above_gas = in_corridor && (y < ag.gy0 + (ag.gy1 - ag.gy0) * 0.12f);
+                if (above_gas) {
+                    f.button = kIdxGas;
+                    f.gas_drag_up = true;
+                    f.gas_armed = (y <= ag.cy + ag.r * 1.15f);
+                    continue;
+                }
+                f.gas_drag_up = false;
+                f.gas_armed = false;
+            }
             // NFSU2-style free slide-across touching: glide seamlessly into or between any buttons!
             const size_t hit = HitButton(x, y);
             if (hit < kButtonCount && IsNoSlideButton(hit) && f.button != hit) {
@@ -1713,6 +1814,7 @@ void FingerMove(SDL_FingerID id, float x, float y) {
                 }
             } else if (hit != f.button) {
                 f.button = hit;
+                f.from_gas = (hit == kIdxGas);
                 f.down_ms = now;
             }
         }
@@ -1788,11 +1890,17 @@ void FingerUp(SDL_FingerID id) {
     bool open_editor = false;
     bool toggle_mode = false;
     const uint64_t now = NowMs();
+    const auto ctx = CurrentUiContext();
     for (const Finger& f : g_fingers) {
         if (f.id != id || g_editing) continue;
-        if (f.role == Role::Button && HitButton(f.x, f.y) == f.button) {
-            if (f.button == kIdxModeSwap) toggle_mode = true;
-            else if (f.button == kIdxEditBtn) open_editor = true;
+        if (f.role == Role::Button) {
+            if (ctx == game::UiContext::Gameplay && f.from_gas && f.gas_armed) {
+                g_auto_gas = true;
+            }
+            if (HitButton(f.x, f.y) == f.button) {
+                if (f.button == kIdxModeSwap) toggle_mode = true;
+                else if (f.button == kIdxEditBtn) open_editor = true;
+            }
         }
         // If finger paused still for > 90ms before lifting, stop momentum cleanly (no unwanted drift)
         if (f.role == Role::GarageOrbit && now > f.last_move_ms + 90u) {
@@ -1801,6 +1909,10 @@ void FingerUp(SDL_FingerID id) {
     }
 
     std::erase_if(g_fingers, [id](const Finger& f) { return f.id == id; });
+    if (std::none_of(g_fingers.begin(), g_fingers.end(),
+                     [](const Finger& f) { return f.role == Role::AutoGasRange; })) {
+        g_auto_gas_editing_drag = false;
+    }
     if (std::none_of(g_fingers.begin(), g_fingers.end(),
                      [](const Finger& f) { return f.role == Role::Drag; })) {
         g_guide_x = g_guide_y = g_guide_mirror_x = -1.0f;
@@ -1868,6 +1980,7 @@ void KeyEvent(const SDL_KeyboardEvent& k) {
     input::g_touch = false;
     {
         std::lock_guard lock(g_lock);
+        g_auto_gas = false;
         StartFadeLocked(0.0f, NowMs());  // External keyboard smoothly fades out touch controls
     }
     if (!k.repeat && input::HudKey(vk)) game::g_hide_hud = !game::g_hide_hud;
@@ -2595,6 +2708,9 @@ void Apply(int port, input::Pad& pad) {
     bool gas_held = false;
     int steer = 0;
     const auto ctx = CurrentUiContext();
+    if (ctx != game::UiContext::Gameplay || g_controls_hidden) {
+        g_auto_gas = false;
+    }
     const bool analog = EffectiveAnalogMode();
     const bool is_bike = (ctx == game::UiContext::Gameplay) &&
                          game::Telemetry().is_bike.load(std::memory_order_relaxed);
@@ -2617,6 +2733,12 @@ void Apply(int port, input::Pad& pad) {
         } else {
             ApplyRemappedAction(pad, kButtons[i].action, 0, p);
         }
+    }
+
+    if (ctx == game::UiContext::Gameplay && g_auto_gas && !g_pressed[kIdxGas]) {
+        ApplyRemappedAction(pad, game::GameAction::Gas, 0, kAnalogRT);
+        gas_held = true;
+        used = true;
     }
 
     // Map button: short tap toggles mini-map (GameAction::Map); hold opens Full City Map via Xbox Back (1 << 5)
@@ -2895,6 +3017,7 @@ void BuildOverlay(std::vector<Quad>& out) {
                 !editing && i == kIdxGas && ctx == game::UiContext::Gameplay &&
                 game::Opt().auto_burnout &&
                 game::Telemetry().race_countdown.load(std::memory_order_relaxed);
+            const bool gas_locked_vis = !editing && i == kIdxGas && ctx == game::UiContext::Gameplay && g_auto_gas;
             if (race_about_to_start) {
                 const float pulse = 0.5f + 0.5f * std::sin(float(now % 6283u) * 0.008f);
                 const float glow_pad = th * (on ? 3.2f : (2.0f + pulse * 1.2f));
@@ -2922,6 +3045,11 @@ void BuildOverlay(std::vector<Quad>& out) {
                     tg = 1.00f;
                     tb = on ? 0.65f : 0.54f;
                     ta = std::min(1.0f, eff_vis + 0.08f);
+                } else if (gas_locked_vis) {
+                    tr = 0.784f;
+                    tg = 0.941f;
+                    tb = 0.533f;
+                    ta = std::min(1.0f, eff_vis + 0.10f);
                 }
                 out.push_back(Quad{dx0, dy0, dx1, dy1, uv.u0, uv.v0, uv.u1, uv.v1,
                                    tr, tg, tb, ta, 0, 0, 0, 0, 0, 0, 0u});
@@ -2984,6 +3112,85 @@ void BuildOverlay(std::vector<Quad>& out) {
                           0.055f, 0.075f, 0.110f, 0.88f, pill_h * 0.45f,
                           std::max(1.2f, 1.1f * s), br, bg, bb, ba);
                 EmitTextCentered(out, lx, ly, txt_h, br, bg, bb, ta, btn_lbl);
+            }
+        }
+    }
+
+    // 3b. PUBG-style Auto-Gas vertical line trace + rounded Auto-Gas circle icon (Gameplay & Layout Editor)
+    {
+        bool gas_drag_up = false;
+        bool gas_armed = false;
+        for (const Finger& f : g_fingers) {
+            if (f.role == Role::Button && f.from_gas && f.gas_drag_up) {
+                gas_drag_up = true;
+                gas_armed |= f.gas_armed;
+            }
+        }
+        const bool show_editor = editing && !g_edit_menu_tab && g_selected == int(kIdxGas) && !g_layout[kIdxGas].hidden;
+        const bool show_play = !editing && ctx == game::UiContext::Gameplay && ButtonShown(kIdxGas) &&
+                               (gas_drag_up || g_auto_gas);
+        if (show_editor || show_play) {
+            const AutoGasTarget ag = ComputeAutoGasTarget();
+            const float s = UiScale(w, h);
+            const bool active_highlight = show_editor ? g_auto_gas_editing_drag : (gas_armed || g_auto_gas);
+            const float vis_a = show_editor ? 0.96f : (fade_alpha * g_opacity);
+
+            const float cr = active_highlight ? 0.784f : (show_editor ? 1.000f : 1.0f);
+            const float cg = active_highlight ? 0.941f : (show_editor ? 0.820f : 1.0f);
+            const float cb = active_highlight ? 0.533f : (show_editor ? 0.541f : 1.0f);
+
+            // Vertical segmented trace line connecting top of Gas button up to rounded Auto-Gas circle
+            if (show_editor || gas_drag_up) {
+                const float y_bot = ag.gy0 - 4.0f * s;
+                const float y_top = ag.cy + ag.r + 4.0f * s;
+                const float span = y_bot - y_top;
+                if (span > 6.0f * s) {
+                    const float line_hw = std::max(1.4f, 1.8f * s);
+                    const float step = std::max(10.0f * s, span / 5.0f);
+                    const float dash_len = step * 0.56f;
+                    const float line_a = (active_highlight ? 0.92f : 0.68f) * vis_a;
+                    for (float y = y_top; y + 2.0f * s < y_bot; y += step) {
+                        const float y2 = std::min(y + dash_len, y_bot);
+                        EmitPanel(out, ag.cx - line_hw, y, ag.cx + line_hw, y2,
+                                  cr, cg, cb, line_a, line_hw);
+                    }
+                }
+            }
+
+            // Rounded Auto-Gas circle with outline + centered Gas glyph (respects layout opacity)
+            const float fill_a = (active_highlight ? 0.28f : 0.16f) * vis_a;
+            const float rim_a = (active_highlight ? 0.98f : 0.88f) * vis_a;
+            const float ring_th = th * (active_highlight ? 1.10f : 0.85f);
+            EmitPanel(out, ag.cx - ag.r, ag.cy - ag.r, ag.cx + ag.r, ag.cy + ag.r,
+                      active_highlight ? cr * 0.25f : 0.04f,
+                      active_highlight ? cg * 0.25f : 0.05f,
+                      active_highlight ? cb * 0.25f : 0.08f,
+                      fill_a, ag.r, ring_th, cr, cg, cb, rim_a);
+
+            const AtlasUv& guv = g_atlas_uv[skin][static_cast<size_t>(SvgIcon::Gas)];
+            if (atlas_ok && guv.valid) {
+                const float ih = ag.r * 1.18f;
+                const float iw = ih * (84.0f / 156.0f);
+                out.push_back(Quad{ag.cx - iw * 0.5f, ag.cy - ih * 0.5f, ag.cx + iw * 0.5f, ag.cy + ih * 0.5f,
+                                   guv.u0, guv.v0, guv.u1, guv.v1,
+                                   cr, cg, cb, std::min(1.0f, rim_a), 0, 0, 0, 0, 0, 0, 0u});
+            } else {
+                EmitTextCentered(out, ag.cx, ag.cy, ag.r * 0.85f, cr, cg, cb, std::min(1.0f, rim_a), "^");
+            }
+
+            // In Layout Editor, show crisp "AUTO GAS" drag-range label above the circle
+            if (show_editor) {
+                const float lbl_h = std::clamp(10.5f * s, 13.0f, h * 0.024f);
+                const char* ltxt = "AUTO GAS";
+                const float pw = MeasureTextWidth(lbl_h, ltxt) + 12.0f * s;
+                const float ph = lbl_h * 1.45f;
+                const float lx = std::clamp(ag.cx, pw * 0.5f + 4.0f * s,
+                                            std::max(pw * 0.5f + 4.0f * s, w - pw * 0.5f - 4.0f * s));
+                const float ly = std::max(ph * 0.5f + 4.0f * s, ag.cy - ag.r - ph * 0.5f - 5.0f * s);
+                EmitPanel(out, lx - pw * 0.5f, ly - ph * 0.5f, lx + pw * 0.5f, ly + ph * 0.5f,
+                          0.055f, 0.075f, 0.110f, 0.90f, ph * 0.45f,
+                          std::max(1.2f, 1.1f * s), cr, cg, cb, 0.92f);
+                EmitTextCentered(out, lx, ly, lbl_h, cr, cg, cb, 0.98f, ltxt);
             }
         }
     }
@@ -3472,6 +3679,8 @@ void ResetLayout() {
     EnsureLayout();
     g_layout = ComputeDefaultLayout(Width(), Height());
     g_opacity = kDefaultOpacity;
+    g_auto_gas_dist = kDefaultAutoGasDist;
+    g_auto_gas = false;
     g_scale = 1.0f;
     g_controls_hidden = false;
     SaveLayout();

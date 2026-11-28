@@ -193,13 +193,13 @@ struct OverlayRun {
 };
 
 // Builds a specialized post-process / screen-filter pixel shader for only the active filter & features.
-// Eliminates unused FXAA/HDR/filter branches (cutting VGPR pressure on mobile GPUs), moves gamma LUT
+// Eliminates unused FXAA/filter branches (cutting VGPR pressure on mobile GPUs), moves gamma LUT
 // evaluation to a single pass per pixel instead of per neighborhood tap, and replaces trig/fmod Noise,
 // CRT scanlines, and aperture grille modulo with pure ALU arithmetic.
-const std::string& FilterHlsl(uint32_t kind, uint32_t mode, bool use_gamma, bool use_hdr, bool use_fxaa) {
+const std::string& FilterHlsl(uint32_t kind, uint32_t mode, bool use_gamma, bool use_fxaa) {
     static std::unordered_map<uint32_t, std::string> cache;
     const uint32_t key = (kind & 0x3u) | ((mode & 0x7u) << 2) | (use_gamma ? 0x20u : 0u) |
-                         (use_hdr ? 0x40u : 0u) | (use_fxaa ? 0x80u : 0u);
+                         (use_fxaa ? 0x80u : 0u);
     if (auto it = cache.find(key); it != cache.end()) return it->second;
 
     std::string s = R"(
@@ -236,22 +236,6 @@ float3 ApplyGamma(float3 c) {
     } else {
         s += "float3 ApplyGamma(float3 c) { return c; }\n";
     }
-    if (use_hdr) {
-        s += R"(
-float3 Tone(float3 c) {
-    float3 lin = pow(max(c, 1e-5), 2.2);
-    float3 x = lin * 0.68;
-    float3 aces = (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14);
-    float lum = dot(lin, float3(0.2126, 0.7152, 0.0722));
-    float3 mapped = lerp(aces, min(lin, 1.0), smoothstep(0.50, 1.00, lum) * 0.72);
-    float3 out_c = pow(max(saturate(mapped), 1e-5), 1.0 / 2.2);
-    float out_l = dot(out_c, float3(0.2126, 0.7152, 0.0722));
-    return saturate(lerp(float3(out_l, out_l, out_l), out_c, 1.12));
-}
-)";
-    } else {
-        s += "float3 Tone(float3 c) { return c; }\n";
-    }
     if (use_fxaa && kind != 2u) {
         s += R"(
 float3 Fxaa(float2 uv) {
@@ -270,10 +254,10 @@ float3 Fxaa(float2 uv) {
     float lb = Luma(b);
     return lb < lo || lb > hi ? a : b;
 }
-float3 Frame(float2 uv) { return Tone(ApplyGamma(Fxaa(uv))); }
+float3 Frame(float2 uv) { return ApplyGamma(Fxaa(uv)); }
 )";
     } else {
-        s += "float3 Frame(float2 uv) { return Tone(ApplyGamma(Fetch(uv))); }\n";
+        s += "float3 Frame(float2 uv) { return ApplyGamma(Fetch(uv)); }\n";
     }
 
     if (kind == 0u) {
@@ -303,7 +287,7 @@ float4 psmain(O i) : SV_Target {
     float3 w = Fetch(i.uv - float2(src.x, 0.0)), e = Fetch(i.uv + float2(src.x, 0.0));
     float3 lo = min(c, min(min(n, sv), min(w, e))), hi = max(c, max(max(n, sv), max(w, e)));
     float3 amp = sqrt(saturate(min(lo, 1.0 - hi) / max(hi, 1e-4)));
-    return float4(Tone(ApplyGamma(saturate(c + (4.0 * c - n - sv - w - e) * amp * 0.35))), 1.0);
+    return float4(ApplyGamma(saturate(c + (4.0 * c - n - sv - w - e) * amp * 0.35)), 1.0);
 }
 )";
     } else {
@@ -360,7 +344,7 @@ float4 psmain(O i) : SV_Target {
     c.r = Fetch(uv + float2(off, 0.0)).r;
     c.g = Fetch(uv).g;
     c.b = Fetch(uv - float2(off, 0.0)).b;
-    c = Tone(ApplyGamma(c));
+    c = ApplyGamma(c);
     c = lerp(Luma(c), c, 0.8) * 0.95 + 0.03;
     c += (Noise(i.p.xy + frac(t) * 173.0) - 0.5) * 0.06;
     return float4(saturate(c), 1.0);
@@ -1429,38 +1413,13 @@ void KeyRasterizer(const State& s, const Assembled& a, PsoKey& k) {
 
 constexpr float kAlphaTestAlways = 7.0f;
 
-// FOG off leaves the constants as fog disabled: the shaders' fog factor is then 1, the colour as drawn.
-// Under a vertex program with table mode NONE, oFog is already a [0, 1] blend factor (1 = clear, 0 = full fog).
-void FillFogConstants(const State& s, bool vertex_program, bool writes_ofog, DrawConstants& c) {
-    constexpr uint32_t kFogTableNone = 0;
-    constexpr uint32_t kFogTableExp = 1;
-    constexpr uint32_t kFogTableExp2 = 2;
-    constexpr uint32_t kFogTableLinear = 3;
-    if (!s.rs[kRsFogEnable] || !game::Opt().fog) return;
-    const uint32_t mode = s.rs[kRsFogTableMode];
-    if (vertex_program && mode == kFogTableNone) {
-        if (!writes_ofog) return;
-        c.fog[0] = 1.0f;
-        c.fog[1] = 0.0f;
-        c.fog[2] = 0.0f;
-        c.fog[3] = float(kFogTableLinear);
-        return;
-    }
-    if (mode == kFogTableNone) return;
-    const float start = Bits(s.rs[kRsFogStart]);
-    const float end = Bits(s.rs[kRsFogEnd]);
-    const float density = Bits(s.rs[kRsFogDensity]);
-    if (mode == kFogTableLinear) {
-        if (!std::isfinite(start) || !std::isfinite(end) || std::fabs(end - start) < 1e-6f) return;
-    } else if (mode == kFogTableExp || mode == kFogTableExp2) {
-        if (!std::isfinite(density) || density <= 0.0f) return;
-    } else {
-        return;
-    }
-    c.fog[0] = start;
-    c.fog[1] = end;
-    c.fog[2] = density;
-    c.fog[3] = float(mode);
+// FOG off leaves the constants as fog disabled: the shaders' fog factor is then 1, the colour as drawn
+void FillFogConstants(const State& s, DrawConstants& c) {
+    if (!s.rs[kRsFogEnable]) return;
+    c.fog[0] = Bits(s.rs[kRsFogStart]);
+    c.fog[1] = Bits(s.rs[kRsFogEnd]);
+    c.fog[2] = Bits(s.rs[kRsFogDensity]);
+    c.fog[3] = float(s.rs[kRsFogTableMode]);
 }
 
 void FillSurfaceConstants(const State& s, GuestExtent size, DrawConstants& c) {
@@ -1665,7 +1624,6 @@ bool IsFixedDrawOutsideFrustum(const Assembled& a, const float full[16],
 struct VsMeta {
     uint16_t max_vsc_regs = 192;
     int16_t mvp_cbase = -1;  // >= 0 when direct screen-space 4x4 DP4 MVP on v0 + rcp(w) + c[59] detected
-    bool writes_ofog = false;
 };
 
 VsMeta AnalyzeVertexProgram(const std::vector<uint32_t>& prog) {
@@ -1713,13 +1671,6 @@ VsMeta AnalyzeVertexProgram(const std::vector<uint32_t>& prog) {
         if (mac == 13u) {
             has_relative = true;
             max_c = 192;
-        }
-        {
-            const uint32_t omask = fld(t, 3, 12, 4);
-            const bool use_ilu = fld(t, 3, 2, 1) == 1u;
-            if (omask && fld(t, 3, 11, 1) != 0u && ((use_ilu && ilu) || (!use_ilu && mac && mac != 13u))) {
-                if ((fld(t, 3, 3, 8) & 0xFu) == 5u) m.writes_ofog = true;
-            }
         }
 
         if (!has_relative) {
@@ -4710,7 +4661,7 @@ void VulkanBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t
     if (need < kUploadSize / 4 && CurrentFrame().used + need > kUploadSize) Submit(true, false);
     DrawConstants c{};
     FillSurfaceConstants(s, size, c);
-    FillFogConstants(s, sh.prog, vs_meta.writes_ofog, c);
+    FillFogConstants(s, c);
     FillCombinerConstants(s, c);
     FillTextureConstants(s, stages, c);
     if (sh.fixed_transform) {
@@ -5343,10 +5294,9 @@ void VulkanBackend::DrawFrame(Target* t, uint32_t index) {
     uint32_t filter = std::min(game::Opt().screen_filter, 8u);
     uint32_t crt = filter <= 2 ? filter : 0;
     bool fxaa = game::Opt().anti_aliasing == 1, ssaa = game::Opt().anti_aliasing == 4;
-    bool post = game::Opt().hdr || fxaa;
     // opts.z: the taps a side over each screen pixel, 2 averaging SSAA's samples
     float c[24] = {0, 0, 1, 1, gamma_ ? 1.0f : 0.0f, 0, ssaa ? 2.0f : 1.0f, 1};
-    c[20] = game::Opt().hdr ? 1.0f : 0.0f;
+    c[20] = 0.0f;
     c[21] = fxaa ? 1.0f : 0.0f;
     if (t) {
         // a texel of the frame, seconds that wrap before a float loses them, the colour look (4 vibrant on)
@@ -5373,16 +5323,16 @@ void VulkanBackend::DrawFrame(Target* t, uint32_t index) {
     Alloc cbuf = Constants(c, sizeof(c));
     VkPipeline pipe = VK_NULL_HANDLE;
     if (t) {
-        const bool use_filter = (filter != 0u || post);
+        const bool use_filter = (filter != 0u || fxaa);
         const uint32_t kind = use_filter ? (crt ? 1u : (filter == 3 ? 2u : (filter ? 3u : 0u))) : 4u;
         const uint32_t mode = filter >= 4 ? (filter - 4) : 0u;
         const uint64_t fkey = uint64_t(swap_fmt_) << 16 | kind | (mode << 4) |
-                              (gamma_ ? 0x100u : 0u) | (game::Opt().hdr ? 0x200u : 0u) | (fxaa ? 0x400u : 0u);
+                              (gamma_ ? 0x100u : 0u) | (fxaa ? 0x400u : 0u);
         if (present_pipe_ != VK_NULL_HANDLE && present_pipe_key_ == fkey) {
             pipe = present_pipe_;
         } else {
             if (use_filter) {
-                const std::string& fsrc = FilterHlsl(kind, mode, gamma_, game::Opt().hdr, fxaa);
+                const std::string& fsrc = FilterHlsl(kind, mode, gamma_, fxaa);
                 pipe = FullScreenPipeline(fsrc.c_str(), "psmain", swap_fmt_, VK_FORMAT_UNDEFINED, 0u);
             } else {
                 pipe = FullScreenPipeline(kBlitHlsl, "psmain", swap_fmt_, VK_FORMAT_UNDEFINED, 0u);
