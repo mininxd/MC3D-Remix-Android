@@ -70,8 +70,9 @@ constexpr uint32_t kTrafficGlobal2 = 0x004B36CCu;
 constexpr uint32_t kNativeSpecialAddr = 0x004B361Cu;
 constexpr uint32_t kNativeHeadAddr = 0x004B39D8u;
 constexpr uint32_t kNativeNoDamageAddr = 0x00509F80u;
-constexpr uint32_t kNativeSpecialsUpgradesAddr = 0x00557F08u;
+constexpr uint32_t kNativeFireHeadAddr = 0x00557F08u;
 constexpr uint32_t kNativeHyperAgroAddr = 0x00558818u;
+constexpr uint32_t kHeadFireHwVal = 0xFFFFFFFEu;
 constexpr uint32_t kVehicleListPtrAddr = 0x00557EB0u;
 constexpr uint32_t kVehicleListCountAddr = 0x00557EB4u;
 
@@ -137,7 +138,7 @@ enum class CollectBit : int {
     Delivery = 6,
     Roadtrip = 7,
     NoDamage = 8,
-    SpecialsUpgrades = 9,
+    HeadFire = 9,
     HyperAgro = 10,
     CashPlus1 = 11,
     CashMinus1 = 12,
@@ -166,7 +167,7 @@ constexpr CollectEntryDef kCollectEntries[] = {
     {CollectBit::Delivery, "delivery"},
     {CollectBit::Roadtrip, "roadtrip"},
     {CollectBit::NoDamage, "ontheroad"},
-    {CollectBit::SpecialsUpgrades, "trythisathome"},
+    {CollectBit::HeadFire, "trythisathome"},
     {CollectBit::HyperAgro, "hyperagro"},
     {CollectBit::CashPlus1, "kubmir"},
     {CollectBit::CashMinus1, "rimbuk"},
@@ -219,7 +220,6 @@ enum CollectionRowId : int {
     kRowDelivery,
     kRowRoadtrip,
     kRowNoDamage,
-    kRowSpecialsUpgrades,
     kRowHyperAgro,
     kRowSpecialSingle,
     kRowSpecialGroup,
@@ -319,7 +319,7 @@ bool ParseNativeCheatCode(const std::string& raw, CollectBit* out_bit) {
         {"zzGvtHFsw", CollectBit::NoDamage},              // ontheroad
         {"CuzpJA", CollectBit::CashMinus1},               // rimbuk
         {"vGoAxH", CollectBit::CashPlus1},                // kubmir
-        {"EDLHwyJsMBJIB", CollectBit::SpecialsUpgrades},  // trythisathome
+        {"EDLHwyJsMBJIB", CollectBit::HeadFire},          // trythisathome
         {"rqGvtquB", CollectBit::HeadSmiley},             // getheadj / gethead0
         {"rqGvtquC", CollectBit::HeadPumpkin},            // getheadk / gethead1
         {"rqGvtquD", CollectBit::HeadBunny},              // getheadl / gethead2
@@ -495,7 +495,7 @@ void ClearAllSessionCheats() {
     if (safe_mem::CanAccess(kNativeSpecialAddr, 4u)) kernel::W32(kNativeSpecialAddr, 0xFFFFFFFFu);
     if (safe_mem::CanAccess(kNativeHeadAddr, 4u)) kernel::W32(kNativeHeadAddr, 0xFFFFFFFFu);
     WriteByteFlag(kNativeNoDamageAddr, 0u);
-    WriteByteFlag(kNativeSpecialsUpgradesAddr, 0u);
+    WriteByteFlag(kNativeFireHeadAddr, 0u);
     WriteByteFlag(kNativeHyperAgroAddr, 0u);
     WriteByteFlag(kUnlockAllCitiesFlag1, 0u);
     WriteByteFlag(kUnlockAllCitiesFlag2, 0u);
@@ -796,7 +796,6 @@ constexpr SimpleRowDef kSimpleRowDefs[] = {
     {CollectBit::Delivery, app::rows::Kind::Value, kRowDelivery, "Unlock All Cities"},
     {CollectBit::Roadtrip, app::rows::Kind::Value, kRowRoadtrip, "Unlock All Cities & Events"},
     {CollectBit::NoDamage, app::rows::Kind::Value, kRowNoDamage, "No Damage"},
-    {CollectBit::SpecialsUpgrades, app::rows::Kind::Value, kRowSpecialsUpgrades, "Unlock Specials & Upgrades"},
     {CollectBit::HyperAgro, app::rows::Kind::Value, kRowHyperAgro, "Hyper Agro Physics"},
 };
 
@@ -814,6 +813,7 @@ constexpr GroupOptionDef kSpecialOptions[] = {
 };
 
 constexpr GroupOptionDef kHeadOptions[] = {
+    {CollectBit::HeadFire, kHeadFireHwVal, "Flaming Head", "Flaming"},
     {CollectBit::HeadSmiley, 0u, "Rider Head as Smiley", "Smiley"},
     {CollectBit::HeadPumpkin, 1u, "Rider Head as Pumpkin", "Pumpkin"},
     {CollectBit::HeadBunny, 2u, "Rider Head as Bunny", "Bunny"},
@@ -841,7 +841,7 @@ void AppendGroupRow(std::vector<app::rows::Row>& out, uint32_t mask, const Group
 
 template <size_t N>
 std::string StepGroupValue(uint32_t addr, const GroupOptionDef (&opts)[N], uint32_t mask,
-                           bool single_mode, int step) {
+                           bool single_mode, int step, uint32_t fire_flag_addr = 0u) {
     struct Choice {
         uint32_t hw_val;
         const char* label;
@@ -854,7 +854,10 @@ std::string StepGroupValue(uint32_t addr, const GroupOptionDef (&opts)[N], uint3
             choices[count++] = {opts[i].hw_val, single_mode ? "On" : opts[i].short_name};
         }
     }
-    const uint32_t cur = safe_mem::Read32(addr, 0xFFFFFFFFu);
+    uint32_t cur = safe_mem::Read32(addr, 0xFFFFFFFFu);
+    if (fire_flag_addr != 0u && cur == 0xFFFFFFFFu && safe_mem::Read8(fire_flag_addr, 0u) != 0u) {
+        cur = kHeadFireHwVal;
+    }
     int idx = 0;
     for (size_t i = 0; i < count; ++i) {
         if (choices[i].hw_val == cur) {
@@ -865,8 +868,17 @@ std::string StepGroupValue(uint32_t addr, const GroupOptionDef (&opts)[N], uint3
     if (step != 0 && count > 1u) {
         const int n = static_cast<int>(count);
         idx = ((idx + step) % n + n) % n;
-        if (safe_mem::CanAccess(addr, 4u)) {
-            kernel::W32(addr, choices[idx].hw_val);
+        const uint32_t next_val = choices[idx].hw_val;
+        if (fire_flag_addr != 0u) {
+            if (next_val == kHeadFireHwVal) {
+                WriteByteFlag(fire_flag_addr, 1u);
+                if (safe_mem::CanAccess(addr, 4u)) kernel::W32(addr, 0xFFFFFFFFu);
+            } else {
+                WriteByteFlag(fire_flag_addr, 0u);
+                if (safe_mem::CanAccess(addr, 4u)) kernel::W32(addr, next_val);
+            }
+        } else if (safe_mem::CanAccess(addr, 4u)) {
+            kernel::W32(addr, next_val);
         }
     }
     return choices[idx].label;
@@ -979,8 +991,6 @@ std::string FormatCollectionRowValue(int row_id, int step) {
         }
         case kRowNoDamage:
             return StepByteToggle(kNativeNoDamageAddr, step);
-        case kRowSpecialsUpgrades:
-            return StepByteToggle(kNativeSpecialsUpgradesAddr, step);
         case kRowHyperAgro:
             return StepByteToggle(kNativeHyperAgroAddr, step);
         case kRowSpecialSingle:
@@ -988,9 +998,9 @@ std::string FormatCollectionRowValue(int row_id, int step) {
         case kRowSpecialGroup:
             return StepGroupValue(kNativeSpecialAddr, kSpecialOptions, mask, false, step);
         case kRowHeadSingle:
-            return StepGroupValue(kNativeHeadAddr, kHeadOptions, mask, true, step);
+            return StepGroupValue(kNativeHeadAddr, kHeadOptions, mask, true, step, kNativeFireHeadAddr);
         case kRowHeadGroup:
-            return StepGroupValue(kNativeHeadAddr, kHeadOptions, mask, false, step);
+            return StepGroupValue(kNativeHeadAddr, kHeadOptions, mask, false, step, kNativeFireHeadAddr);
         default:
             return "";
     }
@@ -1299,6 +1309,15 @@ X86_FUNC(sub_001923B0) {
             game::cheats::RecordCollectedBit(bit);
             if (bit == game::cheats::CollectBit::Roadtrip) {
                 game::cheats::g_state.native_roadtrip.store(true, std::memory_order_relaxed);
+            } else if (bit == game::cheats::CollectBit::HeadFire) {
+                if (game::safe_mem::CanAccess(game::cheats::kNativeHeadAddr, 4u)) {
+                    kernel::W32(game::cheats::kNativeHeadAddr, 0xFFFFFFFFu);
+                }
+            } else if (bit == game::cheats::CollectBit::HeadSmiley ||
+                       bit == game::cheats::CollectBit::HeadPumpkin ||
+                       bit == game::cheats::CollectBit::HeadBunny ||
+                       bit == game::cheats::CollectBit::HeadSnowman) {
+                game::cheats::WriteByteFlag(game::cheats::kNativeFireHeadAddr, 0u);
             }
         }
     }
