@@ -797,7 +797,6 @@ constexpr uint32_t kTutBitSpecial = 1u << 1;
 constexpr uint32_t kTutBitFlash = 1u << 2;
 constexpr uint32_t kTutBitLaunch = 1u << 3;
 constexpr uint32_t kTutBitGarage = 1u << 4;
-constexpr uint32_t kTutBitFmv = 1u << 5;
 constexpr uint32_t kTutBitCityMap = 1u << 6;
 TutKind g_tut_active = TutKind::None;
 TutKind g_tut_visual = TutKind::None;
@@ -2319,10 +2318,6 @@ void UpdateFmvHoldLocked(uint64_t now) {
         if (g_fmv_progress >= 1.0f && !g_fmv_skip_fired) {
             g_fmv_skip_fired = true;
             g_fmv_skip_pulse_until = now + kFmvSkipPulseMs;
-            if (!(game::Opt().tutorial_seen & kTutBitFmv)) {
-                game::Opt().tutorial_seen |= kTutBitFmv;
-                g_tut_save_pending.store(true, std::memory_order_relaxed);
-            }
             LOGI("[OK] touch: FMV hold-to-skip triggered");
         }
     } else {
@@ -2814,59 +2809,37 @@ void BuildOverlay(std::vector<Quad>& out) {
         }
     }
 
-    // 2. FMV Skippable Cinema Mode: ONLY start.svg + animated circular hold-anywhere progress ring!
+    // 2. FMV Skippable Cinema Mode: minimal bottom-center circular progress animation + 75% transparent "Hold to Skip" text (no icon, no border)
     const auto ctx = CurrentUiContext();
     if (!editing && ctx == game::UiContext::FmvSkippable) {
-        const float aspect = std::clamp(w / std::max(h, 1.0f), 1.33f, 2.55f);
-        const float r_share = 0.072f;
-        const float btn_r = r_share * h;
-        const float ring_r = btn_r * 1.24f;
-        const float cx = (1.0f - 0.045f - (r_share * 1.24f) / aspect) * w;
-        const float cy = (1.0f - 0.115f - r_share) * h;
-
         const float prog = g_fmv_progress;
-        const float vis_a = fade_alpha * (prog > 0.01f ? std::min(1.0f, g_opacity + 0.10f) : g_opacity);
+        const float base_a = fade_alpha * (prog > 0.01f ? 0.90f : 0.75f);
 
-        // Circular progress ring (stay completely still — no scale effect, smooth clockwise arc fill)
-        const float track_a = (prog > 0.01f ? 0.35f : 0.22f) * vis_a;
-        const float active_a = 0.98f * vis_a;
-        EmitRing(out, cx, cy, ring_r, std::max(4.0f, h * 0.0085f), prog,
-                 1.0f, 0.88f, 0.38f, active_a,
+        const char* label = "Hold to Skip";
+        const float text_h = std::clamp(h * 0.032f, 18.0f, 40.0f);
+        const float ring_r = text_h * 0.56f;
+        const float ring_th = std::max(2.6f, ring_r * 0.24f);
+        const float gap = text_h * 0.48f;
+        const float text_w = MeasureTextWidth(text_h, label);
+        const float total_w = ring_r * 2.0f + gap + text_w;
+        const float group_x0 = (w - total_w) * 0.5f;
+        const float cy = h * 0.88f;
+        const float ring_cx = group_x0 + ring_r;
+        const float text_cx = group_x0 + ring_r * 2.0f + gap + text_w * 0.5f;
+
+        // Simple circular progress ring (subtle track + smooth clockwise white fill when holding)
+        const float track_a = (prog > 0.01f ? 0.34f : 0.28f) * base_a;
+        const float active_a = 0.95f * fade_alpha;
+        EmitRing(out, ring_cx, cy, ring_r, ring_th, prog,
+                 1.0f, 1.0f, 1.0f, active_a,
                  1.0f, 1.0f, 1.0f, track_a);
 
-        // start.svg icon inside the ring (stationary, no scale)
-        const AtlasUv& uv = g_atlas_uv[skin][static_cast<size_t>(SvgIcon::Start)];
-        const float ir = btn_r * 0.92f;
-        if (atlas_ok && uv.valid) {
-            out.push_back(Quad{cx - ir, cy - ir, cx + ir, cy + ir,
-                               uv.u0, uv.v0, uv.u1, uv.v1,
-                               1.0f, 1.0f, 1.0f, vis_a,
-                               0, 0, 0, 0, 0, 0, 0u});
-        } else {
-            EmitPanel(out, cx - ir, cy - ir, cx + ir, cy + ir,
-                      0.10f, 0.10f, 0.14f, 0.65f * vis_a, ir, th, 1.0f, 1.0f, 1.0f, 0.85f * vis_a);
-        }
-
-        // First-time skippable FMV hint: subtle pulsing pill teaching "Hold Anywhere to Skip"
-        const bool first_fmv_hint = !(game::Opt().tutorial_seen & kTutBitFmv);
-        if (first_fmv_hint) {
-            const float s = UiScale(w, h);
-            const float fmv_pulse = 0.5f + 0.5f * std::sin(float(now % 6283u) * 0.006f);
-            const char* hint_txt = "Hold Anywhere to Skip";
-            const float th_txt = std::clamp(12.5f * s, 15.0f, h * 0.029f);
-            const float pw = MeasureTextWidth(th_txt, hint_txt) + 26.0f * s;
-            const float ph = th_txt + 16.0f * s;
-            const float px = std::clamp(cx, pw * 0.5f + 12.0f * s, w - pw * 0.5f - 12.0f * s);
-            const float py = cy + ring_r + ph * 0.5f + 10.0f * s;
-            EmitPanel(out, px - pw * 0.5f, py - ph * 0.5f, px + pw * 0.5f, py + ph * 0.5f,
-                      0.055f, 0.075f, 0.115f, 0.88f * fade_alpha, ph * 0.5f,
-                      std::max(1.5f, 1.5f * s), 1.0f, 0.88f, 0.38f, (0.65f + 0.30f * fmv_pulse) * fade_alpha);
-            EmitTextCentered(out, px, py, th_txt, 1.0f, 0.94f, 0.65f, 0.98f * fade_alpha, hint_txt);
-        } else {
-            // Crisp Roboto "Hold to Skip" label beneath ring
-            EmitTextCentered(out, cx, cy + ring_r + h * 0.032f, h * 0.030f,
-                             1.0f, 1.0f, 1.0f, 0.88f * vis_a, "Hold to Skip");
-        }
+        // Clean centered "Hold to Skip" text at 75% opacity (subtle shadow for legibility, no border/box)
+        const float sh = std::max(1.2f, text_h * 0.06f);
+        EmitTextCentered(out, text_cx + sh, cy + sh, text_h,
+                         0.0f, 0.0f, 0.0f, 0.45f * base_a, label);
+        EmitTextCentered(out, text_cx, cy, text_h,
+                         1.0f, 1.0f, 1.0f, base_a, label);
         return;
     }
 
