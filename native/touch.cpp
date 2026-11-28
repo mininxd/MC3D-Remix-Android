@@ -835,11 +835,8 @@ bool TutUsesSlowMo(TutKind k) {
     return k == TutKind::Turbo || k == TutKind::Special || k == TutKind::Flash;
 }
 
-// Analog steering stick, Bike auto-analog + weight transfer, & Garage 1-finger orbit state (under g_lock)
+// Analog steering stick & Garage 1-finger orbit state (under g_lock)
 bool g_analog_stick = false;
-bool g_last_is_bike = false;
-bool g_bike_override_active = false;
-bool g_bike_manual_mode = false;
 bool g_controls_hidden = false;
 bool g_edit_moved = false;
 char g_mode_toast[64] = {};
@@ -1086,27 +1083,7 @@ bool IsGameplayButton(When w) {
            w == When::AlwaysActive;
 }
 
-void SyncBikeModeLocked(uint64_t now) {
-    const bool bike = (CurrentUiContext() == game::UiContext::Gameplay) &&
-                      game::Telemetry().is_bike.load(std::memory_order_relaxed);
-    if (bike != g_last_is_bike) {
-        g_last_is_bike = bike;
-        g_bike_override_active = false;
-        g_stick_raw_x = g_stick_raw_y = g_stick_x = g_stick_y = 0.0f;
-        if (bike && !g_analog_stick) {
-            std::snprintf(g_mode_toast, sizeof(g_mode_toast), "Bike: Analog + Weight Transfer");
-            g_mode_toast_until = now + 1300u;
-        }
-    }
-}
-
 bool EffectiveAnalogMode() {
-    if (g_editing) return g_analog_stick;
-    const bool bike = (CurrentUiContext() == game::UiContext::Gameplay) &&
-                      game::Telemetry().is_bike.load(std::memory_order_relaxed);
-    if (bike) {
-        return g_bike_override_active ? g_bike_manual_mode : true;
-    }
     return g_analog_stick;
 }
 
@@ -1506,7 +1483,6 @@ bool IsNoSlideButton(size_t b) {
 void FingerDown(SDL_FingerID id, float x, float y) {
     const uint64_t now = NowMs();
     StartFadeLocked(1.0f, now);  // Smooth 200ms fade-in whenever screen is touched!
-    SyncBikeModeLocked(now);
 
     Finger f;
     f.id = id;
@@ -1862,16 +1838,9 @@ void FingerUp(SDL_FingerID id) {
         return;
     }
     if (toggle_mode) {
-        const bool bike = (CurrentUiContext() == game::UiContext::Gameplay) &&
-                          game::Telemetry().is_bike.load(std::memory_order_relaxed);
-        const bool next_analog = !EffectiveAnalogMode();
-        if (bike) {
-            g_bike_override_active = true;
-            g_bike_manual_mode = next_analog;
-        } else {
-            g_analog_stick = next_analog;
-            SaveLayout();
-        }
+        const bool next_analog = !g_analog_stick;
+        g_analog_stick = next_analog;
+        SaveLayout();
         g_stick_raw_x = g_stick_raw_y = g_stick_x = g_stick_y = 0.0f;
         std::snprintf(g_mode_toast, sizeof(g_mode_toast),
                       next_analog ? "Steering: Analog Stick" : "Steering: Arrow Buttons");
@@ -2618,7 +2587,6 @@ void Apply(int port, input::Pad& pad) {
     if (port != 0 || g_editing) return;
     std::lock_guard lock(g_lock);
     const uint64_t now = NowMs();
-    SyncBikeModeLocked(now);
     UpdateFmvHoldLocked(now);
     Recount();
     UpdateMapHoldLocked(now);
@@ -2686,7 +2654,7 @@ void Apply(int port, input::Pad& pad) {
         ApplyRemappedAction(pad, game::GameAction::Handbrake, 0, kAnalogA);
     }
 
-    // Steering: digital Left/Right buttons OR proportional NFSU2-style analog thumbstick (auto-enabled on bikes!)
+    // Steering: digital Left/Right buttons OR proportional NFSU2-style analog thumbstick
     const float steer_f = (steer != 0) ? float(steer) : (analog ? g_stick_x : 0.0f);
     if (std::fabs(steer_f) >= 0.02f) {
         ApplyRemappedSteer(pad, steer_f);
@@ -2759,7 +2727,6 @@ void BuildOverlay(std::vector<Quad>& out) {
     std::lock_guard lock(g_lock);
     EnsureLayout();
     const uint64_t now = NowMs();
-    SyncBikeModeLocked(now);
     UpdateFmvHoldLocked(now);
     UpdateMapHoldLocked(now);
     UpdateTutorialLocked(now);
@@ -3021,13 +2988,13 @@ void BuildOverlay(std::vector<Quad>& out) {
         }
     }
 
-    // 4. Radio swipe & Steering Mode / Bike auto-analog capsule toast (Roboto)
+    // 4. Radio swipe & Steering Mode capsule toast (Roboto, matches layout button opacity)
     if (!editing && (now < g_mode_toast_until || (ctx == game::UiContext::Gameplay && now < g_radio_toast_until))) {
         const bool is_mode = (now < g_mode_toast_until);
         const uint64_t until = is_mode ? g_mode_toast_until : g_radio_toast_until;
         const float dur = is_mode ? 1200.0f : float(kToastMs);
         const float remain = float(until - now) / dur;
-        const float alpha = std::clamp(remain * 1.5f, 0.0f, 1.0f) * fade_alpha;
+        const float alpha = std::clamp(remain * 1.5f, 0.0f, 1.0f) * fade_alpha * g_opacity;
         const char* msg = is_mode ? g_mode_toast : ((g_radio_toast_dir > 0) ? "Radio  >" : "<  Radio");
         const float ty = is_mode ? h * 0.16f : h * 0.88f;
         const float pw = is_mode ? h * 0.52f : h * 0.24f;
