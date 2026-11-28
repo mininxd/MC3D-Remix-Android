@@ -49,6 +49,7 @@ X86_EXTERN_FUNC(__imp__sub_00209000);
 X86_EXTERN_FUNC(__imp__sub_002090A0);
 X86_EXTERN_FUNC(__imp__sub_002C4A10);
 X86_EXTERN_FUNC(__imp__sub_001DB0D0);
+X86_EXTERN_FUNC(__imp__sub_001DB557);
 
 namespace game::cheats {
 namespace {
@@ -650,8 +651,16 @@ void UpdateTouchTelemetry() {
     tel.is_bike.store(is_bike, std::memory_order_relaxed);
     tel.race_intro.store(race_intro, std::memory_order_relaxed);
     tel.race_countdown.store(race_countdown, std::memory_order_relaxed);
+    static uint64_t s_gameplay_enter_ms = 0u;
+    if (ctx != UiContext::Gameplay || race_intro || race_countdown) {
+        s_gameplay_enter_ms = 0u;
+        g_flash_challenge_ms.store(0u, std::memory_order_relaxed);
+    } else if (s_gameplay_enter_ms == 0u) {
+        s_gameplay_enter_ms = now_ms;
+    }
+    const bool cruise_settled = (s_gameplay_enter_ms != 0u) && (now_ms >= s_gameplay_enter_ms + 2500u);
     const uint64_t last_flash_ms = g_flash_challenge_ms.load(std::memory_order_relaxed);
-    const bool flash_challenge_ready = (ctx == UiContext::Gameplay) &&
+    const bool flash_challenge_ready = cruise_settled &&
                                        (last_flash_ms != 0u) && (now_ms >= last_flash_ms) &&
                                        ((now_ms - last_flash_ms) < 250u);
     tel.flash_challenge_ready.store(flash_challenge_ready, std::memory_order_relaxed);
@@ -1083,8 +1092,21 @@ X86_FUNC(sub_002C4A10) {
     __imp__sub_002C4A10(ctx, base);
 }
 
-// Detect when MC3D is rendering the 3D world "flash to begin" mini-box in front of a roaming racer (0x1D7ECC)
-// or an optional Free Cruise city/club race beacon (0x1D821B), ignoring Garage/Shop beacons (0x2642FB) and race HUDs (0x1CBA2A).
+namespace {
+thread_local bool t_flash_box_candidate = false;
+}  // namespace
+
+// Detect when MC3D is actively rendering the 3D world "flash to begin" mini-box (via sub_001DB557 after
+// clipping & alpha checks pass) directly in front of the player car's headlights for either an eligible
+// roaming racer (0x1D7ECC) or an optional Free Cruise city/club race currently in activation range (0x1D821B).
+X86_FUNC(sub_001DB557) {
+    if (t_flash_box_candidate) {
+        t_flash_box_candidate = false;
+        game::cheats::g_flash_challenge_ms.store(game::cheats::SteadyNowMs(), std::memory_order_relaxed);
+    }
+    __imp__sub_001DB557(ctx, base);
+}
+
 X86_FUNC(sub_001DB0D0) {
     const uint32_t entry_esp = ctx.esp;
     const uint32_t ret_va = game::safe_mem::Read32(entry_esp, 0u);
@@ -1098,39 +1120,66 @@ X86_FUNC(sub_001DB0D0) {
         return out;
     };
 
-    bool in_range = false;
-    if (is_roaming_racer || is_optional_race) {
-        const uint32_t target_pos_va = game::safe_mem::Read32(entry_esp, 0x08u);
-        const uint32_t player_pos_va = game::safe_mem::Read32(entry_esp, 0x0Cu);
-        if (target_pos_va != 0u && player_pos_va != 0u) {
-            const float tx = read_f32(target_pos_va, 0x00u);
-            const float ty = read_f32(target_pos_va, 0x04u);
-            const float tz = read_f32(target_pos_va, 0x08u);
-            const float px = read_f32(player_pos_va, 0x00u);
-            const float py = read_f32(player_pos_va, 0x04u);
-            const float pz = read_f32(player_pos_va, 0x08u);
-            const float max_dist = read_f32(entry_esp, 0x18u);
-            const float limit = is_roaming_racer
-                ? 28.0f
-                : ((std::isfinite(max_dist) && max_dist > 1.0f)
-                       ? std::min(std::max(max_dist + 0.9f, 5.0f), 35.0f)
-                       : 15.0f);
-            const float dx = tx - px;
-            const float dy = ty - py;
-            const float dz = tz - pz;
-            if (std::isfinite(dx) && std::isfinite(dy) && std::isfinite(dz)) {
-                in_range = (dx * dx + dz * dz <= limit * limit) && (std::fabs(dy) <= 8.0f);
+    bool eligible = false;
+    if ((is_roaming_racer || is_optional_race) &&
+        game::safe_mem::Read32(game::cheats::kGameStateAddr, 0u) == 2u &&
+        game::safe_mem::Read8(0x005341A0u, 0u) != 0u) {
+        const uint32_t hookmen_wrap = game::safe_mem::Read32(0x00533E24u, 0u);
+        const uint32_t hookmen = hookmen_wrap ? game::safe_mem::Read32(hookmen_wrap + 0x04u, 0u) : 0u;
+        const uint32_t race_timer = game::safe_mem::Read32(0x00557EECu, 0u);
+        const uint32_t race_state = race_timer ? game::safe_mem::Read32(race_timer + 0x04u, 0u) : 0u;
+        const uint32_t car_mgr = game::safe_mem::Read32(0x00558814u, 0u);
+        const uint32_t player_car = car_mgr ? game::safe_mem::Read32(car_mgr + 0x08u, 0u) : 0u;
+        const uint32_t veh_p14 = player_car ? game::safe_mem::Read32(player_car + 0x14u, 0u) : 0u;
+        const uint32_t veh_phys = veh_p14 ? game::safe_mem::Read32(veh_p14 + 0x08u, 0u) : 0u;
+        const uint32_t veh_mat = veh_p14 ? game::safe_mem::Read32(veh_p14 + 0x1Cu, 0u) : 0u;
+
+        bool circle_mode = false;
+        const uint32_t veh_p04 = veh_p14 ? game::safe_mem::Read32(veh_p14 + 0x04u, 0u) : 0u;
+        const uint32_t cfg_holder = veh_p04 ? game::safe_mem::Read32(veh_p04 + 0x64u, 0u) : 0u;
+        const uint32_t cfg_idx = cfg_holder ? game::safe_mem::Read32(cfg_holder + 0x04u, 0u) : 0xFFFFFFFFu;
+        if (cfg_idx < 16u) {
+            const uint32_t cfg_entry = 0x00558848u + cfg_idx * 0x140u;
+            circle_mode = (game::safe_mem::Read32(cfg_entry + 0x80u, 0u) == 6u) &&
+                          (game::safe_mem::Read32(cfg_entry + 0x84u, 0u) == 1u);
+        }
+
+        const bool not_in_race = (veh_phys != 0u) &&
+                                 ((game::safe_mem::Read8(veh_phys + 0x15Cu, 0u) & 0x02u) == 0u) &&
+                                 (race_state != 2u) && (race_state != 4u) && (race_state < 7u);
+        const bool hookmen_ready = (hookmen != 0u) && (game::safe_mem::Read8(hookmen + 0x0Du, 0u) == 0u);
+        const int32_t opt_idx = hookmen ? static_cast<int32_t>(game::safe_mem::Read32(hookmen + 0x125Cu, 0xFFFFFFFFu)) : -1;
+
+        if (!circle_mode && not_in_race && hookmen_ready && veh_mat != 0u &&
+            (!is_optional_race || opt_idx >= 0)) {
+            const uint32_t target_pos_va = game::safe_mem::Read32(entry_esp, 0x08u);
+            const uint32_t player_pos_va = game::safe_mem::Read32(entry_esp, 0x0Cu);
+            if (target_pos_va != 0u && player_pos_va != 0u) {
+                const float tx = read_f32(target_pos_va, 0x00u);
+                const float ty = read_f32(target_pos_va, 0x04u);
+                const float tz = read_f32(target_pos_va, 0x08u);
+                const float px = read_f32(player_pos_va, 0x00u);
+                const float py = read_f32(player_pos_va, 0x04u);
+                const float pz = read_f32(player_pos_va, 0x08u);
+                const float fx = -read_f32(veh_mat, 0x28u);
+                const float fz = -read_f32(veh_mat, 0x30u);
+                const float dx = tx - px;
+                const float dy = ty - py;
+                const float dz = tz - pz;
+                const float dist_xz_sq = dx * dx + dz * dz;
+                const float max_r = is_roaming_racer ? 22.0f : 20.0f;
+                const float fwd_len = std::hypot(fx, fz);
+                if (std::isfinite(dx) && std::isfinite(dy) && std::isfinite(dz) &&
+                    std::isfinite(fx) && std::isfinite(fz) && fwd_len > 0.01f &&
+                    std::fabs(dy) <= 5.0f && dist_xz_sq >= 2.25f && dist_xz_sq <= max_r * max_r) {
+                    const float cos_angle = (fx * dx + fz * dz) / (fwd_len * std::sqrt(dist_xz_sq));
+                    eligible = (cos_angle >= 0.50f);
+                }
             }
         }
     }
 
+    t_flash_box_candidate = eligible;
     __imp__sub_001DB0D0(ctx, base);
-
-    if (in_range) {
-        // sub_002D4560 stores projected 1/w into [entry_esp - 0xE0]; >0 && <1 means visible in front of camera.
-        const float sz = read_f32(entry_esp - 0xE0u, 0u);
-        if (std::isfinite(sz) && sz > 0.0f && sz < 1.0f) {
-            game::cheats::g_flash_challenge_ms.store(game::cheats::SteadyNowMs(), std::memory_order_relaxed);
-        }
-    }
+    t_flash_box_candidate = false;
 }

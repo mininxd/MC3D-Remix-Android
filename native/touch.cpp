@@ -501,7 +501,6 @@ enum class Role : uint8_t {
     RadioSwipe,
     GarageOrbit,
     GaragePinch,
-    GarageMenuSwipe,
     FmvHold,
     Drag,
     Pinch,
@@ -770,15 +769,10 @@ float g_fade_target = 1.0f;
 float g_fade_from = 1.0f;
 uint64_t g_fade_start_ms = 0;
 
-// Radio swipe & Garage swipe-to-select / tap-to-confirm pulses
+// Radio swipe & Garage vertical swipe short pulses
 uint64_t g_pulse_until[4] = {};  // 0=DUp, 1=DDown, 2=DLeft, 3=DRight
 uint64_t g_radio_toast_until = 0;
 int g_radio_toast_dir = 0;
-std::vector<int> g_garage_step_queue;
-int g_garage_active_step_bit = -1;
-uint64_t g_garage_step_until = 0;
-uint64_t g_garage_gap_until = 0;
-uint64_t g_garage_select_pulse_until = 0;
 
 // FMV hold-anywhere skip animation state (under g_lock)
 float g_fmv_progress = 0.0f;
@@ -1601,7 +1595,7 @@ void FingerDown(SDL_FingerID id, float x, float y) {
                 game::Opt().tutorial_seen |= kTutBitGarage;
                 g_tut_save_pending.store(true, std::memory_order_relaxed);
             }
-            // If 1 finger is already orbiting the car, a second finger anywhere engages 2-finger pinch zoom.
+            // Native 1:1 direct-touch Garage car rotation (or 2-finger pinch-to-zoom!)
             const Finger* existing_orbit = nullptr;
             for (const Finger& o : g_fingers) {
                 if (o.role == Role::GarageOrbit) {
@@ -1613,13 +1607,7 @@ void FingerDown(SDL_FingerID id, float x, float y) {
                 f.role = Role::GaragePinch;
                 g_garage_pinch_dist = std::max(std::hypot(x - existing_orbit->x, y - existing_orbit->y), 1.0f);
                 g_orbit_vel_yaw = g_orbit_vel_pitch = 0.0f;
-            } else if (x < w * 0.42f || y > h * 0.70f) {
-                // Garage menus, car selector, and bottom part/paint bars -> swipe to scroll, tap to select (A).
-                f.role = Role::GarageMenuSwipe;
-                f.notch_x = x;
-                f.notch_y = y;
             } else {
-                // Car showcase viewport -> 1:1 direct-touch polar camera rotation (or 2-finger pinch-to-zoom).
                 f.role = Role::GarageOrbit;
                 g_orbit_vel_yaw = g_orbit_vel_pitch = 0.0f;
                 g_orbit_last_ms = now;
@@ -1816,34 +1804,6 @@ void FingerMove(SDL_FingerID id, float x, float y) {
                 }
             }
         }
-        if (f.role == Role::GarageMenuSwipe) {
-            const float deadzone = std::clamp(std::min(w, h) * 0.035f, 12.0f, 24.0f);
-            const float step = std::clamp(std::min(w, h) * 0.068f, 24.0f, 56.0f);
-            if (!f.swipe_fired) {
-                if (std::hypot(x - f.x0, y - f.y0) >= deadzone) {
-                    f.swipe_fired = true;
-                }
-            }
-            if (f.swipe_fired) {
-                auto enqueue_step = [&](int bit) {
-                    if (g_garage_step_queue.size() < 8u) {
-                        g_garage_step_queue.push_back(bit);
-                    }
-                };
-                while (std::fabs(x - f.notch_x) >= step) {
-                    const int bit = (x > f.notch_x) ? 3 : 2;  // DRight / DLeft
-                    enqueue_step(bit);
-                    f.notch_x += (bit == 3) ? step : -step;
-                    f.notch_y = y;
-                }
-                while (std::fabs(y - f.notch_y) >= step) {
-                    const int bit = (y > f.notch_y) ? 1 : 0;  // DDown / DUp
-                    enqueue_step(bit);
-                    f.notch_y += (bit == 1) ? step : -step;
-                    f.notch_x = x;
-                }
-            }
-        }
     }
     Recount();
 }
@@ -1857,10 +1817,6 @@ void FingerUp(SDL_FingerID id) {
         if (f.role == Role::Button && HitButton(f.x, f.y) == f.button) {
             if (f.button == kIdxModeSwap) toggle_mode = true;
             else if (f.button == kIdxEditBtn) open_editor = true;
-        } else if (f.role == Role::GarageMenuSwipe && !f.swipe_fired &&
-                   now >= f.down_ms && (now - f.down_ms) <= 280u &&
-                   CurrentUiContext() == game::UiContext::Garage) {
-            g_garage_select_pulse_until = now + kPulseMs;
         }
         // If finger paused still for > 90ms before lifting, stop momentum cleanly (no unwanted drift)
         if (f.role == Role::GarageOrbit && now > f.last_move_ms + 90u) {
@@ -2764,33 +2720,6 @@ void Apply(int port, input::Pad& pad) {
         }
     }
 
-    // Garage direct-touch swipe-to-navigate queue & tap-to-select (A) pulse
-    if (ctx == game::UiContext::Garage) {
-        if (g_garage_active_step_bit >= 0 && now >= g_garage_step_until) {
-            g_garage_active_step_bit = -1;
-            g_garage_gap_until = now + 35u;
-        }
-        if (g_garage_active_step_bit < 0 && now >= g_garage_gap_until && !g_garage_step_queue.empty()) {
-            g_garage_active_step_bit = g_garage_step_queue.front();
-            g_garage_step_queue.erase(g_garage_step_queue.begin());
-            g_garage_step_until = now + 55u;
-        }
-        if (g_garage_active_step_bit >= 0) {
-            pad.buttons |= uint16_t(1u << g_garage_active_step_bit);
-            used = true;
-        }
-        if (now < g_garage_select_pulse_until) {
-            pad.analog[kAnalogA] = 0xFF;
-            used = true;
-        }
-    } else {
-        g_garage_step_queue.clear();
-        g_garage_active_step_bit = -1;
-        g_garage_step_until = 0;
-        g_garage_gap_until = 0;
-        g_garage_select_pulse_until = 0;
-    }
-
     // First-time spotlight tap completion -> fire Turbo, Special, or Flash cleanly as time ramps back to 100%
     if (ctx == game::UiContext::Gameplay && now < g_tut_fire_pulse_until) {
         if (g_tut_fire_kind == TutKind::Turbo) {
@@ -3227,7 +3156,7 @@ void BuildOverlay(std::vector<Quad>& out) {
         const float a = g_garage_hint_alpha * g_garage_hint_alpha * (3.0f - 2.0f * g_garage_hint_alpha);
         const float s = UiScale(w, h);
         const float sweep = std::sin(float(now % 2400u) / 2400.0f * 6.2831853f);
-        const char* gtxt = "Swipe & Tap Menu  -  Drag Car to Rotate";
+        const char* gtxt = "Drag to Rotate  -  Pinch to Zoom";
         const float th_txt = std::clamp(12.0f * s, 14.0f, h * 0.027f);
         const float pad_x = 18.0f * s;
         const float pad_y = 10.0f * s;
