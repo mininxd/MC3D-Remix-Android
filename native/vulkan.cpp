@@ -191,12 +191,17 @@ struct OverlayRun {
     uint32_t count = 0;
 };
 
-// the screen filters, the frame onto the screen through one of them. src.xy a texel of the frame, src.z seconds for
-// what moves (grain, VHS), src.w the colour look. pscrt: crt.x the lines, a whole number of pixels each so they never
-// beat against the screen's; crt.y how dark the gaps between them are, crt.z the tube's curve, crt.w the phosphor
-// mask's dimming; look.x the corners' shade, look.y the brightness the lines and mask take back. post.x HDR on,
-// post.y FXAA on; both go before the filter, psplain is them alone
-const char* kFilterHlsl = R"(
+// Builds a specialized post-process / screen-filter pixel shader for only the active filter & features.
+// Eliminates unused FXAA/HDR/filter branches (cutting VGPR pressure on mobile GPUs), moves gamma LUT
+// evaluation to a single pass per pixel instead of per neighborhood tap, and replaces trig/fmod Noise,
+// CRT scanlines, and aperture grille modulo with pure ALU arithmetic.
+const std::string& FilterHlsl(uint32_t kind, uint32_t mode, bool use_gamma, bool use_hdr, bool use_fxaa) {
+    static std::unordered_map<uint32_t, std::string> cache;
+    const uint32_t key = (kind & 0x3u) | ((mode & 0x7u) << 2) | (use_gamma ? 0x20u : 0u) |
+                         (use_hdr ? 0x40u : 0u) | (use_fxaa ? 0x80u : 0u);
+    if (auto it = cache.find(key); it != cache.end()) return it->second;
+
+    std::string s = R"(
 cbuffer B : register(b1) { float4 uvrect; float4 opts; float4 crt; float4 look; float4 src; float4 post; };
 Texture2D img : register(t0);
 Texture2D lut : register(t1);
@@ -210,113 +215,158 @@ O vs(uint id : SV_VertexID) {
     o.uv = uvrect.xy + t * uvrect.zw;
     return o;
 }
-float3 Fetch(float2 uv) {
-    float3 c = img.SampleLevel(ls, uv, 0).rgb;
-    if (opts.x > 0) c = float3(lut.Sample(ps, float2(c.r, 0.5)).r, lut.Sample(ps, float2(c.g, 0.5)).g, lut.Sample(ps, float2(c.b, 0.5)).b);
-    return c;
-}
+float3 Fetch(float2 uv) { return img.SampleLevel(ls, uv, 0).rgb; }
 float Luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
-float Noise(float2 p) { return frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453); }
-float Corners(float2 uv, float k) { return pow(saturate(16 * uv.x * uv.y * (1 - uv.x) * (1 - uv.y)), k); }
-
-// a Reinhard tone map against the console's overbright look, with the saturation and the shadows it loses given back
-float3 Tone(float3 c) {
-    if (post.x <= 0) return c;
-    float l = dot(c, float3(0.2126, 0.7152, 0.0722));
-    float shadow = 1 - smoothstep(0, 0.8, l);
-    c = lerp(l, c, 1 + shadow);
-    float3 mapped = pow(max(c / (c + 1), 0), 1 / 2.2);
-    c = lerp(c, mapped, 0.8);
-    return saturate(c * (1 - shadow * 0.5));
+float Noise(float2 p) {
+    float3 q = frac(float3(p.xyx) * 0.1031);
+    q += dot(q, q.yzx + 33.33);
+    return frac((q.x + q.y) * q.z);
 }
-
-// FXAA: across an edge the luma's direction says, two taps or four, the four unless they reach past the corners
+float Corners(float2 uv, float k) { return pow(max(16.0 * uv.x * uv.y * (1.0 - uv.x) * (1.0 - uv.y), 1e-6), k); }
+)";
+    if (use_gamma) {
+        s += R"(
+float3 ApplyGamma(float3 c) {
+    return float3(lut.SampleLevel(ps, float2(c.r, 0.5), 0).r,
+                  lut.SampleLevel(ps, float2(c.g, 0.5), 0).g,
+                  lut.SampleLevel(ps, float2(c.b, 0.5), 0).b);
+}
+)";
+    } else {
+        s += "float3 ApplyGamma(float3 c) { return c; }\n";
+    }
+    if (use_hdr) {
+        s += R"(
+float3 Tone(float3 c) {
+    float l = dot(c, float3(0.2126, 0.7152, 0.0722));
+    float shadow = 1.0 - smoothstep(0.0, 0.8, l);
+    c = lerp(l, c, 1.0 + shadow);
+    float3 mapped = pow(max(c / (c + 1.0), 1e-6), 1.0 / 2.2);
+    c = lerp(c, mapped, 0.8);
+    return saturate(c * (1.0 - shadow * 0.5));
+}
+)";
+    } else {
+        s += "float3 Tone(float3 c) { return c; }\n";
+    }
+    if (use_fxaa && kind != 2u) {
+        s += R"(
 float3 Fxaa(float2 uv) {
     float2 px = src.xy;
     float3 m = Fetch(uv);
     float nw = Luma(Fetch(uv + float2(-1, -1) * px)), ne = Luma(Fetch(uv + float2(1, -1) * px));
-    float sw = Luma(Fetch(uv + float2(-1, 1) * px)), se = Luma(Fetch(uv + float2(1, 1) * px));
+    float sw = Luma(Fetch(uv + float2(-1,  1) * px)), se = Luma(Fetch(uv + float2(1,  1) * px));
     float lm = Luma(m);
     float lo = min(lm, min(min(nw, ne), min(sw, se))), hi = max(lm, max(max(nw, ne), max(sw, se)));
     if (hi - lo < max(0.0312, hi * 0.125)) return m;
     float2 dir = float2(-((nw + ne) - (sw + se)), (nw + sw) - (ne + se));
-    float reduce = max((nw + ne + sw + se) * (0.25 / 8), 1.0 / 128);
-    dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + reduce), -8, 8) * px;
-    float3 a = 0.5 * (Fetch(uv + dir * (1.0 / 3 - 0.5)) + Fetch(uv + dir * (2.0 / 3 - 0.5)));
+    float reduce = max((nw + ne + sw + se) * (0.25 / 8.0), 1.0 / 128.0);
+    dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + reduce), -8.0, 8.0) * px;
+    float3 a = 0.5 * (Fetch(uv + dir * (1.0 / 3.0 - 0.5)) + Fetch(uv + dir * (2.0 / 3.0 - 0.5)));
     float3 b = a * 0.5 + 0.25 * (Fetch(uv - dir * 0.5) + Fetch(uv + dir * 0.5));
     float lb = Luma(b);
     return lb < lo || lb > hi ? a : b;
 }
+float3 Frame(float2 uv) { return Tone(ApplyGamma(Fxaa(uv))); }
+)";
+    } else {
+        s += "float3 Frame(float2 uv) { return Tone(ApplyGamma(Fetch(uv))); }\n";
+    }
 
-// the frame at a point with what the graphics settings add before a filter
-float3 Frame(float2 uv) { return Tone(post.y > 0 ? Fxaa(uv) : Fetch(uv)); }
-
-float4 psplain(O i) : SV_Target { return float4(Frame(i.uv), 1); }
-
-float4 pscrt(O i) : SV_Target {
-    float2 cc = i.uv * 2 - 1;
-    cc *= 1 + crt.z * cc.yx * cc.yx;
-    if (any(abs(cc) > 1)) return float4(0, 0, 0, 1);
+    if (kind == 0u) {
+        s += "float4 psmain(O i) : SV_Target { return float4(Frame(i.uv), 1.0); }\n";
+    } else if (kind == 1u) {
+        s += R"(
+float4 psmain(O i) : SV_Target {
+    float2 cc = i.uv * 2.0 - 1.0;
+    cc *= 1.0 + crt.z * cc.yx * cc.yx;
+    if (any(abs(cc) > 1.0)) return float4(0, 0, 0, 1);
     float2 uv = cc * 0.5 + 0.5;
     float3 c = Frame(uv);
-    // the beam is brightest at a line's middle, and a bright one spreads over the gap
-    float f = frac(uv.y * crt.x);
-    float gap = cos(3.14159265 * f);
-    float scan = 1 - crt.y * gap * gap;
-    scan = lerp(scan, 1, saturate(Luma(c)) * 0.4);
-    // an aperture grille: each column of pixels one of the phosphors
-    float col = fmod(floor(i.p.x), 3);
-    float3 grille = 1 - crt.w * float3(col != 0, col != 1, col != 2);
-    return float4(saturate(c * scan * grille * Corners(uv, look.x) * look.y), 1);
-}
-
-// contrast adaptive: an edge gains what its neighbours lack, less where it is near black or white already
-float4 pssharpen(O i) : SV_Target {
-    float3 c = Fetch(i.uv);
-    float3 n = Fetch(i.uv - float2(0, src.y)), s = Fetch(i.uv + float2(0, src.y));
-    float3 w = Fetch(i.uv - float2(src.x, 0)), e = Fetch(i.uv + float2(src.x, 0));
-    float3 lo = min(c, min(min(n, s), min(w, e))), hi = max(c, max(max(n, s), max(w, e)));
-    float3 amp = sqrt(saturate(min(lo, 1 - hi) / max(hi, 1e-4)));
-    return float4(Tone(saturate(c + (4 * c - n - s - w - e) * amp * 0.35)), 1);
-}
-
-float4 pscolor(O i) : SV_Target {
-    float2 uv = i.uv;
-    float t = src.z;
-    int mode = (int)src.w;
-    if (mode == 4) {
-        // VHS: lines torn sideways a little, a band of worse tracking rolling down
-        float row = floor(uv.y * 240);
-        float band = saturate(1 - abs(frac(uv.y - t * 0.07) - 0.5) * 12);
-        uv.x += (Noise(float2(row, floor(t * 30))) - 0.5) * (0.0015 + band * 0.006);
-    }
-    float3 c = Frame(uv);
-    if (mode == 0) {  // vibrant
-        c = lerp(Luma(c), c, 1.35);
-        c = (c - 0.5) * 1.08 + 0.5;
-    } else if (mode == 1) {  // noir: black and white, hard, grain
-        float l = saturate((Luma(c) - 0.5) * 1.35 + 0.5);
-        l += (Noise(i.p.xy + frac(t) * 97) - 0.5) * 0.05;
-        c = l * Corners(uv, 0.35);
-    } else if (mode == 2) {  // sepia
-        c = float3(dot(c, float3(0.393, 0.769, 0.189)), dot(c, float3(0.349, 0.686, 0.168)),
-                   dot(c, float3(0.272, 0.534, 0.131)));
-        c *= Corners(uv, 0.2);
-    } else if (mode == 3) {  // night vision: brightened green, grain, faint lines, a dark rim
-        float l = pow(saturate(Luma(c)), 0.7) * 1.5;
-        l += (Noise(i.p.xy + frac(t) * 131) - 0.5) * 0.12;
-        l *= 1 - 0.12 * fmod(floor(i.p.y), 2);
-        c = float3(0.25, 1.0, 0.35) * l * Corners(uv, 0.6);
-    } else if (mode == 4) {  // VHS: colour bleeding sideways, washed out, grain
-        float off = src.x * 2.5;
-        c.r = Fetch(uv + float2(off, 0)).r;
-        c.b = Fetch(uv - float2(off, 0)).b;
-        c = lerp(Luma(c), c, 0.8) * 0.95 + 0.03;
-        c += (Noise(i.p.xy + frac(t) * 173) - 0.5) * 0.06;
-    }
-    return float4(saturate(c), 1);
+    float d = abs(frac(uv.y * crt.x) - 0.5) * 2.0;
+    float gap2 = d * d * (3.0 - 2.0 * d);
+    float scan = 1.0 - crt.y * gap2;
+    scan = lerp(scan, 1.0, saturate(Luma(c)) * 0.4);
+    float gx = frac(floor(i.p.x) * 0.33333334 + 0.05);
+    float3 grille = 1.0 - crt.w * float3(gx >= 0.34, gx < 0.34 || gx >= 0.67, gx < 0.67);
+    return float4(saturate(c * scan * grille * Corners(uv, look.x) * look.y), 1.0);
 }
 )";
+    } else if (kind == 2u) {
+        s += R"(
+float4 psmain(O i) : SV_Target {
+    float3 c = Fetch(i.uv);
+    float3 n = Fetch(i.uv - float2(0.0, src.y)), sv = Fetch(i.uv + float2(0.0, src.y));
+    float3 w = Fetch(i.uv - float2(src.x, 0.0)), e = Fetch(i.uv + float2(src.x, 0.0));
+    float3 lo = min(c, min(min(n, sv), min(w, e))), hi = max(c, max(max(n, sv), max(w, e)));
+    float3 amp = sqrt(saturate(min(lo, 1.0 - hi) / max(hi, 1e-4)));
+    return float4(Tone(ApplyGamma(saturate(c + (4.0 * c - n - sv - w - e) * amp * 0.35))), 1.0);
+}
+)";
+    } else {
+        // pscolor specialized by mode (0: vibrant, 1: noir, 2: sepia, 3: night vision, 4: VHS)
+        if (mode == 0u) {
+            s += R"(
+float4 psmain(O i) : SV_Target {
+    float3 c = Frame(i.uv);
+    c = lerp(Luma(c), c, 1.35);
+    c = (c - 0.5) * 1.08 + 0.5;
+    return float4(saturate(c), 1.0);
+}
+)";
+        } else if (mode == 1u) {
+            s += R"(
+float4 psmain(O i) : SV_Target {
+    float3 c = Frame(i.uv);
+    float l = saturate((Luma(c) - 0.5) * 1.35 + 0.5);
+    l += (Noise(i.p.xy + frac(src.z) * 97.0) - 0.5) * 0.05;
+    l = saturate(l * Corners(i.uv, 0.35));
+    return float4(l, l, l, 1.0);
+}
+)";
+        } else if (mode == 2u) {
+            s += R"(
+float4 psmain(O i) : SV_Target {
+    float3 c = Frame(i.uv);
+    c = float3(dot(c, float3(0.393, 0.769, 0.189)), dot(c, float3(0.349, 0.686, 0.168)),
+               dot(c, float3(0.272, 0.534, 0.131)));
+    c *= Corners(i.uv, 0.2);
+    return float4(saturate(c), 1.0);
+}
+)";
+        } else if (mode == 3u) {
+            s += R"(
+float4 psmain(O i) : SV_Target {
+    float3 c = Frame(i.uv);
+    float l = pow(max(Luma(c), 1e-6), 0.7) * 1.5;
+    l += (Noise(i.p.xy + frac(src.z) * 131.0) - 0.5) * 0.12;
+    l *= 1.0 - 0.12 * step(0.5, frac(i.p.y * 0.5));
+    return float4(saturate(float3(0.25, 1.0, 0.35) * l * Corners(i.uv, 0.6)), 1.0);
+}
+)";
+        } else {
+            s += R"(
+float4 psmain(O i) : SV_Target {
+    float2 uv = i.uv;
+    float t = src.z;
+    float row = floor(uv.y * 240.0);
+    float band = saturate(1.0 - abs(frac(uv.y - t * 0.07) - 0.5) * 12.0);
+    uv.x += (Noise(float2(row, floor(t * 30.0))) - 0.5) * (0.0015 + band * 0.006);
+    float off = src.x * 2.5;
+    float3 c;
+    c.r = Fetch(uv + float2(off, 0.0)).r;
+    c.g = Fetch(uv).g;
+    c.b = Fetch(uv - float2(off, 0.0)).b;
+    c = Tone(ApplyGamma(c));
+    c = lerp(Luma(c), c, 0.8) * 0.95 + 0.03;
+    c += (Noise(i.p.xy + frac(t) * 173.0) - 0.5) * 0.06;
+    return float4(saturate(c), 1.0);
+}
+)";
+        }
+    }
+    return cache.emplace(key, std::move(s)).first->second;
+}
 
 const char* kDepthHlsl = R"(
 Texture2D<float> img : register(t0);
@@ -1987,6 +2037,8 @@ private:
     Image skin_;  // the touch controls' button skins (touch.cpp), made once
     bool skin_tried_ = false;
     bool gamma_ = false;
+    uint64_t present_pipe_key_ = 0;
+    VkPipeline present_pipe_ = VK_NULL_HANDLE;
     Target* draw_rt_ = nullptr;
     Target* draw_ds_ = nullptr;
     uint32_t guest_w_ = 640, guest_h_ = 480;
@@ -4800,9 +4852,26 @@ void VulkanBackend::DrawFrame(Target* t, uint32_t index) {
         std::memcpy(c + 8, rest, sizeof(rest));
     }
     Alloc cbuf = Constants(c, sizeof(c));
-    const char* hlsl = filter || post ? kFilterHlsl : kBlitHlsl;
-    const char* entry = crt ? "pscrt" : filter == 3 ? "pssharpen" : filter ? "pscolor" : post ? "psplain" : "psmain";
-    VkPipeline pipe = t ? FullScreenPipeline(hlsl, entry, swap_fmt_, VK_FORMAT_UNDEFINED, false) : VK_NULL_HANDLE;
+    VkPipeline pipe = VK_NULL_HANDLE;
+    if (t) {
+        const bool use_filter = (filter != 0u || post);
+        const uint32_t kind = use_filter ? (crt ? 1u : (filter == 3 ? 2u : (filter ? 3u : 0u))) : 4u;
+        const uint32_t mode = filter >= 4 ? (filter - 4) : 0u;
+        const uint64_t fkey = uint64_t(swap_fmt_) << 16 | kind | (mode << 4) |
+                              (gamma_ ? 0x100u : 0u) | (game::Opt().hdr ? 0x200u : 0u) | (fxaa ? 0x400u : 0u);
+        if (present_pipe_ != VK_NULL_HANDLE && present_pipe_key_ == fkey) {
+            pipe = present_pipe_;
+        } else {
+            if (use_filter) {
+                const std::string& fsrc = FilterHlsl(kind, mode, gamma_, game::Opt().hdr, fxaa);
+                pipe = FullScreenPipeline(fsrc.c_str(), "psmain", swap_fmt_, VK_FORMAT_UNDEFINED, false);
+            } else {
+                pipe = FullScreenPipeline(kBlitHlsl, "psmain", swap_fmt_, VK_FORMAT_UNDEFINED, false);
+            }
+            present_pipe_key_ = fkey;
+            present_pipe_ = pipe;
+        }
+    }
     VkDescriptorSet set = VK_NULL_HANDLE;
     if (pipe) {
         Transition(t->img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
