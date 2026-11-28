@@ -606,6 +606,7 @@ constexpr const char* kSkinDirs[kSkins] = {"outline"};
 
 enum class When : uint8_t {
     Play,
+    PlayCar,
     PlaySteerBtn,
     PlayStick,
     PlayNos,
@@ -637,7 +638,7 @@ constexpr Button kButtons[] = {
     {"gas",         "Gas",             SvgIcon::Gas,            kAnalogRT,     game::GameAction::Gas,            When::Play,           84.0f / 156.0f, true,  false},
     {"brake",       "Brake",           SvgIcon::Brake,          kAnalogLT,     game::GameAction::Brake,          When::Play,           84.0f / 108.0f, true,  false},
     {"handbrake",   "Handbrake",       SvgIcon::Handbrake,      kAnalogA,      game::GameAction::Handbrake,      When::Play,           1.0f,           false, false},
-    {"weight_xfer", "Weight Transfer", SvgIcon::WeightTransfer, kAnalogB,      game::GameAction::WeightTransfer, When::Play,           1.0f,           false, false},
+    {"weight_xfer", "Weight Transfer", SvgIcon::WeightTransfer, kAnalogB,      game::GameAction::WeightTransfer, When::PlayCar,        1.0f,           false, false},
     {"burnout",     "Burnout",         SvgIcon::Burnout,        kBurnout,      game::GameAction::Count,          When::Play,           1.0f,           false, false},
     {"nitro",       "Nitro / Turbo",   SvgIcon::Nitro,          kAnalogX,      game::GameAction::Nitro,          When::PlayNos,        1.0f,           false, false},
     {"special",     "Special",         SvgIcon::Special,        kBit + 6,      game::GameAction::Special,        When::PlaySpecial,    1.0f,           false, false},
@@ -844,12 +845,19 @@ bool g_analog_stick = false;
 bool g_controls_hidden = false;
 bool g_edit_moved = false;
 bool g_auto_gas = false;
+uint64_t g_auto_gas_brake_start_ms = 0;
+constexpr uint64_t kAutoGasBrakeCancelMs = 1000u;
 bool g_auto_gas_editing_drag = false;
 constexpr float kMinAutoGasDist = 0.06f;
 constexpr float kMaxAutoGasDist = 0.45f;
 constexpr float kDefaultAutoGasDist = 0.13f;
 float g_auto_gas_dist = kDefaultAutoGasDist;
 float g_before_auto_gas_dist = kDefaultAutoGasDist;
+
+void ClearAutoGasLocked() {
+    g_auto_gas = false;
+    g_auto_gas_brake_start_ms = 0;
+}
 char g_mode_toast[64] = {};
 uint64_t g_mode_toast_until = 0;
 float g_stick_raw_x = 0.0f;
@@ -921,7 +929,7 @@ float CurrentFadeAlphaLocked(uint64_t now) {
 }
 
 void StartFadeLocked(float target, uint64_t now) {
-    if (target <= 0.0f) g_auto_gas = false;
+    if (target <= 0.0f) ClearAutoGasLocked();
     if (std::fabs(g_fade_target - target) < 0.01f) return;
     g_fade_from = CurrentFadeAlphaLocked(now);
     g_fade_target = target;
@@ -1094,7 +1102,7 @@ bool IsMenuLike(game::UiContext ctx) {
 }
 
 bool IsGameplayButton(When w) {
-    return w == When::Play || w == When::PlaySteerBtn || w == When::PlayStick ||
+    return w == When::Play || w == When::PlayCar || w == When::PlaySteerBtn || w == When::PlayStick ||
            w == When::PlayNos || w == When::PlaySpecial ||
            w == When::AlwaysActive;
 }
@@ -1140,6 +1148,9 @@ bool ButtonShown(size_t i) {
                    game::Telemetry().in_city_map.load(std::memory_order_relaxed);
         case When::Play:
             return ctx == game::UiContext::Gameplay;
+        case When::PlayCar:
+            return ctx == game::UiContext::Gameplay &&
+                   !game::Telemetry().is_bike.load(std::memory_order_relaxed);
         case When::PlaySteerBtn:
             return ctx == game::UiContext::Gameplay && !analog;
         case When::PlayStick:
@@ -1312,7 +1323,7 @@ void OpenEditor() {
     g_before = g_layout;
     g_before_opacity = g_opacity;
     g_before_auto_gas_dist = g_auto_gas_dist;
-    g_auto_gas = false;
+    ClearAutoGasLocked();
     g_auto_gas_editing_drag = false;
     g_selected = -1;
     g_edit_moved = false;
@@ -1612,7 +1623,7 @@ void FingerDown(SDL_FingerID id, float x, float y) {
         UpdateAnalogStickLocked(x, y);
     } else if (b < kButtonCount) {
         if (ctx == game::UiContext::Gameplay && b == kIdxGas && g_auto_gas) {
-            g_auto_gas = false;  // Press Gas again to cancel Auto-Gas
+            ClearAutoGasLocked();  // Press Gas again to cancel Auto-Gas
         }
         f.role = Role::Button;
         f.button = b;
@@ -1627,7 +1638,7 @@ void FingerDown(SDL_FingerID id, float x, float y) {
         const float dy = y - ag.cy;
         const float hit_r = ag.r * 1.45f;
         if (dx * dx + dy * dy <= hit_r * hit_r) {
-            g_auto_gas = false;
+            ClearAutoGasLocked();
             f.role = Role::None;
             g_fingers.push_back(f);
             Recount();
@@ -1980,7 +1991,7 @@ void KeyEvent(const SDL_KeyboardEvent& k) {
     input::g_touch = false;
     {
         std::lock_guard lock(g_lock);
-        g_auto_gas = false;
+        ClearAutoGasLocked();
         StartFadeLocked(0.0f, NowMs());  // External keyboard smoothly fades out touch controls
     }
     if (!k.repeat && input::HudKey(vk)) game::g_hide_hud = !game::g_hide_hud;
@@ -2439,6 +2450,23 @@ void UpdateMapHoldLocked(uint64_t now) {
     }
 }
 
+void UpdateAutoGasBrakeCancelLocked(uint64_t now) {
+    if (!g_auto_gas || g_editing || g_controls_hidden ||
+        CurrentUiContext() != game::UiContext::Gameplay) {
+        g_auto_gas_brake_start_ms = 0;
+        return;
+    }
+    if (g_pressed[kIdxBrake]) {
+        if (g_auto_gas_brake_start_ms == 0) {
+            g_auto_gas_brake_start_ms = now;
+        } else if (now - g_auto_gas_brake_start_ms > kAutoGasBrakeCancelMs) {
+            ClearAutoGasLocked();
+        }
+    } else {
+        g_auto_gas_brake_start_ms = 0;
+    }
+}
+
 void UpdateTutorialLocked(uint64_t now) {
     const uint64_t dt_ms = (g_tut_last_ms != 0 && now >= g_tut_last_ms)
                                ? std::min<uint64_t>(now - g_tut_last_ms, 100u)
@@ -2703,13 +2731,14 @@ void Apply(int port, input::Pad& pad) {
     UpdateFmvHoldLocked(now);
     Recount();
     UpdateMapHoldLocked(now);
+    UpdateAutoGasBrakeCancelLocked(now);
     UpdateTutorialLocked(now);
     bool used = false;
     bool gas_held = false;
     int steer = 0;
     const auto ctx = CurrentUiContext();
     if (ctx != game::UiContext::Gameplay || g_controls_hidden) {
-        g_auto_gas = false;
+        ClearAutoGasLocked();
     }
     const bool analog = EffectiveAnalogMode();
     const bool is_bike = (ctx == game::UiContext::Gameplay) &&
@@ -2735,7 +2764,7 @@ void Apply(int port, input::Pad& pad) {
         }
     }
 
-    if (ctx == game::UiContext::Gameplay && g_auto_gas && !g_pressed[kIdxGas]) {
+    if (ctx == game::UiContext::Gameplay && g_auto_gas && !g_pressed[kIdxGas] && !g_pressed[kIdxBrake]) {
         ApplyRemappedAction(pad, game::GameAction::Gas, 0, kAnalogRT);
         gas_held = true;
         used = true;
@@ -2851,6 +2880,7 @@ void BuildOverlay(std::vector<Quad>& out) {
     const uint64_t now = NowMs();
     UpdateFmvHoldLocked(now);
     UpdateMapHoldLocked(now);
+    UpdateAutoGasBrakeCancelLocked(now);
     UpdateTutorialLocked(now);
 
     const bool editing = g_editing;
@@ -3680,7 +3710,7 @@ void ResetLayout() {
     g_layout = ComputeDefaultLayout(Width(), Height());
     g_opacity = kDefaultOpacity;
     g_auto_gas_dist = kDefaultAutoGasDist;
-    g_auto_gas = false;
+    ClearAutoGasLocked();
     g_scale = 1.0f;
     g_controls_hidden = false;
     SaveLayout();

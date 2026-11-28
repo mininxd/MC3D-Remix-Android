@@ -84,6 +84,10 @@ constexpr uint32_t kReflectionValues[] = {0, 1};
 const char* const kReflectionNames[] = {"Off", "On"};
 constexpr uint32_t kQualityLevelValues[] = {0, 1, 2};
 const char* const kQualityLevelNames[] = {"Off", "Low", "High"};
+constexpr uint32_t kSharpnessValues[] = {0, 1, 2};
+const char* const kSharpnessNames[] = {"Default", "Sharp", "Crisp"};
+constexpr uint32_t kShadowFilterValues[] = {0, 1};
+const char* const kShadowFilterNames[] = {"Sharp", "Smooth"};
 constexpr uint32_t kFmvScales[] = {0, 1};
 const char* const kFmvScaleNames[] = {"Fill", "4:3"};
 constexpr uint32_t kScreenFilters[] = {0, 1, 2, 3, 4, 5, 6, 7, 8};
@@ -159,7 +163,7 @@ enum RowId { kRenderResolution, kMaxFps, kVsync, kFpsCounter, kAniso, kReloadBlu
              kFmvScale, kGyro, kGyroSensitivity, kTouchLayout, kTouchOpacity, kTouchSize, kTouchEdit,
              kCheckUpdates, kTouchSensitivity, kLeftDeadzone, kRightDeadzone, kLeftSensitivity, kRightSensitivity,
              kScreenFilter, kGyroInvertX, kGyroInvertY, kTouchSkin, kCredit, kBloom,
-             kAntiAliasing, kMotionBlur, kReflections, kVolumetric, kDof, kTouchStick, kDynamicRes, kDynamicTarget, kDynamicMin,
+             kAntiAliasing, kMotionBlur, kReflections, kVolumetric, kDof, kTextureSharpness, kShadowFilter, kTouchStick, kDynamicRes, kDynamicTarget, kDynamicMin,
              kDynamicMax, kDynamicHold, kAutoUpdate, kTouchReset, kAutoBurnout, kDisplayLogs, kResetHints };
 
 using rows::Kind;
@@ -182,6 +186,8 @@ constexpr Row kQualityRows[] = {
     {Kind::Value, kMotionBlur, "Motion Blur"},
     {Kind::Value, kReflections, "Reflections"},
     {Kind::Value, kAniso, "Anisotropic Filtering"},
+    {Kind::Value, kTextureSharpness, "Texture Sharpness"},
+    {Kind::Value, kShadowFilter, "Shadow Filtering"},
     {Kind::Value, kVolumetric, "Volumetric Lighting"},
     {Kind::Value, kDof, "Depth of Field"},
 };
@@ -400,6 +406,14 @@ bool StepGraphicsRow(int id, int step, Settings& s, char (&text)[64]) {
         case kDof:
             std::snprintf(text, sizeof(text), "%s",
                           kQualityLevelNames[StepTable(kQualityLevelValues, o.dof, step)]);
+            return true;
+        case kTextureSharpness:
+            std::snprintf(text, sizeof(text), "%s",
+                          kSharpnessNames[StepTable(kSharpnessValues, o.texture_sharpness, step)]);
+            return true;
+        case kShadowFilter:
+            std::snprintf(text, sizeof(text), "%s",
+                          kShadowFilterNames[StepTable(kShadowFilterValues, o.shadow_filter, step)]);
             return true;
         case kDrawDistance:
             std::snprintf(text, sizeof(text), "%s", kDistanceNames[StepTable(kDistances, o.draw_distance, step)]);

@@ -3867,11 +3867,14 @@ VkBorderColor Border(uint32_t argb) {
 VkSampler VulkanBackend::StageSampler(const State& s, int i, const DrawTextures& stages, bool clamp) {
     const auto& t = s.tss[size_t(i)];
     const uint32_t user_aniso = app::Get().aniso;
+    const uint32_t tex_sharp = std::min(game::Opt().texture_sharpness, 2u);
+    const uint32_t shadow_filt = std::min(game::Opt().shadow_filter, 1u);
     const uint32_t shadow_func = stages.info[i].shadow ? CmpIndex(s.rs[kRsShadowFunc]) : 0u;
     const bool filterable = stages.fmt[i] != VK_FORMAT_R32_SFLOAT || r32f_linear_;
     const uint32_t flags = (clamp ? 1u : 0u) | (filterable ? 2u : 0u) | (stages.rt[i] ? 4u : 0u) |
                            (stages.info[i].shadow ? 8u : 0u) | (stages.info[i].rect ? 16u : 0u) |
-                           (uint32_t(stages.info[i].kind & 3u) << 5) | (shadow_func << 8);
+                           (uint32_t(stages.info[i].kind & 3u) << 5) | (shadow_func << 8) |
+                           (tex_sharp << 11) | (shadow_filt << 13);
     const uint32_t sk[12] = {
         t[kTssMagFilter], t[kTssMinFilter], t[kTssMipFilter], t[kTssMaxAnisotropy],
         t[kTssAddressU], t[kTssAddressV], t[kTssAddressW], t[kTssMipLodBias],
@@ -3917,6 +3920,10 @@ VkSampler VulkanBackend::StageSampler(const State& s, int i, const DrawTextures&
     const float limit = props_.limits.maxSamplerLodBias;
     float bias = mipped ? std::clamp(Bits(t[kTssMipLodBias]), -limit, limit) : 0.0f;
     if (sd.anisotropyEnable) bias = std::clamp(bias, -0.5f, 0.5f);
+    if (eligible_af && tex_sharp > 0u) {
+        constexpr float kSharpOffsets[3] = {0.0f, -0.35f, -0.70f};
+        bias = std::clamp(bias + kSharpOffsets[tex_sharp], -limit, limit);
+    }
     sd.mipLodBias = bias;
     sd.minLod = std::min(float(t[kTssMaxMipLevel]), float(stages.levels[i] - 1));
     sd.maxLod = mip ? VK_LOD_CLAMP_NONE : sd.minLod;
@@ -3924,7 +3931,7 @@ VkSampler VulkanBackend::StageSampler(const State& s, int i, const DrawTextures&
     if (stages.info[i].shadow) {
         // the console tests texel OP r, Vulkan r OP texel
         static const uint8_t swap[8] = {0, 4, 2, 6, 1, 5, 3, 7};
-        bool linear = (lin(min) || lin(mag)) && depth_linear_;
+        const bool linear = (shadow_filt != 0u) && depth_linear_;
         sd.minFilter = sd.magFilter = linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
         sd.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
         sd.compareEnable = VK_TRUE;
